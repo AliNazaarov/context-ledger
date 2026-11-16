@@ -1,6 +1,6 @@
 # Latent read contract (M2a, "warm telepathy")
 
-Status: **approved by Ali on 2026-11-07** (`q-latent-contract`), with the changes from the independent review (L14) applied. Merged by Leo's agent on Ali's proposal in PR #4: Ali's path, file-text and secrets rules, plus Leo's live-verified limits (5 s busy wait, 15 s receive deadline, disconnect check), the string `preambleVersion` `"2"` and the cycle 6b preamble. `leo/latent-read` and `ali/latent-pool` carry this same copy.
+Status: **approved by Ali on 2026-11-07** (`q-latent-contract`), with the changes from the independent review (L14) applied. Merged by Leo's agent on Ali's proposal in PR #4 (a draft that was closed without merging; `leo/latent-read` reached `main` through PR #6 on 2026-11-08): Ali's path, file-text and secrets rules, plus Leo's live-verified limits (5 s busy wait, 15 s receive deadline, disconnect check), the string `preambleVersion` `"2"` and the cycle 6b preamble. `leo/latent-read` and `ali/latent-pool` carry this same copy.
 
 ## The idea
 
@@ -195,4 +195,4 @@ A fallback can hold up to 512 KiB of numbered text, which is more than one MCP r
 
 ## Gate (from the roadmap)
 
-On the synthetic codebase Q&A set in `evals/latent/`, `latent_read` matches the closed model's accuracy when that model reads everything, using a small fraction of its tokens. See `docs/evals.md`, cycle 6.
+On the synthetic codebase Q&A set in `evals/latent/`, `latent_read` should match the closed model's accuracy when that model reads everything, using a small fraction of its tokens. Recorded result: it does not match. The Qwen2.5-7B pool scores 14/16 to Claude Sonnet's 16/16, with a slice of 5–9% of the prefix tokens. See `docs/evals.md`, cycle 6 ("Gate verdict").

@@ -843,6 +843,10 @@ Source: a review of the project map (floorplan) against CI, the handoff notes an
 - **`runtime/latent_pool/server.py` and `__init__.py` docstrings.** They now name the M2b and M2c routes the server also serves, and the `LATENT_ALLOWED_HOSTS` opt-in to the Host check. Source: `LatentServer.routes`, `Handler._allowed`, `_allowed_hosts`.
 - **`docs/latent-read.md`.** The 501 row said the ledger never calls `/latent/transfer`; the ledger's `latent_transfer` calls it and falls back to text on 501 (`src/latent.mjs`, transfer handler). The `GET /latent/mappers` section no longer says no pair exists; it describes the hashed pair list and `LATENT_MAPPER` (`mappers.py` `pairs()`, `transfer.py`).
 - **`docs/m2b-transfer.md`, Serving.** The request body now lists exactly one of `text` or `paths` and `maxNewTokens` (1 to 64, default 32), and the `LATENT_MAPPER` startup load. Source: `transfer.py` `FIELDS`, `document()` and `__call__`.
+- **Codex review** (read-only, of `claude/housekeeping-claim...ae7ee56`): it found the changed figures and runtime descriptions match their sources and no behaviour change, and raised two findings in `docs/latent-read.md`, both fixed:
+  - **Status line still credited PR #4** (medium). It now says PR #4 was a draft closed without merging and that `leo/latent-read` reached `main` through PR #6 on 2026-11-08. Source: `gh pr view 4` (CLOSED, not merged) and `gh pr view 6` (MERGED 2026-11-08, body lists `leo/latent-read`).
+  - **The gate section said `latent_read` matches the closed model** (low). It now states the gate as a target and the recorded result: 14/16 to Claude Sonnet's 16/16, slice 5–9% of the prefix tokens. Source: this file, cycle 6, "Gate verdict" and "Cost".
+  - These are documentation and docstring changes only, so there is no code to regression-test; the Python suite was re-run after the docstring edits.
 - **Suites (Windows, this branch):** node 139/140 (one skipped), Python runtime 131 run, OK (24 skipped). Playwright not run (fixed port); 13 tests listed. No raw control or format characters in the changed files.
 
 ### H3 — Split the MCP adapter (`claude/h3-split-mcp`)
