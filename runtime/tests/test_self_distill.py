@@ -7,7 +7,7 @@ import types
 import unittest
 from unittest import mock
 
-from test_latent_training import HAVE_TORCH, QUESTION, SOLUTION, tiny_team, train_args
+from tests.test_latent_training import HAVE_TORCH, QUESTION, SOLUTION, tiny_team, train_args
 
 SHORT = "What is 2 + 3?"
 
