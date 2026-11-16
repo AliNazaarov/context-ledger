@@ -13,7 +13,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from . import ApiError
+from . import ApiError, rules
 from .prefix import load_files, prefix_id, render_prefix
 
 PREAMBLE = (
@@ -119,9 +119,9 @@ QUOTE_ENUM_MAX_CHARS = 60_000
 
 # The characters JavaScript's \s matches with the u flag, which the ledger folds in quotes
 # (normalizeSpace in src/latent.mjs). str.split() differs: it also splits on U+001C-U+001F
-# and U+0085, and not on U+FEFF. Built from code points so the source holds no raw ones.
-JS_SPACE_CODE_POINTS = (0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0xA0, 0x1680, *range(0x2000, 0x200B),
-                        0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF)
+# and U+0085, and not on U+FEFF. The list is rules/latent-rules.json quoteWhitespace,
+# shared with the ledger's tests, and built from code points so no source holds raw ones.
+JS_SPACE_CODE_POINTS = rules.QUOTE_SPACE_CODE_POINTS
 _JS_SPACE_RUN = re.compile("[" + "".join(re.escape(chr(code)) for code in JS_SPACE_CODE_POINTS) + "]+")
 
 

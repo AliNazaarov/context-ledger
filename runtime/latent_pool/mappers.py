@@ -1,8 +1,14 @@
-"""M2b scaffold: a registry of trained latent mappers between model pairs.
+"""M2b: a registry of trained latent mappers between model pairs.
 
-A mapper would carry hidden state from a sender model to a receiver model of a
-different family. None is trained yet, so the registry starts empty and
-/latent/transfer answers 501. The scaffold fixes the shape for later work.
+A mapper carries a sender model's KV cache into a receiver model of a different
+family. The registry keys mappers by (sender model hash, receiver model hash) and
+backs GET /latent/mappers and POST /latent/transfer. It starts empty. When the
+runtime starts with LATENT_MAPPER=<checkpoint>, transfer.register_from_env loads
+that one trained pair and registers its TransferService here. One pair is trained
+so far (Qwen2.5-0.5B to SmolLM2-360M, docs/m2b-transfer.md).
+
+/latent/transfer answers 501 when no mapper is registered for the requested
+sender and receiver, for example when LATENT_MAPPER is not set.
 """
 
 import hashlib

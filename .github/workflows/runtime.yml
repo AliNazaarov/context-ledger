@@ -1,0 +1,32 @@
+name: Runtime checks
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    name: runtime (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.12'
+          - os: windows-latest
+            python: '3.13'
+    defaults:
+      run:
+        working-directory: runtime
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # Standard library only: no pip install. Checks that need torch and
+      # transformers skip with a reason; -v prints each check and the counts.
+      - run: python -m unittest discover -s tests -t . -v
