@@ -820,7 +820,14 @@ Source: a review of the project map (floorplan) against CI, the handoff notes an
 | A failing check fails the job | With one runtime assertion deliberately broken, the same command exits non-zero (checked locally, not committed). |
 | Nothing else changes | The node and Playwright steps are unchanged. Actions are pinned to the same major versions the workflow already uses. No secrets, no network beyond checkout and setup. |
 
-**Results — H1:** pending.
+**Results — H1:** passed locally; the first hosted run is still to be read.
+
+- **Runs on every push and pull request — passed.** The new `.github/workflows/runtime.yml` runs `python -m unittest discover -s tests -t . -v` in `runtime/` on `push` and `pull_request`, as a matrix of `ubuntu-latest` with Python 3.12 and `windows-latest` with Python 3.13 (`fail-fast: false`). It has no `pip install`, `permissions: contents: read`, no secrets, and checkout does not keep credentials. Every skipped check prints a reason. The 21 torch checks say "torch and transformers are needed for M2b" or "... for M2c". `e2e.yml` is unchanged. The workflow parses with PyYAML 6.0.1 (WSL system Python).
+- **Same result as locally — passed for Linux; Windows count to confirm on the hosted run.** Windows, Python 3.13.0: 131 run, 24 skipped, OK. That is 21 torch checks plus 3 symlink checks (`test_prefix` ×2, `test_review_fixes` ×1), which skip because this user does not have the symlink privilege. WSL Ubuntu-24.04, Python 3.12.3: 131 run, 21 skipped, OK, both on `/mnt/c` and in a clean `git archive` of the branch on ext4. GitHub's Windows runners run as administrator, so the symlink checks should run there too. Expected hosted counts: 131 run, 21 skipped on both jobs.
+- **A failing check fails the job — passed.** I broke one assertion in `runtime/tests/test_limits.py` line 60 for the test only, then reverted it without committing. The command exited 1 on Windows (`FAILED (failures=1, skipped=24)`) and on WSL (`FAILED (failures=1, skipped=21)`). After the revert it exited 0.
+- **Nothing else changes — passed.** The new workflow uses `actions/checkout@v4`, the same major version as `e2e.yml`, and `actions/setup-python@v5`. It needs no network beyond checkout and setup-python. AGENTS.md section 4 step 3 and the pull request template checklist now list the Python command.
+- **Codex read-only review:** one low finding. The Windows skip count may differ on hosted runners because they run as administrator. Accepted: the expected hosted count is recorded above, and confirming it is left open until the first CI run. No code change was needed, because the symlink checks already run and pass on Linux. No other findings.
+- **Suites (Windows):** node 139/140 (one skipped). Python runtime: 131 run, 24 skipped on Windows; 131 run, 21 skipped on WSL. Playwright was not run here because its port is fixed; the change touches no browser journey.
 
 ### H2 — Docs match what is merged (`claude/h2-stale-docs`)
 
