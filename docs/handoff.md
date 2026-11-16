@@ -127,3 +127,26 @@ Next steps:
 3. Merge with `vuek0/subagent-graphs` once that branch has its own PR and review. Expect conflicts in `src/mcp.mjs` (the instructions string and `context_for`), and check `src/store.mjs` and `src/server.mjs`. Add `handoff_publish` to the tool names in `tests/mcp.test.mjs`.
 4. Review round 4 is settled (one low, fixed in d1600d2). PR #8 was merged into `main` on 2026-11-12 (17ecef0) without a recorded review: GitHub shows no reviews and no comments on it. The human review of the stored-schema change (migration to version 1 in `src/migrate.mjs`) is still owed.
 5. Backlog cards G7 to G12 on [the delivery board](delivery-board.md) come from a comparison with the public Graphify repository. G7 (quoted or inferred nodes) and G10 (a published handoff benchmark) are the cheapest and strengthen the pitch most.
+
+## Current checkpoint — housekeeping H1–H5 and G10 (2026-11-16)
+
+Six cards from a review of the project map against CI, these notes and the board. Each is on its own local branch, all from the claim commit `claude/housekeeping-claim` (8a41b0e), which claims the cards on the board and defines their evals in [the eval log](evals.md). None is pushed. Results, review outcomes and suite counts are under each card's **Results** heading in the eval log.
+
+| Card | Branch | What changed |
+| --- | --- | --- |
+| H1 | `claude/h1-runtime-ci` | `.github/workflows/runtime.yml` runs the Python runtime checks on Ubuntu (3.12) and Windows (3.13). AGENTS.md and the PR template list the command. |
+| H2 | `claude/h2-stale-docs` | README, these notes, `docs/latent-read.md`, `docs/m2b-transfer.md` and runtime docstrings now match `main`. This checkpoint is on this branch. |
+| H3 | `claude/h3-split-mcp` | `src/mcp.mjs` is split into `src/mcp/` (largest file 173 lines). `initialize` and `tools/list` output is byte-identical. |
+| H4 | `claude/h4-shared-rules` | `rules/latent-rules.json` holds the secret-file rule and the quote whitespace for both languages, and `rules/latent-conformance.json` holds cases both suites run. The Python grader port moved to `runtime/tests/grade.py` and now matches `grade.mjs`. |
+| H5 | `claude/h5-server-routes` | `src/server.mjs` dispatches from a table of requests and names the runtime's default address once. `tests/routes.test.mjs` pins 192 responses. |
+| G10 | `claude/g10-handoff-benchmark` | `BENCHMARKS.md` and `evals/handoff/`: 14 graded facts, two graders checked against 82 labelled answers, a runner with a Git-ignored spend log. No live runs yet. |
+
+All six were reviewed by Codex (read-only) and merge together without conflicts. Checked together on one throwaway merge of all six (Windows, 2026-11-16): node 162/163 (one skipped), Python runtime 140 run (24 skipped), Playwright 13/13, and no raw control or format characters. Playwright also passes 13/13 on each branch alone. That check found one bug, fixed on the G10 branch: its hidden-character test failed on a CR LF checkout.
+
+Next steps:
+
+1. Push the claim branch and the six branches, and open one PR per card. Merge the claim commit with the first one.
+2. **Merge order with `vuek0/subagent-graphs`.** H3 and H5 both touch files that branch changes. After H3, its `src/mcp.mjs` changes become one large conflict instead of two small ones; the H3 results map each change to its new file. Decide which lands first. Merging `vuek0/subagent-graphs` first and then rebasing H3 and H5 is likely cheaper.
+3. Confirm the hosted counts on the first `runtime.yml` run: 131 run and 21 skipped are expected on both jobs (Windows runs 3 more locally skipped symlink checks).
+4. G10: a person checks the 82 labels in `evals/handoff/labelled.json`, then live runs (`node evals/handoff/run.mjs --agent claude --model M --runs 10`, the same for codex, then `--summary`). Check token and cost parsing on the first live Claude run.
+5. Still owed from earlier: Ali's review of the runtime changes from cycle 9, and the human review of PR #8's schema migration.
