@@ -886,3 +886,435 @@ Source: a review of the project map (floorplan) against CI, the handoff notes an
 | No paid runs here | Live runs with Claude Code and Codex are not part of this card; the results say how to run them. |
 
 **Results — G10:** pending.
+
+## Cycle 11 — Latent runtime performance baseline (defined 2026-11-12, before measuring)
+
+Card C11. Until now the latent runtime had accuracy evals but no performance figures. This cycle measures it on the RTX 4090 Laptop GPU (16 GB), vLLM 0.33.0 in WSL2, with the synthetic fixtures only.
+
+### What is measured
+
+A new harness, `evals/latent/perf.mjs`, sends the dev set (`questions.json`, 8 questions, `evals/latent/fixture`) through the ledger's `/api/latent/read`, as `run.mjs` does, and reads vLLM's Prometheus `/metrics` before and after every read. For each configuration it reports:
+
+1. **Time to first token (TTFT):** mean, p50 and p90 over every vLLM call, from vLLM's TTFT histogram. Quantiles come from the histogram buckets, so they are bucket estimates.
+2. **Prefix-cache hit rate:** vLLM's prefix-cache hits divided by queries (tokens), cross-checked against the receipts' `cachedTokens / promptTokens`.
+3. **Tokens per second:** per-request decode speed (1 / mean time per output token) and the aggregate rate (generated tokens / wall time of the reads).
+4. **Memory:** GPU memory used after loading and the peak during the run (`nvidia-smi`, sampled every 200 ms), the size of vLLM's KV-cache pool, the peak KV-cache use, and the KV memory per request: tokens of that request times the KV bytes per token from the model's config (layers × KV heads × head dim × 2 × bytes per value). Weights are shared by every request, so the KV cache is the per-request part.
+5. **End-to-end read latency:** p50 and p90 of the ledger call, which is what an agent waits for.
+6. **Accuracy:** the existing grader on the same reads (correct and cited), so a faster setting that loses answers is visible.
+
+### Configurations
+
+- **A.** Default: Qwen2.5-7B-Instruct-AWQ, strict citations off, files on `/mnt/c`.
+- **B.** Qwen2.5-14B-Instruct-AWQ, strict citations on, max model length 8192 (the cycle 9 strict setup).
+- Quick wins, each measured against A in the same session:
+  - **C.** FP8 KV cache (`--kv-cache-dtype fp8`).
+  - **D.** N-gram speculative decoding (prompt lookup), since cited answers copy text from the files in the prompt.
+  - **E.** The fixture copied to the WSL disk, so the pool does not read through `/mnt/c`.
+  - **F.** FP8 weights (`RedHatAI/Qwen2.5-7B-Instruct-FP8-dynamic`) instead of AWQ.
+- For B, the 14B run is also repeated with C, because FP8 KV is the cheapest way to raise its 8192-token limit.
+
+### Acceptance
+
+- Unit tests (`node:test`) for the pure parts: Prometheus text parsing, counter and histogram deltas, bucket quantiles, KV bytes per token, and the report summary. They run without a GPU.
+- Each configuration runs 3 rounds of the 8 dev questions (24 reads) and produces a report with every metric present, or a stated reason why vLLM does not export it.
+- A quick win is recommended as a default only if it improves its target metric and loses at most one correct-and-cited answer out of 24 against A in the same session. Otherwise it is recorded and left off.
+- The numbers are for one laptop GPU and one synthetic fixture; the doc says so wherever they are quoted.
+
+## Results — Cycle 11 (latent runtime performance), 2026-11-12
+
+Hardware and software: RTX 4090 Laptop GPU (16 GB), WSL2 Ubuntu 24.04, vLLM 0.33.0, `--gpu-memory-utilization 0.85`, prefix caching on. Each configuration ran the 8 dev questions 3 times (24 reads; a successful read makes 6 vLLM calls) through a test ledger, with `evals/latent/perf.mjs`. These figures are for one laptop GPU and one small synthetic fixture (5 files, about 1,900 tokens of prefix). They show where the time goes, not what a larger repository would cost.
+
+How to read the table: TTFT is from vLLM's histogram, so p50 and p90 are bucket estimates. "Tokens/s per request" is 1 / mean time per output token; "aggregate" is generated tokens / summed read time. "KV MiB per read" has two figures: the sampled peak (the highest KV-cache use seen by a 200 ms poll × pool size × KV bytes per token; a shorter spike between polls can be missed) and the mean token-based upper bound (every call's prompt and completion tokens, counting the shared prefix once per call, averaged over the reads). A, A2, A3 and A4 are the same default setup run at different times in the session, to show the run-to-run spread.
+
+| Config | Correct and cited | TTFT ms mean / p50 / p90 | Prefix-cache hits | Tokens/s per request / aggregate | Read s p50 / p90 | Cold read s | GPU MiB idle / peak | KV pool tokens | KV MiB per read: sampled peak / mean token-based upper bound | Spec. acceptance | Failed reads |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A | 18/24 | 89 / 40 / 179 | 96.7% | 88.5 / 98.6 | 5.18 / 8.19 | 11.6 | 14078 / 14410 | 137136 | 151 / 706 | — | 0 |
+| A2 | 18/24 | 94 / 40 / 176 | 96.8% | 89.5 / 99.8 | 5.13 / 7.72 | 11.4 | 14078 / 14410 | 137136 | 151 / 705 | — | 0 |
+| A3 | 18/24 | 132 / 39 / 180 | 96.8% | 88.8 / 97.3 | 5.23 / 7.87 | 12.4 | 14078 / 14410 | 137136 | 151 / 705 | — | 0 |
+| A4 | 18/24 | 122 / 40 / 194 | 96.8% | 90.0 / 99.1 | 5.16 / 7.70 | 12.2 | 14078 / 14410 | 137136 | 151 / 705 | — | 0 |
+| A-triton | 18/24 | 101 / 41 / 186 | 96.8% | 92.6 / 101.5 | 5.07 / 7.50 | 11.7 | 14074 / 14423 | 137136 | 151 / 705 | — | 0 |
+| C | 0/24 | 61 / 31 / 39 | 97.8% | 121.2 / 75.4 | n/a / n/a | failed | 14074 / 14414 | 273616 | 66 / n/a | — | 24 |
+| D | 18/24 | 101 / 44 / 180 | 96.8% | 105.4 / 135.5 | 3.67 / 5.22 | 9.2 | 14088 / 14420 | 135200 | 151 / 705 | 33% | 0 |
+| E | 18/24 | 126 / 44 / 199 | 96.8% | 96.7 / 109.4 | 4.56 / 7.17 | 11.4 | 14078 / 14410 | 137136 | 151 / 705 | — | 0 |
+| E2 | 18/24 | 97 / 44 / 176 | 96.8% | 96.7 / 109.0 | 4.59 / 7.15 | 11.7 | 14078 / 14410 | 137136 | 151 / 705 | — | 0 |
+| E3 | 18/24 | 108 / 43 / 179 | 96.7% | 97.0 / 109.6 | 4.57 / 7.44 | 11.6 | 14078 / 14410 | 137136 | 151 / 706 | — | 0 |
+| F | 16/24 | 102 / 55 / 212 | 95.2% | 55.9 / 62.4 | 8.55 / 11.96 | 11.8 | 13306 / 13584 | 66960 | 154 / 705 | — | 0 |
+| B | 21/24 | 323 / 327 / 499 | 89.4% | 48.1 / 59.8 | 17.14 / 19.36 | 21.5 | 14144 / 14438 | 17104 | 616 / 2579 | — | 0 |
+| B-C | 20/24 | 200 / 68 / 453 | 93.5% | 51.2 / 64.4 | 14.48 / 18.72 | 21.0 | 12892 / 13186 | 21168 | 303 / 1283 | — | 0 |
+
+Configurations: A = Qwen2.5-7B-Instruct-AWQ, default settings (FLASH_ATTN). A-triton = A on the Triton attention backend. C = FP8 KV cache (Triton). D = n-gram speculative decoding, 4 draft tokens. E = the fixture on the WSL disk instead of `/mnt/c`. F = FP8 weights (`RedHatAI/Qwen2.5-7B-Instruct-FP8-dynamic`). B = Qwen2.5-14B-Instruct-AWQ with strict citations and a max model length of 8192. B-C = B with an FP8 KV cache (Triton).
+
+### The baseline (A)
+
+- **Time to first token:** 40 ms at p50 and 179 ms at p90; the mean of about 90–130 ms is pulled up by the calls whose prefix is not cached yet. The first read on a new prefix (cold) takes 11.6 s against about 5.6 s for the rest.
+- **Prefix cache:** 96.8% of prompt tokens are served from the cache. vLLM's counters and the receipts agree to the third decimal.
+- **Decode:** about 89 tokens/s per request, 98–100 tokens/s aggregate. A read waits 5.2 s at p50 and 7.7–8.2 s at p90.
+- **Memory:** the 4-bit weights take 5.29 GiB, and vLLM's 85% reservation holds the GPU at 14,078 MiB (13.7 GiB) from the start; a run adds 332 MiB. The KV pool holds 137,136 tokens (7.32 GiB at 56 KiB per token). The sampled peak of one read is about 151 MiB (2% of the pool). Counting every call's tokens separately gives 706 MiB on average (731.5 MiB at most), about 4.7× the sampled peak, which is consistent with the six calls sharing the prefix blocks. The sampled peak is a lower bound on the true peak, so the 4.7× is an estimate, not a measured reduction.
+- **Run-to-run spread:** across A, A2, A3 and A4, read p50 stays within 5.13–5.23 s and decode within 88.5–90.0 tokens/s.
+
+### The quick wins
+
+- **D, n-gram speculative decoding: recommended.** Reads drop from about 5.2 s to 3.67 s at p50 (−29%) and from 7.7–8.2 s to 5.22 s at p90. Aggregate throughput rises from about 99 to 135.5 tokens/s (+37%). Accuracy is unchanged at 18 of 24. 33% of drafted tokens are accepted. It works alongside the JSON-schema structured outputs. It is opt-in for now (`VLLM_NGRAM=1`), because the runtime defaults are Ali's to change.
+- **C, FP8 KV cache: rejected for the 7B model.** The pool doubles to 273,616 tokens, but all 24 reads fail: the planner's structured replies come back with wrong content. The grammar still holds, so the JSON parses, but its content is wrong. vLLM warns that FP8 KV without scaling factors can lose accuracy, and these AWQ checkpoints carry no KV scales. vLLM 0.33 cannot compute scales at load time. The backend is not the cause: A-triton matches A. FLASH_ATTN on this GPU does not take an FP8 KV cache, and FlashInfer needs `nvcc`, so Triton is the only backend that runs it here. (C's TTFT and tokens/s come from the failing planner calls only.)
+- **B-C, FP8 KV cache on the 14B strict setup: usable.** It loses one answer (20 of 24 against 21), inside the acceptance rule, and keeps 24 of 24 citations. Reads are 15% faster (14.5 s against 17.1 s at p50), with mean TTFT 200 ms against 323 ms. The capacity gain is smaller than expected: KV bytes per token halve, but vLLM gave the pool 1.94 GiB instead of 3.13 GiB, so the pool grew only from 17,104 to 21,168 tokens. That is not enough to lift the 8192-token limit much. Why vLLM sizes the pool smaller here is not yet known. It is opt-in (`VLLM_KV_FP8=1`).
+- **E, files on the WSL disk: faster, cause unknown.** Three E runs gave reads of 4.56–4.59 s at p50, against 5.13–5.23 s for the four default runs, alternated in the same session. Decode was 96.7–97.0 against 88.5–90.0 tokens/s. Prompt totals agree within 0.1% and output totals within 3.1% across these seven runs, the root path is not in the prompt, and the pool reads the files once per request. So the file read itself cannot explain a faster per-token decode. The measurement is reproducible, but the mechanism is not established. Until it is, the advice is: keep `LATENT_ROOT` on the WSL disk when the files can live there.
+- **F, FP8 weights: rejected.** Decode drops from about 89 to 56 tokens/s and reads take 8.55 s at p50. Two fewer answers are correct and cited (16 against 18). Single-request decode is limited by memory bandwidth, and the FP8 weights load as 8.18 GiB against 5.29 GiB for AWQ, about 1.5× the bytes read per generated token. The larger weights also halve the KV pool to 66,960 tokens.
+
+### The 14B strict setup (B)
+
+21 of 24 correct and cited, with every answer cited. It costs 17.1 s per read at p50 (3.3× A), 323 ms mean TTFT and 48 tokens/s decode. Its KV pool is only 17,104 tokens (3.13 GiB at 192 KiB per token) once the 9.38 GiB of weights are loaded, and one read peaks at 616 MiB, about 19% of the pool. This is why the 14B model runs with a max model length of 8192.
+
+### Open after this cycle
+
+- Why the files' location changes decode speed (E).
+- Why the FP8 KV pool is smaller than expected on the 14B model (B-C), and whether a higher `--gpu-memory-utilization` recovers the full 2× capacity.
+- FP8 KV for the 7B model would need a checkpoint with calibrated KV scales.
+- vLLM 0.33 refuses GPTQ checkpoints with `desc_act=True` (the RedHat W4A16 builds of Llama 3.1 and Mistral v0.3), found while preparing cycle 12.
+
+### Suites and review
+
+- Node 168/169 (one skipped); `tests/perf.test.mjs` 29/29 runs without a GPU. Graph 9/9, Playwright 13/13, runtime unittest OK (24 skipped).
+- The `serve-vllm.sh` switches were checked with a stub `vllm` that prints its arguments: default, `VLLM_NGRAM=1`, `VLLM_KV_FP8=1` and both.
+- **Harness reviews:** the harness was built by a Claude subagent, then reviewed by Codex and a separate Claude reviewer. They raised nine findings: mid-run restarts, failed scrapes, failed reads in latency, a lost in-flight KV sample, an unchecked `--kv-dtype`, the TPOT fallback, a correct-and-cited count and missing tests. All nine are fixed with tests in de4e060. The speculative-decoding counters were added in c224f74.
+- **PR review:** a second Codex pass covered the whole PR, including a data check that recomputed every figure in this section from the raw reports and vLLM logs. It confirmed the main comparisons: D is 29.2% faster at p50 with 37.3% more throughput and 32.6% of drafts accepted; B-C is 15.5% faster; B is 3.31× A. It raised eight findings, all fixed in b451511, each code fix with a test. A confirming pass found one more low: a `--repeat` of 309 nines overflowed to Infinity. It is fixed with a safe-integer check and a test. The eight were:
+  - An explicit `--model` that vLLM does not serve is now refused.
+  - `nvidia-smi` samples one GPU (`--gpu`).
+  - `--repeat` must be a positive whole number.
+  - Five wording fixes: the sampled peak, MiB units, the mean upper bound, six calls per successful read, and the 3.1% output spread.
+
+## Cycle 12 — Multi-LLM latent runtime (defined 2026-11-12, before measuring)
+
+Card C12. Until now every latent measurement used Qwen, and the latent team (M2c) refused any chat template that was not ChatML. This cycle checks which parts work with other open model families and makes the latent team work with them.
+
+### What changes
+
+- **M2a pool:** no code change is expected. It talks to vLLM's OpenAI-compatible API, so any model vLLM can serve with a chat template should work. This cycle measures that instead of assuming it.
+- **M2c latent team:** the turn texts (the open turn a later agent writes and the text that closes a turn) are derived from the tokenizer's own chat template by rendering small conversations and taking string differences, in `runtime/latent_team/chat_turns.py`. The ChatML strings stay byte-identical, so earlier M2c results stay comparable. A template the derivation cannot handle is refused with an error naming the model. The stop tokens come from the tokenizer and generation config plus the derived close token, instead of a fixed list.
+- **M2b transfer:** unchanged. A mapper is trained for one sender and receiver pair, so another pair needs its own training run. This is recorded, not built.
+
+### Models
+
+All are public, with no license gate and no custom code, loaded from their safetensors only:
+
+- Qwen2.5-7B-Instruct-AWQ: the reference.
+- Llama 3.1 8B Instruct, AWQ INT4 (`hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4`, Llama 3.1 Community License).
+- Mistral 7B Instruct v0.3, GPTQ 4-bit (`RedHatAI/Mistral-7B-Instruct-v0.3-GPTQ-4bit`, Apache-2.0).
+- Granite 3.1 8B Instruct, W4A16 (`RedHatAI/granite-3.1-8b-instruct-quantized.w4a16`, Apache-2.0).
+- For M2c, which runs unquantized in transformers: Phi-3.5-mini-instruct (MIT). It is not ChatML, and it has separate input and output embeddings, so it also covers the untied case that cycle 9 left open.
+- vLLM 0.33.0 refuses GPTQ checkpoints with `desc_act=True` (the RedHat W4A16 builds of Llama 3.1 and Mistral v0.3), which is why the AWQ and `desc_act=False` builds are used.
+
+### Acceptance
+
+- Unit tests without a GPU or network: for each of seven template families (Qwen2.5, SmolLM2, Phi-3.5, Llama 3.1, Mistral v0.3, Granite 3.1, OLMo-2), the first turn, a later turn with no system block, and the close turn. ChatML must stay byte-identical. A regression test fails on the a8808ad bug for templates that inject a default system block.
+- A check on the real cached tokenizers derives the turns for Qwen2.5, SmolLM2, Phi-3.5, Llama 3.1, Mistral v0.3 and Granite 3.1.
+- **M2a live:** each model runs the dev and held-out sets, 3 rounds each, through the unchanged pool, with the cycle 11 harness on the dev set. The result per family is its accuracy and citations next to the Qwen reference, plus its performance figures. A family "works" when every read returns a graph (no runtime errors). Its accuracy is reported, not gated, because these are untuned models.
+- **M2c live:** `latent_team.evaluate` on Phi-3.5-mini with the same protocol as cycle 9 (single, text_mas, latent_mas and the random control), on a disjoint block. It "works" when every system runs end to end and the random control scores below latent_mas. Whether latent_mas beats single is reported, not required.
+
+## Results — Cycle 12 (multi-LLM latent runtime), 2026-11-12
+
+Same machine and harness as cycle 11: RTX 4090 Laptop GPU, vLLM 0.33.0, default settings, strict citations off. Each model ran the dev set 3 times with `perf.mjs` and the held-out set 3 times with `run.mjs`, through the same pool code. The held-out gate is the M2a one: accuracy and citations each at least 7 of 8, plus the slice and cache shares.
+
+### M2a pool across four families
+
+| Model | Dev: correct and cited (24) | Held-out: correct and cited per round (8) | Held-out passes the gate | Read s p50 (dev) | TTFT ms p50 / p90 | Tokens/s per request | Prefix-cache hits | KV KiB per token | KV pool tokens | Failed reads |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Qwen2.5-7B AWQ | 18 | 7, 7, 7 | 3 of 3 | 4.89 | 40 / 186 | 90.8 | 96.8% | 56 | 137136 | 0 |
+| Llama 3.1 8B AWQ | 12 | 6, 6, 6 | 0 of 3 | 8.62 | 38 / 189 | 84.9 | 96.3% | 128 | 59760 | 0 |
+| Mistral 7B v0.3 GPTQ (folded system) | 24 | 5, 4, 4 | 0 of 3 | 7.93 | 38 / 193 | 93.6 | 96.8% | 128 | 73232 | 0 |
+| Granite 3.1 8B W4A16 | 21 | 7, 7, 7 | 3 of 3 | 11.06 | 47 / 243 | 79.7 | 95.4% | 160 | 53648 | 0 |
+
+- **Every family works.** After one fix, none of the 4 × 48 reads failed. Accuracy is reported, not gated, because these models are untuned.
+- **Mistral needed the one code change.** On the first run all 24 Mistral reads failed with 502: its chat template refuses a system message ("Conversation roles must alternate"), and the pool sends the shared prefix as a system message. `VllmClient` now retries such a refusal once with the system text opening the user message, and keeps folding for later calls. vLLM logged exactly one refusal in the rerun. The system text is still the start of every prompt, so the prefix cache hit 96.8%, as with Qwen. Of the four families, Mistral scores best on the dev set (24 of 24) but cites least on the held-out set (5 of 8 in every round), so it fails that gate on citations.
+- **Granite 3.1 does at least as well as Qwen:** on the dev set it is 24 of 24 correct (21 also cited) against Qwen's 21 of 24 (18 cited). On the held-out set the two are equal at 7 of 8 with every answer cited, passing the gate in all three rounds. It is the slowest at 11.1 s per read.
+- **Llama 3.1 is the weakest here:** 12 of 24 on the dev set and 6 of 8 on the held-out set. It cites every held-out answer but gets two wrong.
+- **Cost differs mostly through the KV cache.** Qwen2.5-7B stores 56 KiB of KV per token (4 KV heads); Llama 3.1 and Mistral store 128 KiB (8 KV heads, 32 layers) and Granite 160 KiB (40 layers). So with the same 85% reservation the pool holds 137,136 tokens for Qwen but 53,648–73,232 for the others. That still fits 1.6–2.2 full 32,768-token requests.
+- **Per-token decode speed is similar** (80–94 tokens/s), because all four are 4-bit models of 7–8B parameters. The other families take longer per read (7.9–11.1 s against 4.9 s) mainly because they write more: 898 (Llama), 941 (Mistral) and 1,278 (Granite) output tokens per read against 563 for Qwen. They also make slightly more retry calls (6.1–6.25 calls per read against 6.0).
+- **Two checkpoints vLLM 0.33 cannot load:** the RedHat W4A16 builds of Llama 3.1 8B and Mistral 7B v0.3 use GPTQ `desc_act=True`, which vLLM 0.33 refuses ("GPTQ group activation ordering ... is no longer supported"). The AWQ build of Llama and the `desc_act=False` GPTQ build of Mistral load.
+
+### Latent team (M2c) chat templates
+
+- The derivation gives the right turn texts for all six real tokenizers in the local cache, checked on the CPU in WSL:
+  - Qwen2.5 and SmolLM2 keep the exact ChatML strings.
+  - Phi-3.5 closes a turn with `<|end|>\n`, Llama 3.1 with `<|eot_id|>`, Mistral v0.3 with `</s>`, and Granite 3.1 with `<|end_of_text|>\n`.
+  - Each later turn carries no system block, and each stop set includes the close token: Phi `[32000, 32001, 32007]`, Llama `[128001, 128008, 128009]`.
+- The template unit tests cover seven families (adding OLMo-2) and run without a GPU or network; they skip cleanly where `jinja2` is missing.
+- **Reviews:** Codex and a separate Claude reviewer found two issues, both fixed in 43b6120 with regression tests:
+  - A template that only contained `<|im_start|>` was handed the ChatML strings unchecked. Every template is now derived, and ChatML is used only when the derived strings equal it.
+  - The assistant lead (Mistral's leading space) is now derived and recorded.
+
+### Latent team (M2c) on Phi-3.5-mini
+
+`latent_team.evaluate --model microsoft/Phi-3.5-mini-instruct --steps 40 --count 200 --batch 4 --seed 0 --block 2`. Block 2 shares no question with the cycle 9 samples (blocks 0 and 1). The setup is bf16 in transformers; `nvidia-smi` read 13,906 MiB in use during latent_mas.
+
+| System | Accuracy (200) | Mean tokens | Latent vectors | Seconds per question |
+| --- | --- | --- | --- | --- |
+| single | 0.855 | 268.5 | 0 | 3.78 |
+| text_mas | 0.870 | 852.5 | 0 | 11.02 |
+| latent_mas@40 (soft) | 0.840 | 235.9 | 120 | 5.04 |
+| latent_random@40 (control) | 0.830 | 232.6 | 120 | 5.07 |
+
+- **The machinery works on a model that is not ChatML and has untied embeddings.** Every system ran all 200 questions end to end, with the turn texts derived from Phi's own template: `<|user|>\n` … `<|end|>\n<|assistant|>\n`, closed by `<|end|>\n`, with stop ids 32000, 32001 and 32007.
+- **The latent thoughts carry no measurable signal on Phi.** The random control scores 0.830 against 0.840 for latent_mas. Over 200 paired questions, latent_mas alone is right on 13 and the control alone on 11 (exact McNemar p = 0.84). On Qwen2.5-3B in cycle 9 the control fell to 0.475. The written acceptance rule ("the random control scores below latent_mas") is met numerically, but a 1-point gap on 2 questions is not evidence. That rule was too weak, and the result is recorded as **not established on Phi**.
+- **Against single and text_mas, no difference is significant** either: latent_mas vs single p = 0.65, latent_mas vs text_mas p = 0.33, text_mas vs single p = 0.70.
+- On cost, latent_mas still keeps its shape: 72% fewer tokens than text_mas and 2.2× faster.
+- **Cycle 9 gate:** latent_mas fails it on accuracy. It is 3 points below text_mas, beyond the allowed 2, with a 95% paired interval of −0.08 to +0.02. It passes on tokens and speed.
+- Only the `soft` thought mode was run, which mixes real token embeddings. The `aligned` mode, the one that uses the untied W_a, was not run on Phi.
+- **Batch size:** batch 8 spills past the laptop's 16 GB: latent_mas took 20.9 s per question on the 8-question smoke run against 4.6 s at batch 4. Phi-3.5-mini has 32 KV heads (no grouped-query attention), so its KV cache costs 384 KiB per token.
+
+What this means: the multi-LLM part is done; any chat template now runs. Whether latent thinking helps is a property of the model. It showed on Qwen2.5-3B (cycle 9) but not on Phi-3.5-mini. A next run should try the `aligned` mode on an untied model and a second non-Qwen family before any claim that latent thinking transfers across families.
+
+### Suites and review
+
+- Node 168/169 (one skipped), graph 9/9, Playwright 13/13.
+- Runtime unittest: 154 OK on Windows (26 skipped for torch and jinja2), and 154 OK in WSL on CPU with none skipped.
+- **Reviews of the chat-template derivation:** Codex and a separate Claude reviewer found two issues, both fixed in 43b6120 (above).
+- **Reviews of the system-message fold (104c41e):** Codex found that the retry got the full timeout again, so a slow refusal could hold a pool slot past the deadline (medium), and that the receipt time left out the refused attempt (low). Both are fixed in b88a914 with tests against a scripted server with delayed replies; both tests fail on 104c41e. Codex's confirming pass found nothing.
+- **PR review (#10):** a Codex pass over the whole PR, with a data check of every figure against the raw reports, recomputed the Phi McNemar counts and p-values and found them correct. It raised two findings, both fixed: the Granite accuracy comparison understated its dev-set lead (wording), and the real-tokenizer test left out Phi-3.5 and Granite (both now included; the test passes in WSL).
+- Codex noted that the fake vLLM's cache accounting does not prove real cache reuse. The live Mistral run does: vLLM's own counters show 96.8% prefix-cache hits with the folded prompts.
+
+## Cycle 13 — Tuning the latent hand-off (defined 2026-11-12, before any run)
+
+Card C13. In cycle 12 the latent team ran on Phi-3.5-mini, but its latent thoughts scored no better than random vectors (0.840 against 0.830, McNemar p = 0.84). This cycle tries three ways to make the hand-off between agents carry information, from cheapest to most expensive, on the same model:
+
+1. **Settings, no training:** thought mode (`soft`, and `aligned`, which uses the untied W_a and was never run on Phi), latent steps (10, 40, 80), and soft-thought sharpness (top-k 16 at temperature 1.0, against top-k 4 at 0.5).
+2. **A trained projection adapter:** the model stays frozen. A low-rank correction is added to the thought vector, zero-initialised so training starts from today's behaviour. It is trained on the solver's answer loss, back through the latent steps.
+3. **LoRA fine-tuning:** low-rank adapters on the attention projections, trained with the same loss through the same latent loop, so the model learns to read latent memory.
+
+### Data and splits
+
+- Training (levels 2 and 3) uses only the GSM8K train split. The target is the gold solution, ending "The answer is N."
+- Settings and training choices are tuned on GSM8K test block 3 of the seed-0 shuffle (questions 600–799; 100 questions while tuning).
+- Every claim is made on block 4 (questions 800–999, 200 questions), which is not looked at until the choices are fixed.
+- Blocks 0, 1 and 2 were used by cycles 9 and 12 and are not reused.
+
+### What counts
+
+- The question is whether the thoughts carry information. The primary test is **latent_mas against latent_random with the same weights, steps and thought norm**, on the same 200 block-4 questions, with an exact McNemar test.
+- A level "works" only if latent_mas beats the random control with p < 0.05.
+- Secondary figures, reported but not gated: latent_mas against single and against text_mas, tokens, and seconds per question.
+- For level 3 the controls must use the **same LoRA weights**. Fine-tuning on GSM8K will lift every system, so a higher score alone proves nothing; only the gap to the random control with the same weights counts.
+- A level that does not reach p < 0.05 is reported as not established, with its numbers. This rule is fixed here, before any result, because cycle 12's "below the control" rule was too weak.
+
+### Acceptance for the code
+
+- Unit tests run on the CPU with a tiny randomly initialised model, with no download and no GPU:
+  - the adapter starts as an exact no-op;
+  - LoRA starts as an exact no-op, and only the LoRA and adapter weights receive gradients;
+  - the loss covers only the target tokens;
+  - a saved checkpoint reloads to identical outputs.
+- No new runtime dependency: LoRA is written in a small module rather than added with `peft`.
+
+### Level 1 results (tuning questions, 2026-11-13)
+
+Phi-3.5-mini, bf16, batch 4, tuning questions 600–699 (block 6 of 100 in the seed-0 shuffle, inside tuning block 3). These are tuning figures, not claims.
+
+| System | m = 10 | m = 40 | m = 80 |
+|---|---|---|---|
+| single | 0.86 | | |
+| soft (top-k 16, T 1.0) | 0.86 | 0.89 | 0.86 |
+| aligned (W_a) | 0.13 | 0.15 | 0.23 |
+| random control | 0.88 | 0.88 | 0.84 |
+| soft, sharp (top-k 4, T 0.5) | | 0.93 | |
+| random control, same run | | 0.89 | |
+
+Exact McNemar test against the random control at the same steps (questions only the thought mode got right / only random got right):
+
+| Comparison | Split | p |
+|---|---|---|
+| soft @10 | 2 / 4 | 0.69 |
+| soft @40 | 3 / 2 | 1.00 |
+| soft @80 | 7 / 5 | 0.77 |
+| soft, sharp @40 | 6 / 2 | 0.29 |
+| aligned @10, @40, @80 | 1 / 76, 1 / 74, 2 / 63 | < 0.001 (worse than random) |
+
+- No setting beats the random control. The sharp soft setting is the best on these questions, but it is not significant.
+- Aligned thoughts break Phi-3.5-mini's answers. The untied W_a ridge map gives vectors the model cannot read.
+- Decision, made before training: levels 2 and 3 train soft thoughts only. Aligned is dropped from the trainer (Codex review of 334ce35: the random control is noise at the soft norm, so a trained aligned run would not be norm-matched to it).
+- Training runs at m = 10 for memory: the backward pass keeps every latent step's keys and values. Trained checkpoints are evaluated at m = 10 and m = 40.
+
+Smoke runs on 16 train questions at m = 10, with all three subagents keeping gradients:
+
+| Level | Trainable weights | Seconds per example | Peak memory |
+|---|---|---|---|
+| 2, adapter rank 16 | 98,304 | 3.6 | 12.1 GB |
+| 3, LoRA rank 16 on `qkv_proj` and `o_proj` | 9,437,184 | 5.6 | 13.3 GB |
+
+Runs queued: level 2 on 1,000 train questions (lr 1e-3, accumulation 8), then level 3 on 2,000 (lr 2e-4, alpha 32, accumulation 8), one epoch each. Each is evaluated on the same 100 tuning questions before block 4 is opened.
+
+### Levels 2 and 3 results (tuning questions, 2026-11-13)
+
+**Memory.** The first full runs stopped with "CUDA driver error: out of memory" within minutes. Phi-3.5-mini has no grouped-query attention, so every latent step keeps a full key and value copy for the backward pass, and the cost grows with the prompt. Peak memory by example length, measured on the train split (prompt p50 / p90 / max 93 / 130 / 259 tokens):
+
+| Subagents keeping gradients | Median | p90 | p99 | Longest |
+|---|---|---|---|---|
+| 3 | 12.72 GB | 14.36 GB | 14.42 GB | out of memory |
+| 2 | 11.67 GB | 13.05 GB | 13.15 GB | out of memory |
+| 1 | 10.11 GB | 11.05 GB | 11.22 GB | 13.88 GB |
+
+The runs use two subagents with gradients (the first runs without; all three still run) and skip prompts over 160 tokens (`--max-prompt-tokens`, 8bfbf51). The worst kept case, a 160-token prompt with a 256-token target, peaks at 13.55 GB. These runs counted the prompt text without the chat-template tokens. Codex's review of 8bfbf51 found that mismatch, and the cap now counts each turn as rendered, so the same `--max-prompt-tokens 160` keeps somewhat fewer questions than these runs did.
+
+| Run | Examples kept | Skipped (prompt / target) | Steps | Final logged loss | Peak memory | Hours |
+|---|---|---|---|---|---|---|
+| Level 2, adapter rank 16, lr 1e-3 | 947 of 1,000 | 49 / 4 | 119 | 0.835 → 0.645 | 12.25 GB | 0.77 |
+| Level 3, LoRA rank 16, alpha 32, lr 2e-4 | 1,893 of 2,000 | 94 / 13 | 237 | 0.626 → 0.424 | 13.46 GB | 2.04 |
+
+Tuning questions 600–699, same weights for every system in a run:
+
+| Run | single | soft @10 | random @10 | soft @40 | random @40 |
+|---|---|---|---|---|---|
+| Level 2 adapter | 0.86 | 0.83 | 0.88 | 0.85 | 0.84 |
+| Level 3 LoRA | 0.79 | 0.80 | 0.81 | 0.77 | 0.79 |
+
+| Comparison | Split | p |
+|---|---|---|
+| Level 2 soft @10 vs random | 2 / 7 | 0.18 |
+| Level 2 soft @40 vs random | 6 / 5 | 1.00 |
+| Level 3 soft @10 vs random | 4 / 5 | 1.00 |
+| Level 3 soft @40 vs random | 2 / 4 | 0.69 |
+
+- Neither trained level beats the random control on the tuning questions.
+- The LoRA lowers single from 0.86 to 0.79 and shortens answers from 263 to 90 tokens: it learned the terse GSM8K solution style, which costs Phi-3.5-mini accuracy. Every system in that run carries the same LoRA, so the comparison with random is still fair.
+- The adapter roughly halves the answer length of soft thoughts at m = 10 (107 tokens against 226 for random). Accuracy is 5 points lower (0.83 against 0.88, split 2 / 7, p = 0.18), a difference that is not significant.
+
+### Block 4 choices (fixed 2026-11-13, before block 4 is run)
+
+One setting per level, each the best gap to random on the tuning questions:
+
+| Level | Setting | Systems |
+|---|---|---|
+| 1 | soft, top-k 4, T 0.5, m = 40, no training | single, text_mas, latent_mas, latent_random |
+| 2 | adapter (l2-adapter), m = 40 | single, latent_mas, latent_random |
+| 3 | LoRA (l3-lora), m = 10 | single, latent_mas, latent_random |
+
+Block 4 is questions 800–999 of the seed-0 shuffle (`--count 200 --block 4`), batch 4. Each level is judged by its own McNemar test against random at p < 0.05. Three tests are run, so a single p just under 0.05 is read with that in mind.
+
+### Block 4 results (2026-11-13)
+
+Phi-3.5-mini, bf16, batch 4, questions 800–999 of the seed-0 shuffle (200 questions), the settings fixed above. Every system in a run uses the same weights.
+
+| Level | single | latent_mas | latent_random | Split (latent only / random only) | McNemar p | Verdict |
+|---|---|---|---|---|---|---|
+| 1, sharp soft (top-k 4, T 0.5), m = 40 | 0.855 | 0.845 | 0.845 | 7 / 7 | 1.00 | not established |
+| 2, adapter, m = 40 | 0.855 | 0.815 | 0.840 | 10 / 15 | 0.42 | not established |
+| 3, LoRA, m = 10 | 0.730 | 0.750 | 0.775 | 4 / 9 | 0.27 | not established |
+
+Secondary figures:
+
+| Run | System | Mean tokens | Seconds per question |
+|---|---|---|---|
+| Level 1 | single | 279.6 | 3.80 |
+| Level 1 | text_mas (0.825; 72% of agent turns hit the token cap) | 850.9 | 11.00 |
+| Level 1 | latent_mas @40 | 254.3 | 4.97 |
+| Level 1 | latent_random @40 | 239.1 | 4.76 |
+| Level 2 | latent_mas @40 | 140.4 | 4.02 |
+| Level 2 | latent_random @40 | 244.1 | 5.12 |
+| Level 3 | single | 102.2 | 1.78 |
+| Level 3 | latent_mas @10 | 99.5 | 2.39 |
+| Level 3 | latent_random @10 | 102.7 | 2.49 |
+
+- **No level shows that the latent thoughts beat random vectors on Phi-3.5-mini.** Under the rule fixed before any result, all three are reported as not established. This is a failure to show an advantage at this sample size, not proof that the thoughts carry nothing.
+- **Level 1:** the sharp setting that scored 0.93 on the tuning questions ties random exactly on block 4. Its tuning lead (6 / 2) did not replicate (7 / 7, p = 1.00).
+- **Level 1 gate:** latent_mas passes the M2c gate against text_mas (0.845 against 0.825, interval −0.03 to +0.07, 70% fewer tokens, 55% less time). Random vectors pass the same gate (0.845, 239 tokens), so the gate measures the cheaper pipeline, not the thoughts.
+- **Level 2:** the adapter makes the solver write much shorter answers (140 tokens against 244 for random), and accuracy is 2.5 points lower (not significant). It changes the answers, but shows no accuracy advantage over random.
+- **Level 3:** LoRA lowers every system: single falls from 0.855 to 0.730, and answers shorten from 280 to 102 tokens. A likely cause is the short style of GSM8K's gold solutions, but this run does not isolate it. The latent team does not recover the loss: it is 2.5 points below random with the same weights (not significant).
+- **A hypothesis for a next cycle (untested):** with the gold solution as the target, a change of answer style can lower the loss without any help from the hand-off. Training against the model's own correct answers (self-distillation) would keep the target close to the model's own style, leaving less to gain that way. It would not rule out other shortcuts. A next attempt should also train at the evaluation step count; these runs trained at m = 10 for memory.
+- **Review:** a Codex data check recomputed every figure in the level 2 and 3 and block 4 sections from the raw reports and training logs, and all of them match. It found one wrong statement ("without changing accuracy" hid a 5-point drop on the tuning questions) and five conclusions that claimed more than the tests show. All six are reworded above. The prompt-length and memory profile figures came from profiling runs whose output was printed, not saved, so they could not be rechecked.
+
+## Cycle 14 — Self-distilled targets for the LoRA hand-off (defined 2026-11-13, before any run)
+
+Card C14. In cycle 13, LoRA trained on GSM8K's gold solutions lowered every system on Phi-3.5-mini: single fell from 0.855 to 0.730 and answers shortened from 280 to 102 tokens. The latent team was not better than random vectors with the same weights (0.750 against 0.775, p = 0.27). The likely cause is that the loss could fall by copying the short gold style, with no help from the hand-off. This cycle changes only the training target. It becomes the model's own correct answer (self-distillation), which is already in the model's style.
+
+### Method
+
+- `latent_team.distill` runs the untrained model as the single system: greedy decoding, the single prompt, at most 512 new tokens. It covers the same 2,000 GSM8K **train** questions that `train.py` takes (seed 0).
+- An answer becomes a target only if its number is right and it stopped before the 512-token budget. Every other question is skipped (`noTarget`). The gold solution is never used to fill a gap.
+- `latent_team.train --targets` trains LoRA on these answers, each followed by the chat template's close. The other settings are those of cycle 13 level 3:
+  - m = 10 latent steps while training;
+  - rank 16, alpha 32, learning rate 2e-4;
+  - gradient accumulation 8, gradients through the last 2 subagents;
+  - one epoch;
+  - prompt cap 160 tokens, now counted with the chat template.
+- The target-length cap is the one setting that has to change, because the model's own answers are longer than the gold ones. It is chosen from the distilled answer lengths and a short memory check on the 16 GB GPU, before training starts, and recorded here before any evaluation.
+- The output file holds GSM8K train questions and the model's answers. It stays with the run outputs and is not committed.
+
+### Targets and the length cap (fixed 2026-11-13, before training)
+
+- **Answers:** distillation answered 2,000 train questions; 1,833 are right, and 1,832 of those stopped inside 512 tokens (91.6%).
+- **Length:** the kept answers are much longer than the gold solutions (cycle 13's gold-trained answers averaged 102 tokens): 261 generated tokens on average (median 250, 95th percentile 402, longest 509).
+- **Memory:** peak GPU memory for one training example (m = 10, gradients through 2 subagents) at the longest target under each cap:
+
+  | Cap (target tokens) | Examples kept | Peak memory (GB) |
+  |---|---|---|
+  | 320 | 1,403 | 12.52 |
+  | 384 | 1,623 | 13.87 |
+  | 448 | 1,711 | 13.93 |
+  | 512 | 1,734 | 14.08 |
+
+- **Cap chosen: 512.** It keeps every self target. A lower cap would drop the longest answers, which are mostly the harder questions, so the training set would lean toward easy ones.
+- **What the run trains on:** 1,734 examples. 168 questions have no kept self answer, and 98 are over the 160-token prompt cap.
+- **Memory setting:** the run uses `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to limit fragmentation over the two-hour run.
+- **Training run:** one epoch, 217 optimizer steps over 1,734 examples in 103 minutes. Mean loss 0.042 (0.085 over the first 25 steps, 0.031 by step 200). Peak memory 14.25 GB, with no out-of-memory failure.
+
+### Data and splits
+
+- Training uses the GSM8K train split only.
+- Tuning: questions 600–699 of the seed-0 test shuffle (`--count 100 --block 6`), the same tuning questions as cycle 13. Systems: single, latent_mas and latent_random at m = 10 and m = 40. The step count with the larger gap to random is chosen.
+- Confirmation: **block 5** (`--count 200 --block 5`, questions 1000–1199), which no cycle has used. Cycle 13 already looked at block 4, so it is not reused for a claim. Systems: single, latent_mas and latent_random at the chosen m, all with the self-distilled LoRA. The untrained model's single system is also run on block 5 as the baseline for the style check.
+
+### Tuning result and the chosen step count (fixed 2026-11-13, before block 5)
+
+All systems use the self-distilled LoRA on the 100 block-6 questions:
+
+| System | m = 10 | m = 40 |
+|---|---|---|
+| single | 0.90 (258 tokens) | — |
+| latent_mas | 0.88 | 0.90 |
+| latent_random | 0.89 | 0.90 |
+| latent_mas − random | −1 point | 0 points |
+
+- **Chosen: m = 40**, by the rule above (the larger gap to random). Neither gap is a real lead. At m = 10 the team is one question behind random; at m = 40 they tie. So the tuning gives no sign that the thoughts help, and block 5 decides.
+- **Style:** single with the LoRA scored 0.90 with 258-token answers. In cycle 13 the gold-trained LoRA gave 102-token answers, so the style shortcut looks gone. This is only a tuning read; the style prediction is scored on block 5.
+
+### What counts
+
+- **Primary:** latent_mas against latent_random with the same LoRA weights, steps and thought norm, on the 200 block-5 questions, with an exact McNemar test. The hand-off "works" only if latent_mas beats random with p < 0.05. Otherwise it is reported as not established, with its numbers.
+- **Secondary, predicted before the run:** if self-distillation removes the style shortcut, single with the self-distilled LoRA stays within 3 points of the untrained single on block 5, and its mean answer length stays within 25% of the untrained length. Reported, not gated. Passing it only shows that the style damage is gone. It does not show that the thoughts carry information.
+- Training on answers the model already gets right can still leave the thoughts with nothing to add. If so, the primary test fails, and that is a result.
+
+### Block 5 results (2026-11-13)
+
+Phi-3.5-mini, bf16, batch 4, questions 1000–1199 of the seed-0 shuffle (200 questions), m = 40 as fixed above. The first three rows share the self-distilled LoRA; the last is the untrained model.
+
+| System | Accuracy | Mean tokens | Seconds per question |
+|---|---|---|---|
+| single, LoRA | 0.870 | 273.9 | 4.32 |
+| latent_mas @40, LoRA | 0.870 | 275.1 | 6.28 |
+| latent_random @40, LoRA | 0.860 | 272.1 | 6.39 |
+| single, untrained | 0.870 | 274.5 | 3.90 |
+
+Exact McNemar tests on the same 200 questions (questions only the first system got right / only the second):
+
+| Comparison | Split | p |
+|---|---|---|
+| latent_mas vs latent_random (primary) | 7 / 5 | 0.77 |
+| latent_mas vs single, LoRA | 10 / 10 | 1.00 |
+| latent_random vs single, LoRA | 8 / 10 | 0.81 |
+| single, LoRA vs single, untrained | 8 / 8 | 1.00 |
+
+- **Primary: not established.** The team is one point above random vectors with the same weights (0.870 against 0.860, 7 / 5, p = 0.77). This is far from p < 0.05. As in cycle 13, this is a failure to show an advantage at this sample size, not proof that the thoughts carry nothing.
+- **Secondary prediction: passed.** Single with the self-distilled LoRA is 0 points from the untrained single (limit 3) and its answers are 0.2% shorter (limit 25%). The drop seen with the gold-trained LoRA in cycle 13 (0.855 to 0.730, 280 to 102 tokens) does not appear with self targets. This run changes only the target, but it does not isolate why. Passing shows only that accuracy and length stay inside the stated limits on this sample.
+- **Reading:** the LoRA is now close to neutral. Single, the team and random all land within one point of each other and of the untrained model. The training produced no measurable advantage over random thoughts; that is not proof the solver ignores them. A likely reason, not tested here, is the one cycle 13 found: the solver already reads the whole question, and the shared cache also holds the other agents' prompts, so the hand-off has nothing it alone can supply. Cycle 15 tests that directly with sealed agents and split facts.
+- **Cost:** the team took 6.3 seconds per question against 4.3 for single with the same LoRA, for the same accuracy.
+- **Code review:** Codex reviewed a420d9d. It found no bug in how targets are built, which questions are kept, the split read, or the fairness of latent against random. It found two test gaps: the distill CLI test passed its items in, so a different sample from `train.py`'s would go unseen; and no test kept a generated answer, so a scorer that always says wrong would pass. 7eb5009 adds an end-to-end test that runs both CLIs on their own sampling, and both mutations Codex named now fail it.
+- **Data check:** Codex recomputed every figure in this section from the raw reports and logs (except the memory table, from a printed profiling run). All match: the counts and lengths of the targets, the training run, tuning, block-5 accuracy, tokens and times, the four McNemar splits and p-values, and the style gap. It confirmed the same question order in all four block-5 systems, the C14 LoRA path, m = 40, and no checkpoint in the baseline. It flagged three sentences that claimed more than the tests show (that self targets "removed" the damage, that passing showed the style damage "is gone", and that the solver uses "nothing" from the thoughts). All three are reworded above.
+
+### Acceptance for the code
+
+- CPU unit tests with the tiny model, with no download and no GPU:
+  - only right answers that stopped inside the budget are kept;
+  - a targets file from another model, or in another format, is refused;
+  - the CLI writes the single system's greedy answers in the train-sample order;
+  - with `--targets`, the targets are the kept self answers plus the close, and the other questions are skipped and counted;
+  - without `--targets`, training still uses the gold solutions as in cycle 13;
+  - a file with no kept answer stops the run.
+- No new runtime dependency.
