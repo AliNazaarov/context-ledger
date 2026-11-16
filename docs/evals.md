@@ -807,6 +807,87 @@ A second independent review, of 2a02e98, upheld seven findings. Each fix has a t
 - **graph_list and room_list trimming was not exercised** (low). A fake ledger serves 250 rooms with 32-character party names and 250 graphs with 120-tag titles. With `limit: 100`, each first page holds fewer than 100 rows and stays in the bound, `more.after` is the last row shown, and the walk returns every row once, in order. It fails if room_list skips `listResult`.
 - **Suites (Windows):** node 119/120 (one skipped), Playwright 13/13. tools/list is 10,104 characters.
 
+## Housekeeping H1–H5 and G10 (defined 2026-11-16, before implementation)
+
+Source: a review of the project map (floorplan) against CI, the handoff notes and the board. One card per branch, all branched from one claim commit so their pull requests merge without touching the same lines. Each card writes its results only under its own **Results** heading below. Synthetic data only. Baseline on `main` 17ecef0 (Windows): node 139/140 (one skipped), Python runtime 131 run (24 skipped without torch). Each card closes with its evals passing, the node suite passing, a Codex read-only review, and fixes with regression tests. Playwright is run once per branch after the agents finish, because its server port is fixed.
+
+### H1 — Runtime checks in CI (`claude/h1-runtime-ci`)
+
+| Eval | Expected |
+| --- | --- |
+| Runs on every push and pull request | A CI job runs `python -m unittest discover -s tests -t .` in `runtime/` on Python 3.12 (Ubuntu, the WSL version) and 3.13 (Windows, the documented test version). No third-party Python package is installed; torch-only checks skip with a reason. |
+| Same result as locally | The job's run and skipped counts match a local run of the same command on the branch. |
+| A failing check fails the job | With one runtime assertion deliberately broken, the same command exits non-zero (checked locally, not committed). |
+| Nothing else changes | The node and Playwright steps are unchanged. Actions are pinned to the same major versions the workflow already uses. No secrets, no network beyond checkout and setup. |
+
+**Results — H1:** passed locally; the first hosted run is still to be read.
+
+- **Runs on every push and pull request — passed.** The new `.github/workflows/runtime.yml` runs `python -m unittest discover -s tests -t . -v` in `runtime/` on `push` and `pull_request`, as a matrix of `ubuntu-latest` with Python 3.12 and `windows-latest` with Python 3.13 (`fail-fast: false`). It has no `pip install`, `permissions: contents: read`, no secrets, and checkout does not keep credentials. Every skipped check prints a reason. The 21 torch checks say "torch and transformers are needed for M2b" or "... for M2c". `e2e.yml` is unchanged. The workflow parses with PyYAML 6.0.1 (WSL system Python).
+- **Same result as locally — passed for Linux; Windows count to confirm on the hosted run.** Windows, Python 3.13.0: 131 run, 24 skipped, OK. That is 21 torch checks plus 3 symlink checks (`test_prefix` ×2, `test_review_fixes` ×1), which skip because this user does not have the symlink privilege. WSL Ubuntu-24.04, Python 3.12.3: 131 run, 21 skipped, OK, both on `/mnt/c` and in a clean `git archive` of the branch on ext4. GitHub's Windows runners run as administrator, so the symlink checks should run there too. Expected hosted counts: 131 run, 21 skipped on both jobs.
+- **A failing check fails the job — passed.** I broke one assertion in `runtime/tests/test_limits.py` line 60 for the test only, then reverted it without committing. The command exited 1 on Windows (`FAILED (failures=1, skipped=24)`) and on WSL (`FAILED (failures=1, skipped=21)`). After the revert it exited 0.
+- **Nothing else changes — passed.** The new workflow uses `actions/checkout@v4`, the same major version as `e2e.yml`, and `actions/setup-python@v5`. It needs no network beyond checkout and setup-python. AGENTS.md section 4 step 3 and the pull request template checklist now list the Python command.
+- **Codex read-only review:** one low finding. The Windows skip count may differ on hosted runners because they run as administrator. Accepted: the expected hosted count is recorded above, and confirming it is left open until the first CI run. No code change was needed, because the symlink checks already run and pass on Linux. No other findings.
+- **Suites (Windows):** node 139/140 (one skipped). Python runtime: 131 run, 24 skipped on Windows; 131 run, 21 skipped on WSL. Playwright was not run here because its port is fixed; the change touches no browser journey.
+
+### H2 — Docs match what is merged (`claude/h2-stale-docs`)
+
+| Eval | Expected |
+| --- | --- |
+| README | The M2c line states the recorded result from `docs/m2c-latent-team.md` instead of "not recorded yet". The test counts are the counts measured on this branch, with the date. |
+| Handoff | The cycle 10 steps say PR #8 was merged on 2026-11-12 with no GitHub review recorded, and that the human review of the schema migration is still owed. No other history is rewritten. |
+| Runtime docstrings | `runtime/latent_pool/mappers.py` and any other docstring found stale describe what the code does today. |
+| Every change has a source | Each changed statement cites, in the results, the doc, commit or `gh` output it was checked against. No new claim without one. |
+
+**Results — H2:** pending.
+
+### H3 — Split the MCP adapter (`claude/h3-split-mcp`)
+
+| Eval | Expected |
+| --- | --- |
+| Same protocol, same tools | `tools/list` output and the `initialize` result are byte-identical before and after, checked by a script or test against the output captured on `main`. |
+| Same answers | Every existing node test passes unchanged, including `tests/mcp.test.mjs`, `tests/mcp-live.test.mjs`, `tests/paging.test.mjs` and `tests/list-api.test.mjs`. |
+| Same entry point | `node src/mcp.mjs` still starts the adapter, so the demo rehearsal, the tests and the Claude Code and Codex settings that start it need no change. |
+| Smaller files | No file of the adapter is over 400 lines. No new dependency and no build step. |
+| Merge cost measured | A trial merge of this branch with `vuek0/subagent-graphs` (not committed) records the conflicting files and hunks, and the results say where each of that branch's `src/mcp.mjs` changes now belongs. |
+
+**Results — H3:** pending.
+
+### H4 — One source for cross-language rules (`claude/h4-shared-rules`)
+
+| Eval | Expected |
+| --- | --- |
+| Secret-file rule | One data file holds the secret directories, names, prefixes and suffixes. `src/latent.mjs` and `runtime/latent_pool/prefix.py` both read it, and both give the same verdict on a shared table of at least 30 paths, run by a node test and a Python test. |
+| Whitespace fold | The ledger and the runtime fold whitespace the same way on a shared table of cases (including non-ASCII spaces, tabs and line separators), run by both suites. |
+| Latent grader | `evals/latent/grade.mjs` and the Python port in `runtime/tests/test_fixture_e2e.py` agree on a shared table of graded answers, run by both suites. |
+| Drift fails a test | Changing any one of these rules in one language only makes a test fail (checked by hand, not committed). |
+| Runtime stays stdlib | The runtime still uses only the Python standard library and still runs from `runtime/` with `LATENT_ROOT` elsewhere. Default results are unchanged. |
+
+**Results — H4:** pending.
+
+### H5 — Server request table (`claude/h5-server-routes`)
+
+| Eval | Expected |
+| --- | --- |
+| One default address | The local runtime's default address is defined once in `src/server.mjs`. `LATENT_URL` still overrides it. |
+| Same responses | A probe set run before and after (every route with its right method, a wrong method, an unknown path, a foreign Host, a foreign Origin on a write, a bad ID) gives the same status and body. |
+| Checks still come first | The Host and Origin checks run before any request handler, and the decisions route keeps its same-origin check. The existing node and Playwright checks pass unchanged. |
+| Merge cost measured | A trial merge with `vuek0/subagent-graphs` (not committed) records the conflicting hunks in `src/server.mjs` and how to resolve them. |
+
+**Results — H5:** pending.
+
+### G10 — Published handoff benchmark, offline parts (`claude/g10-handoff-benchmark`)
+
+| Eval | Expected |
+| --- | --- |
+| Stage demo untouched | `demo/` stage transcripts, prompts and reference graphs are byte-identical, so the recorded demo still matches. The benchmark uses its own synthetic fixtures. |
+| More facts, some late | At least 12 graded facts, at least 4 of which appear only after the first page `session_read` returns for the long transcript, and at least 3 of which were changed or superseded during the conversation. |
+| Two independent graders | A second grader built a different way from the first agrees with it on a labelled set of at least 60 synthetic answers (right, superseded, negated, missing, and right with an added false detail). Agreement and every disagreement are recorded. |
+| Fairness rules | `BENCHMARKS.md` fixes the rules: same model and question for both arms, same tools, alternating arm order, one timeout, how tokens, cost and time are counted, and what counts as a pass. |
+| Spend log | Each benchmark run appends one line (date, arm, model, tokens in, cached and out, cost, time, score) to a file Git ignores, and a summary command prints only aggregates. No transcript text is logged. |
+| No paid runs here | Live runs with Claude Code and Codex are not part of this card; the results say how to run them. |
+
+**Results — G10:** pending.
+
 ## Cycle 11 — Latent runtime performance baseline (defined 2026-11-12, before measuring)
 
 Card C11. Until now the latent runtime had accuracy evals but no performance figures. This cycle measures it on the RTX 4090 Laptop GPU (16 GB), vLLM 0.33.0 in WSL2, with the synthetic fixtures only.
