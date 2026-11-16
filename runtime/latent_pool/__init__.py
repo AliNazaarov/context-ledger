@@ -4,6 +4,9 @@ One local open model reads a set of files once. vLLM keeps the KV cache for
 that shared prefix warm, and every later call for the same prefix (planner,
 workers, synthesizer) differs only in its user message. See
 docs/latent-read.md for the contract.
+
+The same server also serves M2b transfer (transfer.py, mappers.py) and the
+M2c latent team (team_service.py).
 """
 
 
