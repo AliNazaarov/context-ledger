@@ -860,7 +860,7 @@ Source: a review of the project map (floorplan) against CI, the handoff notes an
   - Medium: these results were still pending. Fixed by this entry.
   - Low: `tests/mcp-snapshot.mjs` printed on `exit`, before stdout might have drained. It now prints on `close`. That is a helper script, not a test, so there is no regression test; the comparison was rerun and is identical.
   - Codex's own node run failed 25 tests because its sandbox blocked temporary directories, so the counts below are the local run.
-- **Suites (Windows):** node 143/144 (one skipped; the 4 new tests are in `tests/mcp-layout.test.mjs`). Python runtime 131 run, 24 skipped, OK. Playwright was not run here (fixed port). It would only be affected through `tests/e2e` journeys that start the MCP adapter, and none was changed.
+- **Suites (Windows):** node 143/144 (one skipped; the 4 new tests are in `tests/mcp-layout.test.mjs`). Python runtime 131 run, 24 skipped, OK. Playwright was not run here (fixed port). No `tests/e2e` spec starts the MCP adapter, so no browser journey should change.
 
 ### H4 — One source for cross-language rules (`claude/h4-shared-rules`)
 
