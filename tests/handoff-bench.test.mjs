@@ -20,7 +20,9 @@ import { startMcp } from './mcp-client.mjs';
 const run = promisify(execFile);
 const runner = ['evals/handoff/run.mjs'];
 const fake = 'evals/handoff/fake-cli.mjs';
-const hostile = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\p{Cf}\p{Zl}\p{Zp}]/u;
+// Tab, newline and carriage return are allowed (AGENTS.md section 6): a Windows checkout
+// with core.autocrlf turns every newline into CR LF.
+const hostile = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\p{Cf}\p{Zl}\p{Zp}]/u;
 
 async function startServer(database) {
   const child = spawn(process.execPath, ['src/server.mjs'], {
