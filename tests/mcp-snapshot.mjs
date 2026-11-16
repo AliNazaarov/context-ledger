@@ -1,6 +1,7 @@
 // Print the adapter's answers that need no ledger, one JSON-RPC line each, sorted by id:
 // initialize for each protocol version, tools/list, ping and fixed error replies.
-// Compare two checkouts byte for byte, for example before and after moving code:
+// Output is collected on close, after stdout has drained. Compare two checkouts byte for
+// byte, for example before and after moving code:
 //   node tests/mcp-snapshot.mjs <old checkout> > before.jsonl
 //   node tests/mcp-snapshot.mjs <new checkout> > after.jsonl
 //   cmp before.jsonl after.jsonl
@@ -27,7 +28,7 @@ let output = '';
 child.stdout.setEncoding('utf8');
 child.stdout.on('data', chunk => { output += chunk; });
 child.stdin.end(requests.map(request => JSON.stringify({ jsonrpc: '2.0', ...request })).join('\n') + '\nnot json\n');
-child.on('exit', code => {
+child.on('close', code => {
   const lines = output.split('\n').filter(Boolean);
   lines.sort((a, b) => (JSON.parse(a).id ?? 0) - (JSON.parse(b).id ?? 0));
   process.stdout.write(lines.join('\n') + '\n');
