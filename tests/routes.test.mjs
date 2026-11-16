@@ -284,6 +284,91 @@ test('the server request table answers every probe as before', async t => {
   }
 });
 
+// The server in a child that can change its own environment, or make static reads
+// fail, between requests on a line of JSON from the test. It answers each line with "ok".
+const controlled = `
+import { createRequire, syncBuiltinESMExports } from 'node:module';
+import { createInterface } from 'node:readline';
+const require = createRequire(import.meta.url);
+createInterface({ input: process.stdin }).on('line', line => {
+  const { env = {}, failStaticReads } = JSON.parse(line);
+  for (const [name, value] of Object.entries(env)) {
+    if (value === null) delete process.env[name];
+    else process.env[name] = value;
+  }
+  if (failStaticReads) {
+    require('node:fs/promises').readFile = async () => { throw new Error('Synthetic disk failure.'); };
+    syncBuiltinESMExports();
+  }
+  process.stdout.write('ok\\n');
+});
+await import(${JSON.stringify(new URL('../src/server.mjs', import.meta.url).href)});
+`;
+
+test('LATENT_URL and LATENT_ROOT are read on each request, and unexpected errors are a plain 500', async t => {
+  const first = fakeRuntime();
+  const second = fakeRuntime();
+  for (const runtime of [first, second]) {
+    await new Promise(resolve => runtime.server.listen(0, '127.0.0.1', resolve));
+    t.after(() => new Promise(resolve => runtime.server.close(resolve)));
+  }
+  const directory = await mkdtemp(join(tmpdir(), 'ledger-routes-env-'));
+  const child = spawn(process.execPath, ['--input-type=module', '-e', controlled], {
+    env: { ...process.env, PORT: '0', CONTEXT_LEDGER_DB: join(directory, 'ledger.sqlite'), LATENT_ROOT: fixtureRoot,
+      LATENT_URL: `http://127.0.0.1:${first.server.address().port}` },
+    stdio: ['pipe', 'pipe', 'inherit'],
+  });
+  t.after(async () => {
+    try {
+      if (child.exitCode === null) {
+        child.kill();
+        await once(child, 'exit');
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  const lines = [];
+  const waiting = [];
+  let buffered = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', chunk => {
+    buffered += chunk;
+    let end;
+    while ((end = buffered.indexOf('\n')) >= 0) {
+      const line = buffered.slice(0, end).trim();
+      buffered = buffered.slice(end + 1);
+      if (waiting.length) waiting.shift()(line);
+      else lines.push(line);
+    }
+  });
+  const nextLine = () => (lines.length ? Promise.resolve(lines.shift()) : new Promise(resolve => waiting.push(resolve)));
+  const port = Number((await nextLine()).match(/listening at http:\/\/127\.0\.0\.1:(\d+)/)[1]);
+  const send = async message => {
+    child.stdin.write(JSON.stringify(message) + '\n');
+    assert.equal(await nextLine(), 'ok');
+  };
+  const origin = `http://127.0.0.1:${port}`;
+  const post = (path, data) => raw(port, { method: 'POST', path, body: JSON.stringify(data), headers: { 'Content-Type': 'application/json', Origin: origin } });
+
+  assert.equal((await post('/api/latent/team', { question: 'one' })).status, 200);
+  await send({ env: { LATENT_URL: `http://127.0.0.1:${second.server.address().port}` } });
+  assert.equal((await post('/api/latent/team', { question: 'two' })).status, 200);
+  assert.deepEqual(first.seen.map(entry => entry.body.question), ['one']);
+  assert.deepEqual(second.seen.map(entry => entry.body.question), ['two']);
+
+  assert.equal((await post('/api/latent/files', { paths: ['src/notify.js'] })).status, 200);
+  await send({ env: { LATENT_ROOT: null } });
+  const unset = await post('/api/latent/files', { paths: ['src/notify.js'] });
+  assert.deepEqual({ status: unset.status, body: unset.body }, { status: 503, body: { error: 'Latent reading is not configured: set LATENT_ROOT.' } });
+
+  assert.equal((await raw(port, { path: '/' })).status, 200);
+  await send({ failStaticReads: true });
+  const failed = await raw(port, { path: '/' });
+  checkSecurityHeaders(failed, 'failed static read');
+  assert.deepEqual({ status: failed.status, body: failed.body }, { status: 500, body: { error: 'Local request failed.' } });
+});
+
 test('the default runtime address is used when LATENT_URL is not set', async t => {
   const runtime = fakeRuntime();
   try {
