@@ -127,3 +127,89 @@ Next steps:
 3. Merge with `vuek0/subagent-graphs` once that branch has its own PR and review. Expect conflicts in `src/mcp.mjs` (the instructions string and `context_for`), and check `src/store.mjs` and `src/server.mjs`. Add `handoff_publish` to the tool names in `tests/mcp.test.mjs`.
 4. Review round 4 is settled (one low, fixed in d1600d2). PR #8 is still a draft: mark it ready for review on GitHub, then get a human review before merging, because it changes the stored schema (migration to version 1).
 5. Backlog cards G7 to G12 on [the delivery board](delivery-board.md) come from a comparison with the public Graphify repository. G7 (quoted or inferred nodes) and G10 (a published handoff benchmark) are the cheapest and strengthen the pitch most.
+
+## Current checkpoint — cycle 11 (latent runtime performance baseline, 2026-11-12)
+
+Branch `ruslan/latent-perf`, from `origin/main` 17ecef0 (PR #8 merged). Card C11. Read the cycle 11 definition and results in [the eval log](evals.md).
+
+- `evals/latent/perf.mjs` measures a latent configuration end to end, with the pure helpers in `evals/latent/perf-lib.mjs` and 26 tests in `tests/perf.test.mjs`. It sends the dev set through the ledger like `run.mjs` and reads vLLM's `/metrics` before and after every read. It reports TTFT, prefix-cache hit rate, tokens per second, speculative-decoding acceptance, GPU memory (`nvidia-smi`), KV pool and per-read KV memory, read latency and accuracy.
+  - Usage: `LEDGER=http://127.0.0.1:4327 node evals/latent/perf.mjs --repeat 3 --label A --hf-config <model config.json> --out report.json`.
+  - The ledger must run with the dev fixture, as for `run.mjs`.
+- **Baseline on the 4090 Laptop (Qwen2.5-7B AWQ):**
+  - TTFT 40 ms at p50 and 179 ms at p90
+  - 96.8% of prompt tokens from the prefix cache
+  - about 89 tokens/s per request
+  - 5.2 s per read at p50
+  - 14,078 MiB (13.7 GiB) of GPU memory, held by vLLM's reservation
+  - a sampled peak of about 151 MiB of KV cache per read
+- `runtime/serve-vllm.sh` has two opt-in switches, both off by default, because runtime defaults are Ali's to change:
+  - `VLLM_NGRAM=1`: n-gram speculative decoding. 7B reads are 29% faster at p50 with the same accuracy, so it is recommended as the default.
+  - `VLLM_KV_FP8=1`: FP8 KV cache on Triton. Usable with the 14B strict setup; it breaks the 7B AWQ model.
+- FP8 weights are slower than AWQ on this GPU and were rejected.
+
+Next steps:
+
+1. Ali decides whether `VLLM_NGRAM=1` becomes the default in `serve-vllm.sh`.
+2. Find why the fixture on the WSL disk decodes about 9% faster (configuration E), and why the 14B FP8 KV pool is smaller than expected (B-C).
+3. C12 (multi-LLM) continues on `ruslan/multi-llm`, which is based on this branch.
+
+## Current checkpoint — cycle 12 (multi-LLM latent runtime, 2026-11-12)
+
+Branch `ruslan/multi-llm`, based on `ruslan/latent-perf` (C11, PR #9). Card C12. Read the cycle 12 definition and results in [the eval log](evals.md).
+
+- **M2a pool: any vLLM-served chat model.** It is measured on four families (Qwen2.5, Llama 3.1, Mistral v0.3, Granite 3.1), with no failed reads.
+  - The one code change is in `runtime/latent_pool/vllm_client.py`. When a chat template refuses system messages (Mistral), the client folds the system text into the user message after the first refusal. The shared prefix stays first, so caching still works.
+  - Granite does at least as well as Qwen (better on the dev set, equal on the held-out set), Mistral leads the dev set but cites less on the held-out set, and Llama 3.1 is weakest.
+  - Run another model with `LATENT_MODEL=<hf id>` for both `serve-vllm.sh` and the pool.
+  - vLLM 0.33 refuses GPTQ checkpoints with `desc_act=True`.
+- **M2c latent team: any chat template.**
+  - `runtime/latent_team/chat_turns.py` derives the turn texts from the tokenizer's own template. ChatML is byte-identical to before, and a template it cannot handle is refused by name.
+  - The stop tokens come from the tokenizer, the generation config and the derived close token.
+  - Measured on Phi-3.5-mini, which is not ChatML and has untied embeddings: see the eval log. Run it with `python -m latent_team.evaluate --model microsoft/Phi-3.5-mini-instruct --batch 4`. Batch 8 spills past the laptop's 16 GB and runs about 4.5× slower.
+- **M2b transfer** is still per pair: another sender and receiver need their own trained mapper.
+
+Next steps:
+
+1. Ali reviews the runtime changes: the system-message fold, and the chat-template derivation in the latent team.
+2. Strict citations (`LATENT_STRICT_CITATIONS=1`) have only been measured on Qwen. Run them on Granite and Mistral.
+3. Mistral cites 5 of 8 held-out answers; check whether strict citations close that gap.
+
+## Current checkpoint — cycle 13 (tuning the latent hand-off, 2026-11-13)
+
+Branch `ruslan/latent-tuning`, based on `ruslan/multi-llm` (C12, PR #10). Card C13. Read the cycle 13 definition and results in [the eval log](evals.md).
+
+- **Result: not established at any level.** On 200 held-back GSM8K questions (block 4), latent thoughts on Phi-3.5-mini score no better than random vectors with the same weights:
+  - level 1, settings: 0.845 against 0.845;
+  - level 2, trained adapter: 0.815 against 0.840;
+  - level 3, LoRA: 0.750 against 0.775.
+- **The trainer, `runtime/latent_team/train.py`:**
+  - The model is frozen. A thought adapter (`--level adapter`) or a hand-written LoRA (`--level lora`, no `peft`) is trained on the solver's answer loss, back through the latent loop.
+  - Checkpoints load into `latent_team.evaluate` with `--adapter` / `--lora`, and every system in that run then uses the same weights.
+  - Only soft thoughts are trained. Aligned (W_a) thoughts break Phi-3.5-mini (0.13–0.23) and would not be norm-matched to the random control.
+- **Memory on the 16 GB laptop GPU:**
+  - Use `--grad-agents 2 --max-prompt-tokens 160` and train at m = 10.
+  - Phi-3.5-mini has no grouped-query attention, so every latent step keeps a full key and value copy for the backward pass.
+  - The cap now counts the chat-template tokens (18fba6e). The completed runs counted the raw prompt text.
+- **Run times:** the adapter took 46 minutes on 947 questions, and the LoRA 2 hours on 1,893.
+
+Next steps:
+
+1. Ali reviews the trainer and the LoRA module. The Codex reviews are recorded in the eval log.
+2. If the hand-off is tried again, train against the model's own correct answers (self-distillation), not the gold solutions. With gold-solution training, the adapter shortened answers, and the LoRA shortened them and lowered single from 0.855 to 0.730. The cause is not isolated.
+3. Train at the step count that is evaluated, which needs more memory or a model with grouped-query attention. A Qwen or Llama model with grouped-query attention would cut the key and value cost several times over.
+
+## Current checkpoint — cycle 14 (self-distilled LoRA targets, 2026-11-13)
+
+Branch `ruslan/self-distill`, based on `ruslan/latent-tuning` (C13, PR #11). Card C14. Read the cycle 14 definition and results in [the eval log](evals.md).
+
+- **Result: not established.** On the unused block 5 (200 questions), the team with the self-distilled LoRA scores 0.870 against 0.860 for random vectors with the same weights (7 / 5, p = 0.77).
+- **No style damage this time.** Single with the LoRA scores 0.870 with 274-token answers, the same as the untrained model. The gold-trained LoRA of cycle 13 had cut this to 0.730 and 102 tokens.
+- **New code:**
+  - `runtime/latent_team/distill.py` writes the untrained model's greedy single answers on the GSM8K train sample. It keeps only right answers that stopped inside the budget.
+  - `train.py --targets <file>` trains on those answers instead of the gold solutions. Questions with no kept answer are skipped and counted, never filled with gold. A file from another model is refused.
+- **Run settings:** C13 level 3 settings with `--max-target-tokens 512`. The run trained on 1,734 examples in 103 minutes, with a 14.25 GB peak. The targets file holds GSM8K train text and stays with the run outputs; it is not committed.
+
+Next steps:
+
+1. A human reviews the distill code with the C13 trainer. The Codex code review and data check are recorded in the eval log.
+2. Do not run more GSM8K training variants against this setup. Two training targets and three levels all tie random. Cycle 15 (sealed agents, split facts, Qwen2.5-3B) tests whether the hand-off can matter at all when the solver cannot read the facts itself.
