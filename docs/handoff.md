@@ -25,7 +25,7 @@ Leo's M0 items from the latent-ledger roadmap are implemented on feature/semanti
 - The stdio MCP adapter (`node src/mcp.mjs`).
 - Negotiation rooms, where people confirm proposals in the browser.
 
-Read the cycle 4 card table in [the delivery board](graph-delivery.md) and the cycle 4 results in [the eval log](evals.md). The work is committed locally and not pushed. Next steps:
+Read the cycle 4 card table in [the delivery board](graph-delivery.md) and the cycle 4 results in [the eval log](evals.md). The work is committed locally and not pushed. (Later: it reached `main` through PR #1, merged on 2026-11-08.) Next steps:
 
 1. Push, then watch Linux CI. The workflow now runs every node test file.
 2. Run a live smoke test with Claude Code and Codex both connected over MCP to one ledger.
@@ -46,7 +46,7 @@ Every milestone is now split into a Leo side and an Ali side (latent-ledger `leo
 
 - **Leo side** (`leo/latent-read`): the `latent_read` MCP tool, the `POST /api/latent/read` proxy with slice validation, the text fallback, and the gate runner `evals/latent/run.mjs`.
 - **Ali side** (`ali/latent-pool`, worktree `context-ledger-ali`): the stdlib Python warm pool in `runtime/` behind vLLM. Leo's agent built it for Ali's review. Ali owns it and should approve the contract (`q-latent-contract`) before it merges.
-- Neither branch is pushed. Ali's M0 benchmark (cycle 5) is PR #3. Ali requested a Tenki review on PR #1 and PR #3, and none has arrived yet.
+- Neither branch is pushed. (Later: both reached `main` through PR #6, merged on 2026-11-08. PR #4, the draft for `leo/latent-read`, was closed without merging.) Ali's M0 benchmark (cycle 5) is PR #3. Ali requested a Tenki review on PR #1 and PR #3, and none has arrived yet.
 
 To run M2a live from WSL:
 
@@ -104,7 +104,7 @@ Next steps:
 
 ## Current checkpoint — cycle 10 (bounded MCP results and discovery, 2026-11-11)
 
-Branch `ruslan/mcp-paging-discovery`, from `origin/main` 19f6522. Cycle 8 lives on `vuek0/subagent-graphs` and cycle 9 was PR #7, merged into `main` on 2026-11-12 and merged into this branch. Read the cycle 10 definition and results in [the eval log](evals.md).
+Branch `ruslan/mcp-paging-discovery`, from `origin/main` 19f6522, merged into `main` as PR #8 on 2026-11-12 (17ecef0). Cycle 8 lives on `vuek0/subagent-graphs` and cycle 9 was PR #7, merged into `main` on 2026-11-12 and merged into this branch. Read the cycle 10 definition and results in [the eval log](evals.md).
 
 - Every MCP tool result is at most 40,000 escaped characters (`maxResultCharacters` in `src/paging.mjs`), measured by `resultSize`: an ASCII letter or whitespace counts 1, other ASCII (digits, punctuation) 2, any other UTF-16 unit 4, so code, JSON and Han-script pages stay near the token count of 40,000 characters of English. A longer result comes in pages: JSON with `more` as its first key, or text whose first line is `[Partial result: ...]` and whose last line repeats that note, which names the arguments to send next. A result that fits is byte-identical to before. `callTool` withholds any oversized result as a bug.
 - New tools `graph_list` and `room_list`, over the new `GET /api/graphs` and `GET /api/rooms`. `GET /api/sessions` pages only when it is given `limit` or `after`. `POST /api/latent/files` serves later pages of a latent text fallback without the model.
@@ -112,7 +112,7 @@ Branch `ruslan/mcp-paging-discovery`, from `origin/main` 19f6522. Cycle 8 lives 
 - Merging `vuek0/subagent-graphs`: it also edits `src/mcp.mjs`, `src/store.mjs` and `src/server.mjs`. The new tools come last in the tools Map, and the new routes are separate blocks. If that branch needs a schema change, add it to `migrate.mjs` as version 2, with steps that check the schema the way version 1 does. The paging helpers sit between `requireHex` and `text`, away from where that branch adds `currentTranscript`. In `context_for`, put its quota note into the `after` items, which count against the bound. Later pages come from the briefing that page 1 fetched in this process (`pagedBriefings`), so a read-through fetches `/context` once and counts as one handoff. That branch adds `handoff_publish` (1,881 characters of tools/list); the tools/list budget test in `tests/paging.test.mjs` counts only the 13 tools of this cycle by name, so it passes after the merge, but `tests/mcp.test.mjs` pins the tool names and needs the new one added.
 - session_search without `limit` returns every match that fits, as on 19f6522; it reads ledger pages of 100 until the rows pass the bound. With `limit` it pages by that.
 
-Done: the implementation (51aae9a) and three review rounds (fixes in 2a02e98, 404d7d7 and f53418a). The branch is pushed as draft PR #8 with Auto-fix on, and Linux CI passes. On 2026-11-12: the live evals passed (2d6a314), the two round 3 test gaps are closed (9262239), and an ASCII party filter is folded to lowercase in `graph_list` and `room_list` (76fdade), which removes the failed first call Codex made in every live discovery run. Suites on Windows: node 123/124 (one skipped), Playwright 13/13.
+Done: the implementation (51aae9a) and three review rounds (fixes in 2a02e98, 404d7d7 and f53418a). The branch was pushed as draft PR #8 with Auto-fix on, and Linux CI passed. On 2026-11-12: the live evals passed (2d6a314), the two round 3 test gaps are closed (9262239), and an ASCII party filter is folded to lowercase in `graph_list` and `room_list` (76fdade), which removes the failed first call Codex made in every live discovery run. Suites on Windows: node 123/124 (one skipped), Playwright 13/13.
 
 Known limits:
 
@@ -125,5 +125,5 @@ Next steps:
 1. ~~Close the two round 3 test gaps.~~ Done in 9262239.
 2. ~~Run the live evals.~~ Done 2026-11-12, all passing. Codex sentinel 9/9 (English, code and Han pages). Fresh-session discovery: Codex 3/3, Claude Code 1/1. Demo rehearsal 18/18 on both arms. The one low finding (Codex sent party `Leo` first) is fixed in 76fdade; the live re-run had no failed call in 3 of 3. See the eval log.
 3. Merge with `vuek0/subagent-graphs` once that branch has its own PR and review. Expect conflicts in `src/mcp.mjs` (the instructions string and `context_for`), and check `src/store.mjs` and `src/server.mjs`. Add `handoff_publish` to the tool names in `tests/mcp.test.mjs`.
-4. Review round 4 is settled (one low, fixed in d1600d2). PR #8 is still a draft: mark it ready for review on GitHub, then get a human review before merging, because it changes the stored schema (migration to version 1).
+4. Review round 4 is settled (one low, fixed in d1600d2). PR #8 was merged into `main` on 2026-11-12 (17ecef0) without a recorded review: GitHub shows no reviews and no comments on it. The human review of the stored-schema change (migration to version 1 in `src/migrate.mjs`) is still owed.
 5. Backlog cards G7 to G12 on [the delivery board](delivery-board.md) come from a comparison with the public Graphify repository. G7 (quoted or inferred nodes) and G10 (a published handoff benchmark) are the cheapest and strengthen the pitch most.

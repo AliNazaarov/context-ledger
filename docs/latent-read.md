@@ -79,7 +79,7 @@ An "untrusted data" sentence in the preamble was tried and dropped at merge. Liv
 | 404, 405 | Unknown route or method | 502 |
 | 413 | Too many paths or bytes, body over 64 KiB, or the prompt does not fit the context | 413 |
 | 500 | Unexpected runtime error (no detail is returned) | 502 |
-| 501 | `/latent/transfer` with no mapper | Not called by the ledger |
+| 501 | `/latent/transfer` with no mapper for the pair | Fall back to text mode (`latent_transfer`) |
 | 502 | vLLM failed, or the model's reply was invalid twice | 502 |
 | 503 | vLLM is not ready, **or the pool is busy** | Fall back to text mode |
 | 504 | The read ran past its deadline | 502 |
@@ -175,9 +175,9 @@ Response:
   - Above 1000 choices or 60,000 characters of choices, `quote` stays a free string. The caps bound the grammar the backend compiles for every worker and synthesizer call. Compile time at the caps has not been measured.
 - Constant values, with strict citations. The worker and synthesizer user messages ask the model to resolve a named constant or variable to the literal on its definition line and to cite that line. The text is `RESOLVE_RULE` in `pool.py`. It is not part of the preamble, so it does not change `preambleVersion` or the cached prefix.
 
-### `GET /latent/mappers` (M2b scaffold)
+### `GET /latent/mappers` (M2b)
 
-The response is `{ "pairs": [] }`. `POST /latent/transfer` answers 501 with `{"error": "No trained mapper for this model pair."}`, unless the registry holds a pair keyed by (sender model hash, receiver model hash). No pair exists yet. The scaffold fixes the shape for later work.
+The response lists the registered pairs as `{ "pairs": [{ "sender", "receiver", "name" }] }`, where `sender` and `receiver` are the SHA-256 hashes of the model ids. It is `{ "pairs": [] }` when none is loaded. The runtime loads one trained pair at startup when `LATENT_MAPPER` names a mapper checkpoint ([docs/m2b-transfer.md](m2b-transfer.md)). `POST /latent/transfer` answers 501 with `{"error": "No trained mapper for this model pair."}` unless the registry holds a pair keyed by (sender model hash, receiver model hash).
 
 ## Ledger side (Leo side)
 

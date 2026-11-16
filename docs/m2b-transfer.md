@@ -105,7 +105,7 @@ Nothing below 3B is reported in the paper. This is a reproduction at about one-t
 
 ## Serving
 
-- **Runtime (`POST /latent/transfer`).** It takes `{sender, receiver, text, question}`, and the registry keys trained mappers by (sender, receiver).
+- **Runtime (`POST /latent/transfer`).** It takes `{sender, receiver, question}`, exactly one of `text` or `paths`, and an optional `maxNewTokens` (1 to 64, default 32). The registry keys trained mappers by (sender, receiver). The runtime loads one pair at startup from `LATENT_MAPPER=<checkpoint>`, and answers 501 for a pair it has not loaded.
   - The response is the receiver's answer text, a receipt (mapper id, token counts, timings), and no tensors.
   - KV tensors never leave the machine.
 - **Ledger (`latent_transfer` tool).** The ledger forwards the request. The answer comes back marked as unverified text, the same trust rule as the M2a answer field.
