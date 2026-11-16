@@ -182,7 +182,14 @@
       "expected": { "correct": false, "cited": false } },
     { "questionRef": { "file": "evals/latent/fresh.json", "id": "hold-expiry" },
       "slice": { "answer": "The hold expires and the next waiting member gets the item.", "findings": [{ "label": "A hold does not expire before pickUpBy", "evidence": [{ "path": "src/holds.js", "startLine": 30, "endLine": 31 }] }] },
-      "expected": { "correct": true, "cited": true }, "note": "a forbidden phrase in a label does not fail the answer" }
+      "expected": { "correct": true, "cited": true }, "note": "a forbidden phrase in a label does not fail the answer" },
+    {"questionRef": {"file": "evals/latent/fresh.json", "id": "renewals"}, "slice": {"answer": "up to 2\u017f, 14 days"}, "expected": {"correct": false, "cited": false}, "note": "Codex review of H4: U+017F LONG S is a word character for \\b under JavaScript iu, so 2 is not followed by a boundary. With re.ASCII the Python port graded this correct."},
+    {"question": {"id": "long-s-word", "required": [[{"pattern": "x\\w"}]], "evidence": []}, "slice": {"answer": "x\u017f"}, "expected": {"correct": true, "cited": false}, "note": "\\w matches U+017F under JavaScript iu"},
+    {"question": {"id": "long-s-literal", "required": [[{"pattern": "\\bsecond\\b"}]], "evidence": []}, "slice": {"answer": "the \u017fecond one"}, "expected": {"correct": true, "cited": false}, "note": "a literal s matches U+017F under JavaScript iu"},
+    {"question": {"id": "kelvin", "required": [[{"pattern": "\\bkey\\b"}]], "evidence": []}, "slice": {"answer": "the \u212aEY"}, "expected": {"correct": true, "cited": false}, "note": "U+212A KELVIN SIGN lower-cases to k before matching"},
+    {"question": {"id": "end-anchor", "required": [[{"pattern": "^\\S+$"}]], "evidence": []}, "slice": {"answer": "abc\n"}, "expected": {"correct": false, "cited": false}, "note": "Codex review of H4: $ does not match before a final newline in JavaScript (Python's $ does)"},
+    {"question": {"id": "end-anchor", "required": [[{"pattern": "^\\S+$"}]], "evidence": []}, "slice": {"answer": "abc"}, "expected": {"correct": true, "cited": false}},
+    {"question": {"id": "class-escapes", "required": [[{"pattern": "^[\\d\\s]+$"}]], "evidence": []}, "slice": {"answer": "1\u00a02"}, "expected": {"correct": true, "cited": false}, "note": "\\d and \\s inside a character class"}
   ],
   "graderJavaScriptOnly": [
     { "questionRef": { "file": "evals/latent/fresh.json", "id": "renew-on-hold" },
