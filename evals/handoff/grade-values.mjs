@@ -40,6 +40,21 @@ function longestFirst(matches) {
 }
 
 const people = ['mira', 'tomas', 'jonas', 'priya', 'dana', 'ravi', 'sam', 'elif', 'leo', 'ali'];
+// A capitalised word is read as a person's name unless it is one of these common words,
+// so a name the transcript never uses ("Priya and Alice") still counts as another person.
+const notNames = new Set(('who which what whether when where why how the a an and or but not no none nothing nobody unknown ' +
+  'it he she they we i you his her their our my your this that these those there here since with without for on in at to from by of ' +
+  'as is are was were be been will would should can could may might must shall do does did has have had if then than so also only ' +
+  'still yet already open question answer answered pending tbd n/a na none yes ' +
+  'monday tuesday wednesday thursday friday saturday sunday mon tue wed thu fri sat sun ' +
+  'january february march april may june july august september october november december ' +
+  'lumen heron kestrel postgres postgresql sqlite frankfurt germany ci gpu mcp eu api json sla').split(' '));
+function personNames(text) {
+  return scan(text, /(?<![\w'-])([A-Z][a-z]+)(?![\w-])/gu, match => {
+    const name = match[1].toLowerCase();
+    return people.includes(name) || notNames.has(name) ? undefined : name;
+  });
+}
 const birds = ['heron', 'kestrel', 'falcon', 'osprey', 'crane', 'egret', 'swift', 'wren', 'robin', 'owl', 'hawk', 'eagle', 'lark', 'finch'];
 const cities = { frankfurt: 'eu-central-1', ireland: 'eu-west-1', dublin: 'eu-west-1', london: 'eu-west-2', paris: 'eu-west-3', stockholm: 'eu-north-1' };
 const databases = { postgres: 'postgres', postgresql: 'postgres', pg: 'postgres', sqlite: 'sqlite', mysql: 'mysql', mariadb: 'mariadb', mongo: 'mongodb', mongodb: 'mongodb', redis: 'redis', dynamodb: 'dynamodb', oracle: 'oracle' };
@@ -50,7 +65,7 @@ const extract = {
   weekday: text => scan(text, /\b(mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b/giu,
     match => match[1].slice(0, 3).toLowerCase()),
   database: text => scan(text, vocabulary(Object.keys(databases)), match => databases[match[1].toLowerCase()]),
-  person: text => scan(text, vocabulary(people), match => match[1].toLowerCase()),
+  person: text => longestFirst([...scan(text, vocabulary(people), match => match[1].toLowerCase()), ...personNames(text)]),
   bird: text => scan(text, vocabulary(birds), match => match[1].toLowerCase()),
   amount: text => scan(text, /(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)(\s*k\b)?/giu,
     match => Number(match[1].replace(/,/gu, '')) * (match[2] ? 1000 : 1)),
@@ -65,6 +80,10 @@ const extract = {
   // An interval in hours.
   interval: text => longestFirst([
     ...scan(text, new RegExp(`\\b(\\d+|${numberWord})[\\s-]*(?:h\\b|hours?\\b|hourly\\b)`, 'giu'), match => numeric(match[1])),
+    ...scan(text, new RegExp(`\\b(\\d+|${numberWord})[\\s-]*(?:mins?\\b|minutes?\\b)`, 'giu'), match => numeric(match[1]) / 60),
+    ...scan(text, new RegExp(`\\b(\\d+|${numberWord})[\\s-]*(?:days?\\b)`, 'giu'), match => numeric(match[1]) * 24),
+    ...scan(text, new RegExp(`\\b(\\d+|${numberWord})[\\s-]*(?:weeks?\\b)`, 'giu'), match => numeric(match[1]) * 168),
+    ...scan(text, /\b(?:half[- ]hourly|every half hour)\b/giu, () => 0.5),
     ...scan(text, /\bhourly\b/giu, () => 1),
     ...scan(text, /\b(?:daily|nightly|once a day|every day|each day|per day|every night)\b/giu, () => 24),
     ...scan(text, /\btwice a day\b/giu, () => 12),
@@ -143,9 +162,15 @@ export const valueTable = {
   onCall: [{ type: 'person', current: 'dana', alternatives: ['ravi'] }],
 };
 
-/** The open question: it must ask who signs the vendor contract and must not name anyone as the answer. */
+/**
+ * The open question: it must ask (who, which or whether) who signs the vendor contract,
+ * must not name anyone but Mira and Tomas, and must not call it answered or say no
+ * question is open.
+ */
 function judgeQuestion(text) {
   if (!/\bsign/iu.test(text) || !/\b(?:contract|vendor)/iu.test(text)) return false;
+  if (!/\b(?:who|whom|which|whether)\b/iu.test(text)) return false;
+  if (/^\W*(?:no|none|nothing)\b/iu.test(text) || /\b(?:is|was|has been|already|been)\s+(?:answered|resolved|settled|decided|closed)\b/iu.test(text)) return false;
   return extract.person(text).every(match => match.value === 'mira' || match.value === 'tomas');
 }
 

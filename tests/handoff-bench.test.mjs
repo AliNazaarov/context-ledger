@@ -169,6 +169,34 @@ test('labelled set: grader A and grader B against 82 hand labels and each other'
   assert.equal(report.aFalseRejects + report.bFalseRejects, 0);
 });
 
+test('review regressions: grader B refuses unknown names, other intervals, and an answered or denied question', () => {
+  // Codex review of 9cf3895: these passed grader B. They stay out of the labelled set,
+  // which was written before the graders and is kept as it was.
+  assert.equal(valueGrader.reviewer('Priya and Alice'), false);
+  assert.equal(valueGrader.onCall('Dana, backed up by Marta'), false);
+  assert.equal(valueGrader.backup('every 6 hours and every 30 minutes'), false);
+  assert.equal(valueGrader.backup('every 6 hours, full copy every 2 days'), false);
+  assert.equal(valueGrader.questionForTomas('Alice signs the vendor contract'), false);
+  assert.equal(valueGrader.questionForTomas('No vendor contract signature question remains open'), false);
+  assert.equal(valueGrader.questionForTomas('Who signs the vendor contract? It was answered: Tomas does'), false);
+  // Right answers still pass.
+  assert.equal(valueGrader.reviewer('Priya reviews it, since Jonas is away launch week'), true);
+  assert.equal(valueGrader.onCall('Dana (Ravi is on leave)'), true);
+  assert.equal(valueGrader.backup('every six hours (was daily)'), true);
+  assert.equal(valueGrader.questionForTomas('Who signs the vendor contract? Not answered yet.'), true);
+  assert.equal(valueGrader.questionForTomas('Tomas, who will sign the vendor contract?'), true);
+});
+
+test('a CLI that cannot start is a failed run, not a crash', async () => {
+  const { ask } = await import('../evals/handoff/agents.mjs');
+  const result = await ask({
+    agent: 'codex', cli: { command: 'no-such-handoff-cli-g10', prefix: [], shell: false }, model: 'm', prompt: 'x',
+    tools: ['session_read'], work: tmpdir(), mcpPath: 'src/mcp.mjs', port: 1, timeoutMs: 5000,
+  });
+  assert.deepEqual([result.ok, result.timedOut, result.reply, result.costUsd], [false, false, '', null]);
+  assert.match(result.error, /^could not start: ENOENT$/u);
+});
+
 test('both graders read the answer object out of prose and score a whole reply', () => {
   const right = Object.fromEntries(facts.map(fact => [fact.key, fact.current]));
   const reply = `Here it is {as asked}:\n${JSON.stringify(right, null, 2)}\nDone {ok}.`;
@@ -282,6 +310,8 @@ test('failed, timed-out and cross-arm runs are logged, counted and scored 0', as
     [3, 0, 2, 1, 1]);
   assert.equal(transcriptGroup.meanScore, 0, 'a run that is not valid scores 0');
   assert.equal(transcriptGroup.meanMs, null, 'times are averaged over valid runs only');
+  // The cross-arm run was paid for, so the spend total counts it; the per-valid-run mean has nothing to average.
+  assert.deepEqual(transcriptGroup.costUsd, { total: 0.0421, reported: 1, meanValid: null, reportedValid: 0 });
 });
 
 test('the default spend log is under a folder Git ignores', async () => {

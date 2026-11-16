@@ -75,7 +75,9 @@ export function summarize(rows) {
     const scored = group.map(row => (row.valid ? row.score.b : 0));
     const total = group[0].score.total;
     const factKeys = Object.keys(group[0].facts);
-    const costs = valid.map(row => row.costUsd).filter(value => value !== null);
+    // Spend counts every run that reported a cost, valid or not; the mean is per valid run.
+    const costs = group.map(row => row.costUsd).filter(value => value !== null);
+    const validCosts = valid.map(row => row.costUsd).filter(value => value !== null);
     return {
       agent: group[0].agent,
       model: group[0].model,
@@ -91,7 +93,10 @@ export function summarize(rows) {
         cached: round(mean(valid.map(row => row.tokens.cached))),
         output: round(mean(valid.map(row => row.tokens.output))),
       },
-      costUsd: { total: costs.length ? round(costs.reduce((a, b) => a + b, 0), 4) : null, mean: round(mean(costs), 4), reported: costs.length },
+      costUsd: {
+        total: costs.length ? round(costs.reduce((a, b) => a + b, 0), 4) : null, reported: costs.length,
+        meanValid: round(mean(validCosts), 4), reportedValid: validCosts.length,
+      },
       meanScore: round(mean(scored), 2),
       total,
       meanScoreA: round(mean(group.map(row => (row.valid ? row.score.a : 0))), 2),
@@ -108,7 +113,8 @@ export function formatSummary(summary) {
     `${group.agent} ${group.model} ${group.arm}: ${group.valid}/${group.runs} valid (${group.failed} failed, ${group.timedOut} timed out, ${group.invalid} invalid)`,
     `  score ${group.meanScore}/${group.total} by grader B (A ${group.meanScoreA}), full pass ${group.fullPassRate}, grader disagreements per run ${group.meanGraderDisagreements}`,
     `  mean ${group.meanMs ?? '-'} ms, tokens in ${group.meanTokens.input ?? '-'} (cached ${group.meanTokens.cached ?? '-'}), out ${group.meanTokens.output ?? '-'}, ` +
-      `cost ${group.costUsd.total === null ? 'not reported' : `$${group.costUsd.total} total, $${group.costUsd.mean} mean over ${group.costUsd.reported}`}`,
+      `cost ${group.costUsd.total === null ? 'not reported'
+        : `$${group.costUsd.total} total over ${group.costUsd.reported} run(s), mean ${group.costUsd.meanValid === null ? '-' : `$${group.costUsd.meanValid}`} per valid run`}`,
     `  per fact: ${Object.entries(group.factPassRate).map(([key, rate]) => `${key} ${rate}`).join(', ')}`,
   ].join('\n')).join('\n');
 }

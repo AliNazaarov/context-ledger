@@ -179,8 +179,25 @@ export function codexArgs({ model, work, last, mcpPath, port, tools }) {
   return args;
 }
 
-/** Ask one agent one prompt. Returns usage and tool calls; the reply is for grading only. */
-export async function ask({ agent, cli, model, prompt, tools, work, mcpPath, port, timeoutMs }) {
+/**
+ * Ask one agent one prompt. Returns usage and tool calls; the reply is for grading only.
+ * A CLI that cannot be started is a failed run, not an error, so it is still logged and
+ * the remaining runs go on. Only Ctrl-C rejects.
+ */
+export async function ask(options) {
+  const started = performance.now();
+  try {
+    return await askOnce(options);
+  } catch (error) {
+    if (interrupted) throw error;
+    return {
+      ok: false, timedOut: false, ms: Math.round(performance.now() - started), reply: '', toolCalls: {},
+      tokens: { input: 0, cached: 0, output: 0 }, costUsd: null, error: `could not start: ${error.code ?? 'error'}`,
+    };
+  }
+}
+
+async function askOnce({ agent, cli, model, prompt, tools, work, mcpPath, port, timeoutMs }) {
   if (agent === 'claude') {
     const config = join(work, 'claude-mcp.json');
     await writeFile(config, JSON.stringify({
