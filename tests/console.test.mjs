@@ -30,7 +30,11 @@ function play(events, { workingMs = 8000 } = {}) {
 
 test('the committed demo recording is what the real store produces from the demo transcripts', async () => {
   const rebuilt = recordingText(await buildRecording());
-  assert.equal(await readFile(new URL('demo-recording.json', consoleDir), 'utf8'), rebuilt,
+  // A Windows checkout with core.autocrlf has CR LF line ends; the content is what counts.
+  const committed = (await readFile(new URL('demo-recording.json', consoleDir), 'utf8')).replaceAll('
+', '
+');
+  assert.equal(committed, rebuilt,
     'Run node demo/console-recording.mjs and commit the result.');
   const providers = Object.values(recording.sessions).map(session => session.provider).sort();
   assert.deepEqual(providers, ['claude', 'codex']);
