@@ -249,6 +249,25 @@ test('an older snapshot read after a retry never replaces a newer one with the s
   assert.equal(model.numbers(Date.now()).handoffs, 3);
 });
 
+test('publish order, not the clock, decides which snapshot is current', async () => {
+  // A is current; B's first read fails; C is published after the clock moved back.
+  const rows = rowsFor(1, { base: 3000, party: () => 'leo', at: () => startOfToday() + 500_000 });
+  const failOnce = new Set();
+  const { source, model } = sourceOver(fakeLedger(rows, { failOnce }));
+  await source.tick();
+  const make = (n, at) => ({ id: hex(3000 + n), sessionId: rows[0].sessionId, party: 'leo', createdAt: new Date(startOfToday() + at).toISOString() });
+  const b = make(2, 600_000);
+  rows.unshift(b);
+  failOnce.add(`/api/graphs/${b.id}`);
+  await source.tick();
+  const c = make(3, 400_000);
+  rows.unshift(c);
+  await source.tick();
+  await source.tick();
+  assert.equal(model.currentGraphIds()[0], c.id);
+  assert.equal(model.numbers(Date.now()).handoffs, 3);
+});
+
 test('a linked graph that failed to read is tried again later and then resolves', async () => {
   const model = createModel({ workingMs: 0 });
   const ask = { id: 'q', kind: 'question', status: 'open', to: 'leo', label: 'Which port?', evidenceLines: [1] };
