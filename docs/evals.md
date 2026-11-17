@@ -807,6 +807,154 @@ A second independent review, of 2a02e98, upheld seven findings. Each fix has a t
 - **graph_list and room_list trimming was not exercised** (low). A fake ledger serves 250 rooms with 32-character party names and 250 graphs with 120-tag titles. With `limit: 100`, each first page holds fewer than 100 rows and stays in the bound, `more.after` is the last row shown, and the walk returns every row once, in order. It fails if room_list skips `listResult`.
 - **Suites (Windows):** node 119/120 (one skipped), Playwright 13/13. tools/list is 10,104 characters.
 
+## Housekeeping H1–H5 and G10 (defined 2026-11-16, before implementation)
+
+Source: a review of the project map (floorplan) against CI, the handoff notes and the board. One card per branch, all branched from one claim commit so their pull requests merge without touching the same lines. Each card writes its results only under its own **Results** heading below. Synthetic data only. Baseline on `main` 17ecef0 (Windows): node 139/140 (one skipped), Python runtime 131 run (24 skipped without torch). Each card closes with its evals passing, the node suite passing, a Codex read-only review, and fixes with regression tests. Playwright is run once per branch after the agents finish, because its server port is fixed.
+
+### H1 — Runtime checks in CI (`claude/h1-runtime-ci`)
+
+| Eval | Expected |
+| --- | --- |
+| Runs on every push and pull request | A CI job runs `python -m unittest discover -s tests -t .` in `runtime/` on Python 3.12 (Ubuntu, the WSL version) and 3.13 (Windows, the documented test version). No third-party Python package is installed; torch-only checks skip with a reason. |
+| Same result as locally | The job's run and skipped counts match a local run of the same command on the branch. |
+| A failing check fails the job | With one runtime assertion deliberately broken, the same command exits non-zero (checked locally, not committed). |
+| Nothing else changes | The node and Playwright steps are unchanged. Actions are pinned to the same major versions the workflow already uses. No secrets, no network beyond checkout and setup. |
+
+**Results — H1:** passed locally; the first hosted run is still to be read.
+
+- **Runs on every push and pull request — passed.** The new `.github/workflows/runtime.yml` runs `python -m unittest discover -s tests -t . -v` in `runtime/` on `push` and `pull_request`, as a matrix of `ubuntu-latest` with Python 3.12 and `windows-latest` with Python 3.13 (`fail-fast: false`). It has no `pip install`, `permissions: contents: read`, no secrets, and checkout does not keep credentials. Every skipped check prints a reason. The 21 torch checks say "torch and transformers are needed for M2b" or "... for M2c". `e2e.yml` is unchanged. The workflow parses with PyYAML 6.0.1 (WSL system Python).
+- **Same result as locally — passed for Linux; Windows count to confirm on the hosted run.** Windows, Python 3.13.0: 131 run, 24 skipped, OK. That is 21 torch checks plus 3 symlink checks (`test_prefix` ×2, `test_review_fixes` ×1), which skip because this user does not have the symlink privilege. WSL Ubuntu-24.04, Python 3.12.3: 131 run, 21 skipped, OK, both on `/mnt/c` and in a clean `git archive` of the branch on ext4. GitHub's Windows runners run as administrator, so the symlink checks should run there too. Expected hosted counts: 131 run, 21 skipped on both jobs.
+- **A failing check fails the job — passed.** I broke one assertion in `runtime/tests/test_limits.py` line 60 for the test only, then reverted it without committing. The command exited 1 on Windows (`FAILED (failures=1, skipped=24)`) and on WSL (`FAILED (failures=1, skipped=21)`). After the revert it exited 0.
+- **Nothing else changes — passed.** The new workflow uses `actions/checkout@v4`, the same major version as `e2e.yml`, and `actions/setup-python@v5`. It needs no network beyond checkout and setup-python. AGENTS.md section 4 step 3 and the pull request template checklist now list the Python command.
+- **Codex read-only review:** one low finding. The Windows skip count may differ on hosted runners because they run as administrator. Accepted: the expected hosted count is recorded above, and confirming it is left open until the first CI run. No code change was needed, because the symlink checks already run and pass on Linux. No other findings.
+- **Suites (Windows):** node 139/140 (one skipped). Python runtime: 131 run, 24 skipped on Windows; 131 run, 21 skipped on WSL. Playwright was not run here because its port is fixed; the change touches no browser journey.
+
+### H2 — Docs match what is merged (`claude/h2-stale-docs`)
+
+| Eval | Expected |
+| --- | --- |
+| README | The M2c line states the recorded result from `docs/m2c-latent-team.md` instead of "not recorded yet". The test counts are the counts measured on this branch, with the date. |
+| Handoff | The cycle 10 steps say PR #8 was merged on 2026-11-12 with no GitHub review recorded, and that the human review of the schema migration is still owed. No other history is rewritten. |
+| Runtime docstrings | `runtime/latent_pool/mappers.py` and any other docstring found stale describe what the code does today. |
+| Every change has a source | Each changed statement cites, in the results, the doc, commit or `gh` output it was checked against. No new claim without one. |
+
+**Results — H2:** all four rows pass. Each changed statement and what it was checked against:
+
+- **README, M2c line.** "Not recorded yet" is replaced by the seed-0 figures (0.835 against `text_mas` 0.780 and `single` 0.820, 72% fewer tokens, 1.85× faster, `latent_random` 0.505), the repeat passes on seed 1 and the disjoint block, and the caveats (not better than `single`, `text_mas` held back by truncated plans). Source: `docs/m2c-latent-team.md`, "Result: the full measurement", "Second seed" and "A disjoint second sample".
+- **README, tests line.** Measured on this branch on 2026-11-16: node 139/140 (one skipped), Python runtime 131 run, 24 skipped (21 need torch and transformers, 3 need symlink rights; from `-v` skip reasons). Playwright was not run here: `npx playwright test --list` lists 13 tests, and the last recorded pass is 13/13 in cycle 10 (this file, "Results — Cycle 10 second review fixes").
+- **README, duplicate paragraph removed.** The negotiation-room section repeated the v1 identity paragraph, saying node order matters, which is false for the v2 graphs rooms use. Source: README "Version 2: two parties" ("Order carries no meaning in v2"); the v1 paragraph stays under "Exchange a semantic graph".
+- **Handoff, cycle 10.** The header now says the branch was merged as PR #8 on 2026-11-12 (17ecef0); "is pushed as draft PR #8 ... CI passes" is now past tense; step 4 says PR #8 was merged with no review or comment recorded on GitHub and that the human review of the migration to version 1 is still owed. Source: `gh pr view 8 --json state,mergedAt,reviews,comments` (MERGED, 2026-11-12T23:13:26Z, 0 reviews, 0 comments) and `git log` (17ecef0).
+- **Handoff, cycles 4 and 6.** The "not pushed" lines are kept and get a "Later:" note: cycle 4 reached `main` through PR #1, cycle 6's two branches through PR #6, both merged 2026-11-08, and PR #4 (`leo/latent-read`) was closed unmerged. Source: `gh pr view 1/4/6` (state, mergedAt, closedAt, base) and PR #6's description. Cycle 9's "PR #7 records no review" is correct (`gh pr view 7`: 0 reviews) and is unchanged.
+- **`runtime/latent_pool/mappers.py` docstring.** No longer says no mapper is trained and 501 always. It says the registry backs `/latent/mappers` and `/latent/transfer`, starts empty, gets one pair from `LATENT_MAPPER` via `transfer.register_from_env`, and answers 501 for a pair not loaded. Source: `transfer.py` `register_from_env`, `server.py` `main()` and routes, `docs/m2b-transfer.md` (the trained 0.5B to 360M pair).
+- **`runtime/latent_pool/transfer.py`, `register_from_env` docstring.** "Needs torch and a GPU" becomes "needs torch" plus the device order the code uses (`LATENT_MAPPER_DEVICE`, else CUDA, else CPU). Source: the function body.
+- **`runtime/latent_pool/server.py` and `__init__.py` docstrings.** They now name the M2b and M2c routes the server also serves, and the `LATENT_ALLOWED_HOSTS` opt-in to the Host check. Source: `LatentServer.routes`, `Handler._allowed`, `_allowed_hosts`.
+- **`docs/latent-read.md`.** The 501 row said the ledger never calls `/latent/transfer`; the ledger's `latent_transfer` calls it and falls back to text on 501 (`src/latent.mjs`, transfer handler). The `GET /latent/mappers` section no longer says no pair exists; it describes the hashed pair list and `LATENT_MAPPER` (`mappers.py` `pairs()`, `transfer.py`).
+- **`docs/m2b-transfer.md`, Serving.** The request body now lists exactly one of `text` or `paths` and `maxNewTokens` (1 to 64, default 32), and the `LATENT_MAPPER` startup load. Source: `transfer.py` `FIELDS`, `document()` and `__call__`.
+- **Codex review** (read-only, of `claude/housekeeping-claim...ae7ee56`): it found the changed figures and runtime descriptions match their sources and no behaviour change, and raised two findings in `docs/latent-read.md`, both fixed:
+  - **Status line still credited PR #4** (medium). It now says PR #4 was a draft closed without merging and that `leo/latent-read` reached `main` through PR #6 on 2026-11-08. Source: `gh pr view 4` (CLOSED, not merged) and `gh pr view 6` (MERGED 2026-11-08, body lists `leo/latent-read`).
+  - **The gate section said `latent_read` matches the closed model** (low). It now states the gate as a target and the recorded result: 14/16 to Claude Sonnet's 16/16, slice 5–9% of the prefix tokens. Source: this file, cycle 6, "Gate verdict" and "Cost".
+  - These are documentation and docstring changes only, so there is no code to regression-test; the Python suite was re-run after the docstring edits.
+- **Suites (Windows, this branch):** node 139/140 (one skipped), Python runtime 131 run, OK (24 skipped). Playwright not run (fixed port); 13 tests listed. No raw control or format characters in the changed files.
+
+### H3 — Split the MCP adapter (`claude/h3-split-mcp`)
+
+| Eval | Expected |
+| --- | --- |
+| Same protocol, same tools | `tools/list` output and the `initialize` result are byte-identical before and after, checked by a script or test against the output captured on `main`. |
+| Same answers | Every existing node test passes unchanged, including `tests/mcp.test.mjs`, `tests/mcp-live.test.mjs`, `tests/paging.test.mjs` and `tests/list-api.test.mjs`. |
+| Same entry point | `node src/mcp.mjs` still starts the adapter, so the demo rehearsal, the tests and the Claude Code and Codex settings that start it need no change. |
+| Smaller files | No file of the adapter is over 400 lines. No new dependency and no build step. |
+| Merge cost measured | A trial merge of this branch with `vuek0/subagent-graphs` (not committed) records the conflicting files and hunks, and the results say where each of that branch's `src/mcp.mjs` changes now belongs. |
+
+**Results — H3:** all five rows pass, 2026-11-16 (Windows).
+
+- **Layout.** The code moved verbatim, by line range, from the 1,086-line `src/mcp.mjs`. The only edits are `export`, a two-space dedent of each tool entry and `serve()` wrapping the stdin and stdout listeners. `src/mcp.mjs` (38 lines) is still the entry point and holds the instructions, `initialize` and the method table. `src/mcp/protocol.mjs` (111) is the stdio JSON-RPC loop. `ledger.mjs` (74) is the HTTP client, the PORT check and the cursor error. `common.mjs` (72) has the error types, argument checks and result text. `pages.mjs` (86) has partial notes, list trimming and JSON item paging, and `file-pages.mjs` (169) has file-text paging. Each tool group has one file of exported `[name, definition]` entries: `sessions.mjs` (153), `graphs.mjs` (161, which holds the context_for briefing cache), `rooms.mjs` (87) and `latent.mjs` (173). `tools.mjs` (52) builds the Map in the old order and runs tools/call with the result-size backstop. No dependency was added and there is no build step.
+- **Same protocol, same tools: pass.** `tests/mcp-snapshot.mjs` prints `initialize` (2025-06-18, 2024-11-05 and an unsupported version), `tools/list`, `ping` and six fixed error replies. Its output on the claim commit 8a41b0e, captured before any change, and on this branch are both 17,365 bytes and byte-identical (`cmp`; sha256 `67799e8e…a6e14cbfa33502f`).
+- **Same answers: pass.** No test file changed. `tests/mcp.test.mjs`, `mcp-live`, `paging`, `list-api` and `latent-ledger` all pass. One weak spot: the existing check in `paging.test.mjs` that the adapter never names the decisions route reads only `src/mcp.mjs`. The new `tests/mcp-layout.test.mjs` applies it to every adapter file.
+- **Same entry point: pass.** `tests/mcp-client.mjs`, `demo/rehearse.mjs` and the README settings still start `node src/mcp.mjs` and needed no change. New tests check that it answers on stdout only, writes nothing to stderr and exits 0 when stdin ends. They also check that an invalid PORT still exits 1 with "Invalid PORT." before any message is answered.
+- **Smaller files: pass.** The largest adapter file has 173 lines. `tests/mcp-layout.test.mjs` fails if any adapter file has more than 400 lines, imports anything but a relative module or `node:` built-in, or contains a raw control or format character. It also fails if any file other than `ledger.mjs` calls `fetch`.
+- **Merge cost measured: pass.** `git merge-tree --write-tree --name-only` with `vuek0/subagent-graphs` reports the same eight conflicting files before (8a41b0e) and after (this branch): README.md, docs/delivery-board.md, docs/evals.md, docs/handoff.md, src/mcp.mjs, src/server.mjs, src/store.mjs and tests/mcp.test.mjs. Only `src/mcp.mjs` changes. Before the split it had 2 hunks (instructions: 4 against 7 lines; context_for: 21 against 4) and git merged the rest. After the split it has 2 hunks (imports: 2 against 7; body: 4 against 568). Git does not follow code into new files, so whoever merges should take this branch's `src/mcp.mjs` and re-apply that branch's changes:
+  - The `instructions` text (the subagent default) goes in `src/mcp.mjs`.
+  - The `launcher.mjs` import, `resetDate`, `choiceText`, `quotaStopMessage`, `startLedger`, the ECONNREFUSED retry, the `instanceof ToolError` rethrow and the 402/503 quota branch of `ledger()` go in `src/mcp/ledger.mjs`, which also needs `isObject` from `common.mjs`.
+  - `quotaNote` and the quota note of `context_for` go in `src/mcp/graphs.mjs`. Since cycle 10, the note should be added to the `after` list next to `meter`, so it counts against the bound. On a later page served from the briefing cache there is no `data`, so the note applies only to pages that fetched.
+  - The `node:fs`, `node:path` and `importer.mjs` imports, `currentTranscript` and the `handoff_publish` entry should go in a new `src/mcp/handoff.mjs`, which avoids conflicts (or `graphs.mjs`, which would then have about 250 lines). It needs `ToolError`, `checkArguments`, `hexId`, `maxPacketBytes` and `text` from `common.mjs`, plus `ledger`. Add `handoffPublish` to the Map in `src/mcp/tools.mjs` after `graphPublish`.
+  - The `tests/mcp.test.mjs` conflict (the tool names) is the same as before the split.
+- **Review.** Codex (`codex exec --sandbox read-only`) found no runtime or security regression. It checked that initialize, tools/list and ping were byte-identical against the original adapter, and that listener attachment, the invalid-PORT exit, the briefing cache, stdin buffering, escaping, closed schemas, fixed errors, the room restriction and the backstop are unchanged. It raised two findings, both fixed:
+  - Medium: these results were still pending. Fixed by this entry.
+  - Low: `tests/mcp-snapshot.mjs` printed on `exit`, before stdout might have drained. It now prints on `close`. That is a helper script, not a test, so there is no regression test; the comparison was rerun and is identical.
+  - Codex's own node run failed 25 tests because its sandbox blocked temporary directories, so the counts below are the local run.
+- **Suites (Windows):** node 143/144 (one skipped; the 4 new tests are in `tests/mcp-layout.test.mjs`). Python runtime 131 run, 24 skipped, OK. Playwright was not run here (fixed port). No `tests/e2e` spec starts the MCP adapter, so no browser journey should change.
+
+### H4 — One source for cross-language rules (`claude/h4-shared-rules`)
+
+| Eval | Expected |
+| --- | --- |
+| Secret-file rule | One data file holds the secret directories, names, prefixes and suffixes. `src/latent.mjs` and `runtime/latent_pool/prefix.py` both read it, and both give the same verdict on a shared table of at least 30 paths, run by a node test and a Python test. |
+| Whitespace fold | The ledger and the runtime fold whitespace the same way on a shared table of cases (including non-ASCII spaces, tabs and line separators), run by both suites. |
+| Latent grader | `evals/latent/grade.mjs` and the Python port in `runtime/tests/test_fixture_e2e.py` agree on a shared table of graded answers, run by both suites. |
+| Drift fails a test | Changing any one of these rules in one language only makes a test fail (checked by hand, not committed). |
+| Runtime stays stdlib | The runtime still uses only the Python standard library and still runs from `runtime/` with `LATENT_ROOT` elsewhere. Default results are unchanged. |
+
+**Results — H4:** all five rows pass (2026-11-16, Windows, Node 22.14, Python 3.13).
+
+- **Where the rules live.** `rules/latent-rules.json` holds the data: the secret directories, names, prefixes, suffixes and env templates, and the whitespace code points quotes fold. It is at the repository root because neither `src/` nor `runtime/` owns it, and `schemas/` holds graph JSON Schemas, a different kind of file. `src/latent.mjs` imports it with `{ type: 'json' }`; the new `runtime/latent_pool/rules.py` reads it with `json` from `Path(__file__).resolve().parents[2]`, so the working directory and `LATENT_ROOT` do not matter, and fails with "Shared rule file not found: …" when it is missing. `rules/latent-conformance.json` holds the shared cases, all non-ASCII characters as JSON escapes. `tests/latent-rules.test.mjs` (node) and `runtime/tests/test_rule_conformance.py` (Python) both run them. The node test replaces `tests/latent-space.test.mjs`, which parsed `pool.py`'s source.
+- **Secret-file rule: pass.** 55 shared paths (35 secret, 20 not): case variants, nested secret directories, every name, prefix and suffix, the three templates, U+212A KELVIN SIGN in place of the k of `server.key`, and near misses (`env.txt`, `.gitignore`, `worktree/.git`, `id_ecdsa.pub`, `public.key.txt`). Current behaviour kept, including `.envrc` and `.environment` (prefix `.env`) and `keys/id_rsa.pub` refused. The node test also checks every list entry is exercised; the Python test also runs `check_path_syntax` (400, "secret files"). Both lists matched exactly before the change.
+- **Whitespace fold: pass.** 20 shared strings (tab, CR LF, VT, FF, NBSP, U+1680, U+2000–U+200A, U+2028, U+2029, U+202F, U+205F, U+3000, U+FEFF, and U+001C, U+001F, U+0085, ZWSP, U+180E, ZWJ, which do not fold) through `normalizeSpace` and `fold_space`, plus `quotable_lines` in Python. The node test pins the shared list to `/\s/u` over every code point up to U+10FFFF. The two sides already agreed.
+- **Latent grader: pass, after fixing a disagreement.** The Python port (moved from `runtime/tests/test_fixture_e2e.py` to `runtime/tests/grade.py`, which that test imports) matched numbers as substrings ("3" passed on "30 minutes") and ignored pattern and forbidden options. It disagreed with `grade.mjs` on 24 of the first 34 shared cases. It now follows `grade.mjs`, the shared grader in docs/latent-read.md's ownership table. 41 shared graded answers: right, wrong value, wrong citation (lines, file), boundary overlap, forbidden option, forbidden text only in a label, pattern options, and questions from `questions.json` and `fresh.json`. `fresh.json` renew-on-hold uses variable-width lookbehind, which Python's `re` cannot compile, so the port raises ValueError for it rather than grading it differently (a shared case checks that); only node grades that question.
+- **Drift fails a test: pass** (each change made by hand, run, reverted, not committed): Python secret logic without the prefix rule, or with `.kube` dropped from its copy → `SecretRuleConformanceTest`; JavaScript secret name not lower-cased → node "secret-file rule decides every shared case"; JavaScript fold `/[ \t\n\r]+/gu` → node "ledger folds whitespace in every shared case"; Python fold without NBSP → `WhitespaceConformanceTest` (both tests); U+FEFF removed from the shared list → node "shared whitespace list is exactly what /\s/u matches" and the Python fold tests; Python grader with substring numbers → `GraderConformanceTest`; JavaScript grader ignoring forbidden options → node "grader decides every shared graded answer".
+- **Runtime stays stdlib: pass.** New Python code imports only `json`, `pathlib`, `re`, `os`, `subprocess`, `sys`, `tempfile`, `unittest`. A Python test imports `latent_pool.prefix` in a subprocess whose working directory and `LATENT_ROOT` are a temporary directory. Default results are unchanged: no secret, whitespace or grading verdict on `main`'s existing tests changed.
+- **Review.** Codex (`codex exec --sandbox read-only`) on e75a3c0: no high findings. Two medium, both fixed with shared cases that fail on e75a3c0's port: (1) `re.ASCII` differed from JavaScript's `iu` for U+017F (renewals "up to 2ſ, 14 days" graded right in Python, wrong in JavaScript); the port now drops `re.ASCII` and rewrites `\d`, `\w`, `\b`, `\B` to ASCII classes and lookarounds that Python's Unicode IGNORECASE folds as JavaScript does; (2) Python's `$` matched before a final newline; it is now `\Z`. One low (these results were still pending) is fixed by this entry. None rejected.
+- **Suites:** node 143/144 (one skipped; was 139/140: −1 for `latent-space.test.mjs`, +5 new); Python runtime 140 run, 24 skipped, OK (was 131: +9 new). Playwright not run here (fixed port); no spec in `tests/e2e` mentions latent reading, and the ledger's refusal messages are unchanged.
+
+### H5 — Server request table (`claude/h5-server-routes`)
+
+| Eval | Expected |
+| --- | --- |
+| One default address | The local runtime's default address is defined once in `src/server.mjs`. `LATENT_URL` still overrides it. |
+| Same responses | A probe set run before and after (every route with its right method, a wrong method, an unknown path, a foreign Host, a foreign Origin on a write, a bad ID) gives the same status and body. |
+| Checks still come first | The Host and Origin checks run before any request handler, and the decisions route keeps its same-origin check. The existing node and Playwright checks pass unchanged. |
+| Merge cost measured | A trial merge with `vuek0/subagent-graphs` (not committed) records the conflicting hunks in `src/server.mjs` and how to resolve them. |
+
+**Results — H5:** all four rows pass (Windows, 2026-11-16). Playwright is not run here (fixed port); the orchestrator runs it.
+
+- **One default address:** pass. `src/server.mjs` names `defaultLatentUrl = 'http://127.0.0.1:4320'` once, and `latentUrl()` returns `process.env.LATENT_URL ?? defaultLatentUrl`. It is still read on each request, as before (not at start). LATENT_ROOT is also still read per request. `tests/routes.test.mjs` checks both: a fake runtime on 4320 gets the team request when LATENT_URL is unset (the test skips if 4320 is taken), and a server whose LATENT_URL changes between two requests sends the second to the new address. Changing the default to 4321, or caching the URL at start, makes a test fail (checked by hand, not committed).
+- **Same responses:** pass. `tests/routes.test.mjs` was committed first (2c4972b) and passed on the unchanged server. It sends 192 probes: the three static files (GET 200; POST and HEAD 404), unknown, encoded and trailing-slash paths, five foreign Hosts on a read and a write, `//x` and `*` URLs, and on each of the 7 writes a foreign Origin, the other local name's Origin, no Origin, text/plain, a declared 8 MiB + 1 body, bad JSON, bad UTF-8, and GET/PUT/DELETE/PATCH; a streamed 8 MiB + 1 body; every route with its right method; unknown, upper-case, short, long and trailing-slash IDs on the four ID routes, plus POST/PUT/DELETE on them; the decisions route's 12 cases; InputError, GraphInputError and LatentError (502 and 503) cases, and a 500. Wrong methods stay 404 (there is no 405). With `ROUTES_PROBE_OUT` set, the test writes every probe's status, headers and body (dates and port masked): the dump from the old server and the dump from the table are identical, byte for byte. The test passes unchanged on both servers.
+- **Checks still come first:** pass. Host and URL checks run before the table; each write's Origin, type and size checks stay in `readJson`; the decisions entry checks `Sec-Fetch-Site: same-origin` before `readJson`. Probes pin the order (a foreign Host beats a bad URL; the decisions rule beats a foreign Origin and an unknown room). Node suite 142/143 (one skipped), was 139/140; the 3 new tests are in `tests/routes.test.mjs`. Python runtime 131 run, 24 skipped, OK. Every Playwright spec exercises this server (`npm start`): `tests/e2e/demo.spec.mjs`, `graph.spec.mjs`, `graph-v2.spec.mjs`, `handoff.spec.mjs`, `library.spec.mjs`, `room.spec.mjs`.
+- **Merge cost measured:** `git merge-tree --write-tree --name-only` with `vuek0/subagent-graphs` (merge base 19f6522) conflicts in the same 8 files from this branch and from the claim commit 8a41b0e (README, board, evals, handoff, `src/mcp.mjs`, `src/server.mjs`, `src/store.mjs`, `tests/mcp.test.mjs`). In `src/server.mjs` the claim commit already has 1 hunk (the latent import line, because main added `latentFiles`); this branch has 3: the import line, the quota client next to the new table, and the dispatch chain against the table. To resolve: keep both import sets; keep `quota` after `store` and keep the table (handlers read `quota` at request time); replace that branch's chain with entries: `{ GET, path: '/api/health' }` returning `{ name, version }`, first in the table; `{ POST, path: '/api/import-file' }` after `/api/import`, with its `readJson`, provider check and `readTranscriptFile`; and in the context entry, return `{ context }` when there is no quota, else call `quota.consume()` and return `{ context, quota }` on success, or write the 402 or 503 with `json()` and return `sent`. The PID file and signal handlers outside the dispatch merge without conflict.
+- **Codex review** (`codex exec --sandbox read-only`): no server behaviour change found. Findings: (medium) Results still pending — fixed by this entry. (low) the full before/after comparison is optional and not asserted — the comparison was run and is recorded above; rejected as a committed golden file, because it holds the full page, script and store output and would fail on unrelated changes by other cards. (low) no test that LATENT_URL is read per request — fixed in fe33d83 with the child-process test above. (low) the generic 500 was not probed — fixed in the same test: a forced static read failure gives 500 `Local request failed.` with the security headers.
+
+### G10 — Published handoff benchmark, offline parts (`claude/g10-handoff-benchmark`)
+
+| Eval | Expected |
+| --- | --- |
+| Stage demo untouched | `demo/` stage transcripts, prompts and reference graphs are byte-identical, so the recorded demo still matches. The benchmark uses its own synthetic fixtures. |
+| More facts, some late | At least 12 graded facts, at least 4 of which appear only after the first page `session_read` returns for the long transcript, and at least 3 of which were changed or superseded during the conversation. |
+| Two independent graders | A second grader built a different way from the first agrees with it on a labelled set of at least 60 synthetic answers (right, superseded, negated, missing, and right with an added false detail). Agreement and every disagreement are recorded. |
+| Fairness rules | `BENCHMARKS.md` fixes the rules: same model and question for both arms, same tools, alternating arm order, one timeout, how tokens, cost and time are counted, and what counts as a pass. |
+| Spend log | Each benchmark run appends one line (date, arm, model, tokens in, cached and out, cost, time, score) to a file Git ignores, and a summary command prints only aggregates. No transcript text is logged. |
+| No paid runs here | Live runs with Claude Code and Codex are not part of this card; the results say how to run them. |
+
+**Results — G10 (2026-11-16, Windows):** all six rows met offline. No live run was made. The code is in `evals/handoff/`, the rules in `BENCHMARKS.md`, the tests in `tests/handoff-bench.test.mjs`.
+
+- **Stage demo untouched:** `git diff claude/housekeeping-claim -- demo/` is empty. Nothing in `evals/handoff/` imports `demo/`, and a test checks that.
+- **More facts, some late:** a synthetic Claude Code session of 408 lines (Mira hands her context to Tomas) and 14 graded facts. 6 change during the conversation (port, launch day, database, reviewer, budget, backup interval). Through the real `session_read` tool against a test ledger, the session takes 2 pages and page 1 ends at line 278. 7 facts get their current value only after page 1, and 4 of them (feature flag, timeout, on-call person, open question) are not mentioned on page 1 at all. The test fails if the paging bound moves a late fact onto page 1. The graph arm's fixed reference graph states every current value in its `context_for` briefing.
+- **Two independent graders:** grader A checks keywords like `gradeHandoff`. Grader B extracts typed values and checks them against explicit current, superseded and mentioned values. `evals/handoff/labelled.json` holds 82 single-field answers (32 right, 50 wrong), labelled by hand by the implementing agent before either grader was written. A human check of the labels is still owed. `node evals/handoff/agreement.mjs` prints the numbers, and the test pins them.
+  - Grader B agrees with the labels on 79/82 (96%): 3 false accepts, 0 false rejects. Grader A agrees on 60/82 (73%): 22 false accepts, 0 false rejects. A and B agree with each other on 63/82 (77%).
+  - B was 78/82 at first. One fix followed: a bare "replaced" after a value was read as "this value was replaced", so "PostgreSQL (replaced SQLite ...)" was refused. That was the only change made after seeing the labelled results.
+  - Every disagreement (label / A / B): `launch-5` "Thursday at 09:00", `retry-3` "3 retries, then a 5 minute cooldown" and `flag-3` "beta_checkout, on by default" are wrong / right / right: a false claim of another type, which B does not look for. A accepts and B refuses, correctly, these wrong answers: `port-4`, `db-4`, `rev-4` (hedged); `budget-6` (negated); and `port-5`, `port-7`, `launch-6`, `db-5`, `rev-5`, `budget-5`, `region-4`, `code-4`, `retry-5`, `backup-4`, `freeze-5`, `flag-5`, `timeout-4`, `oncall-4`, `question-3` (right plus a false detail). The other 60 items grade the same under the label, A and B.
+- **Fairness rules:** `BENCHMARKS.md` fixes them. Both arms use the same agent, model and question text, the same two ledger tools (`session_read` and `context_for`) and no built-in tools. A call to the other arm's tool or to any tool outside the ledger makes a run invalid. Arm order alternates by run, every call has one timeout (default 300 seconds), and each invocation starts a fresh ledger. The file says how tokens, cost and time are counted, what passes per fact and per run, and that a mean needs at least 10 valid runs per arm.
+- **Spend log:** each run appends one line to `.context-ledger/benchmarks/handoff-spend.jsonl`, which Git ignores (a test runs `git check-ignore`). The line holds the date, run, arm, order, agent, model, timeout, validity flags, tokens in, cached and out, cost, time, both scores and a pass flag per fact. `--summary` prints aggregates per agent, model and arm. Fake-CLI tests check the exact fields, the alternating order, and that neither the log nor the summary holds any answer value. Failed, timed-out and cross-arm runs are logged and score 0.
+- **No paid runs here:** the runner has `--dry-run` and `--fake-cli evals/handoff/fake-cli.mjs`, and the tests use only those. `BENCHMARKS.md` says how to run it live: `node evals/handoff/run.mjs --agent claude|codex --model <model> --runs 10`, then `--summary`. Live results are not recorded yet.
+- **Codex review** (`codex exec --sandbox read-only`, of 9cf3895): five findings. Four were fixed, each with a regression test:
+  - (medium) Grader B passed names and intervals it did not know ("Priya and Alice", "every 6 hours and every 30 minutes"). It now reads any other capitalised word as a person and knows minutes, days and weeks.
+  - (medium) The open question passed when it was answered or denied ("Alice signs the vendor contract", "No vendor contract signature question remains open"). It now needs who, which or whether, refuses "is answered" and a leading "no", and refuses any name but Mira's and Tomas's.
+  - (medium) A CLI that could not start aborted the benchmark and logged nothing. It is now a failed run that is logged.
+  - (medium) The total cost left out paid invalid runs. The total now counts every run that reported a cost, and the mean is per valid run.
+  - The new cases are regression tests, not labelled items. The labelled set stays as it was written, and its numbers did not change.
+  - (low) The Results line was still pending. Fixed here. The handoff note it also asked for is left out, because this card's brief does not allow editing `docs/handoff.md`.
+- **Suites:** node 151/152 (one skipped) against a baseline of 139/140; the 12 new tests all pass. Python runtime 131 run, 24 skipped, OK. Playwright was not run, because the orchestrator runs it. No browser journey changed.
+- **Orchestrator check (2026-11-16):** Playwright 13/13 on this branch. On a Windows checkout with `core.autocrlf` the files are CR LF, and the hidden-character check in `tests/handoff-bench.test.mjs` counted the carriage return as hostile, so the test failed there (it passed only where the files were written with LF). The check now allows tab, newline and carriage return, as AGENTS.md section 6 does. Checked both ways: it passes with CR LF files and still fails on a vertical tab.
+
 ## Cycle 11 — Latent runtime performance baseline (defined 2026-11-12, before measuring)
 
 Card C11. Until now the latent runtime had accuracy evals but no performance figures. This cycle measures it on the RTX 4090 Laptop GPU (16 GB), vLLM 0.33.0 in WSL2, with the synthetic fixtures only.
@@ -1139,6 +1287,105 @@ Secondary figures:
 - **Level 3:** LoRA lowers every system: single falls from 0.855 to 0.730, and answers shorten from 280 to 102 tokens. A likely cause is the short style of GSM8K's gold solutions, but this run does not isolate it. The latent team does not recover the loss: it is 2.5 points below random with the same weights (not significant).
 - **A hypothesis for a next cycle (untested):** with the gold solution as the target, a change of answer style can lower the loss without any help from the hand-off. Training against the model's own correct answers (self-distillation) would keep the target close to the model's own style, leaving less to gain that way. It would not rule out other shortcuts. A next attempt should also train at the evaluation step count; these runs trained at m = 10 for memory.
 - **Review:** a Codex data check recomputed every figure in the level 2 and 3 and block 4 sections from the raw reports and training logs, and all of them match. It found one wrong statement ("without changing accuracy" hid a 5-point drop on the tuning questions) and five conclusions that claimed more than the tests show. All six are reworded above. The prompt-length and memory profile figures came from profiling runs whose output was printed, not saved, so they could not be rechecked.
+
+## Cycle 14 — Self-distilled targets for the LoRA hand-off (defined 2026-11-13, before any run)
+
+Card C14. In cycle 13, LoRA trained on GSM8K's gold solutions lowered every system on Phi-3.5-mini: single fell from 0.855 to 0.730 and answers shortened from 280 to 102 tokens. The latent team was not better than random vectors with the same weights (0.750 against 0.775, p = 0.27). The likely cause is that the loss could fall by copying the short gold style, with no help from the hand-off. This cycle changes only the training target. It becomes the model's own correct answer (self-distillation), which is already in the model's style.
+
+### Method
+
+- `latent_team.distill` runs the untrained model as the single system: greedy decoding, the single prompt, at most 512 new tokens. It covers the same 2,000 GSM8K **train** questions that `train.py` takes (seed 0).
+- An answer becomes a target only if its number is right and it stopped before the 512-token budget. Every other question is skipped (`noTarget`). The gold solution is never used to fill a gap.
+- `latent_team.train --targets` trains LoRA on these answers, each followed by the chat template's close. The other settings are those of cycle 13 level 3:
+  - m = 10 latent steps while training;
+  - rank 16, alpha 32, learning rate 2e-4;
+  - gradient accumulation 8, gradients through the last 2 subagents;
+  - one epoch;
+  - prompt cap 160 tokens, now counted with the chat template.
+- The target-length cap is the one setting that has to change, because the model's own answers are longer than the gold ones. It is chosen from the distilled answer lengths and a short memory check on the 16 GB GPU, before training starts, and recorded here before any evaluation.
+- The output file holds GSM8K train questions and the model's answers. It stays with the run outputs and is not committed.
+
+### Targets and the length cap (fixed 2026-11-13, before training)
+
+- **Answers:** distillation answered 2,000 train questions; 1,833 are right, and 1,832 of those stopped inside 512 tokens (91.6%).
+- **Length:** the kept answers are much longer than the gold solutions (cycle 13's gold-trained answers averaged 102 tokens): 261 generated tokens on average (median 250, 95th percentile 402, longest 509).
+- **Memory:** peak GPU memory for one training example (m = 10, gradients through 2 subagents) at the longest target under each cap:
+
+  | Cap (target tokens) | Examples kept | Peak memory (GB) |
+  |---|---|---|
+  | 320 | 1,403 | 12.52 |
+  | 384 | 1,623 | 13.87 |
+  | 448 | 1,711 | 13.93 |
+  | 512 | 1,734 | 14.08 |
+
+- **Cap chosen: 512.** It keeps every self target. A lower cap would drop the longest answers, which are mostly the harder questions, so the training set would lean toward easy ones.
+- **What the run trains on:** 1,734 examples. 168 questions have no kept self answer, and 98 are over the 160-token prompt cap.
+- **Memory setting:** the run uses `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to limit fragmentation over the two-hour run.
+- **Training run:** one epoch, 217 optimizer steps over 1,734 examples in 103 minutes. Mean loss 0.042 (0.085 over the first 25 steps, 0.031 by step 200). Peak memory 14.25 GB, with no out-of-memory failure.
+
+### Data and splits
+
+- Training uses the GSM8K train split only.
+- Tuning: questions 600–699 of the seed-0 test shuffle (`--count 100 --block 6`), the same tuning questions as cycle 13. Systems: single, latent_mas and latent_random at m = 10 and m = 40. The step count with the larger gap to random is chosen.
+- Confirmation: **block 5** (`--count 200 --block 5`, questions 1000–1199), which no cycle has used. Cycle 13 already looked at block 4, so it is not reused for a claim. Systems: single, latent_mas and latent_random at the chosen m, all with the self-distilled LoRA. The untrained model's single system is also run on block 5 as the baseline for the style check.
+
+### Tuning result and the chosen step count (fixed 2026-11-13, before block 5)
+
+All systems use the self-distilled LoRA on the 100 block-6 questions:
+
+| System | m = 10 | m = 40 |
+|---|---|---|
+| single | 0.90 (258 tokens) | — |
+| latent_mas | 0.88 | 0.90 |
+| latent_random | 0.89 | 0.90 |
+| latent_mas − random | −1 point | 0 points |
+
+- **Chosen: m = 40**, by the rule above (the larger gap to random). Neither gap is a real lead. At m = 10 the team is one question behind random; at m = 40 they tie. So the tuning gives no sign that the thoughts help, and block 5 decides.
+- **Style:** single with the LoRA scored 0.90 with 258-token answers. In cycle 13 the gold-trained LoRA gave 102-token answers, so the style shortcut looks gone. This is only a tuning read; the style prediction is scored on block 5.
+
+### What counts
+
+- **Primary:** latent_mas against latent_random with the same LoRA weights, steps and thought norm, on the 200 block-5 questions, with an exact McNemar test. The hand-off "works" only if latent_mas beats random with p < 0.05. Otherwise it is reported as not established, with its numbers.
+- **Secondary, predicted before the run:** if self-distillation removes the style shortcut, single with the self-distilled LoRA stays within 3 points of the untrained single on block 5, and its mean answer length stays within 25% of the untrained length. Reported, not gated. Passing it only shows that the style damage is gone. It does not show that the thoughts carry information.
+- Training on answers the model already gets right can still leave the thoughts with nothing to add. If so, the primary test fails, and that is a result.
+
+### Block 5 results (2026-11-13)
+
+Phi-3.5-mini, bf16, batch 4, questions 1000–1199 of the seed-0 shuffle (200 questions), m = 40 as fixed above. The first three rows share the self-distilled LoRA; the last is the untrained model.
+
+| System | Accuracy | Mean tokens | Seconds per question |
+|---|---|---|---|
+| single, LoRA | 0.870 | 273.9 | 4.32 |
+| latent_mas @40, LoRA | 0.870 | 275.1 | 6.28 |
+| latent_random @40, LoRA | 0.860 | 272.1 | 6.39 |
+| single, untrained | 0.870 | 274.5 | 3.90 |
+
+Exact McNemar tests on the same 200 questions (questions only the first system got right / only the second):
+
+| Comparison | Split | p |
+|---|---|---|
+| latent_mas vs latent_random (primary) | 7 / 5 | 0.77 |
+| latent_mas vs single, LoRA | 10 / 10 | 1.00 |
+| latent_random vs single, LoRA | 8 / 10 | 0.81 |
+| single, LoRA vs single, untrained | 8 / 8 | 1.00 |
+
+- **Primary: not established.** The team is one point above random vectors with the same weights (0.870 against 0.860, 7 / 5, p = 0.77). This is far from p < 0.05. As in cycle 13, this is a failure to show an advantage at this sample size, not proof that the thoughts carry nothing.
+- **Secondary prediction: passed.** Single with the self-distilled LoRA is 0 points from the untrained single (limit 3) and its answers are 0.2% shorter (limit 25%). The drop seen with the gold-trained LoRA in cycle 13 (0.855 to 0.730, 280 to 102 tokens) does not appear with self targets. This run changes only the target, but it does not isolate why. Passing shows only that accuracy and length stay inside the stated limits on this sample.
+- **Reading:** the LoRA is now close to neutral. Single, the team and random all land within one point of each other and of the untrained model. The training produced no measurable advantage over random thoughts; that is not proof the solver ignores them. A likely reason, not tested here, is the one cycle 13 found: the solver already reads the whole question, and the shared cache also holds the other agents' prompts, so the hand-off has nothing it alone can supply. Cycle 15 tests that directly with sealed agents and split facts.
+- **Cost:** the team took 6.3 seconds per question against 4.3 for single with the same LoRA, for the same accuracy.
+- **Code review:** Codex reviewed a420d9d. It found no bug in how targets are built, which questions are kept, the split read, or the fairness of latent against random. It found two test gaps: the distill CLI test passed its items in, so a different sample from `train.py`'s would go unseen; and no test kept a generated answer, so a scorer that always says wrong would pass. 7eb5009 adds an end-to-end test that runs both CLIs on their own sampling, and both mutations Codex named now fail it.
+- **Data check:** Codex recomputed every figure in this section from the raw reports and logs (except the memory table, from a printed profiling run). All match: the counts and lengths of the targets, the training run, tuning, block-5 accuracy, tokens and times, the four McNemar splits and p-values, and the style gap. It confirmed the same question order in all four block-5 systems, the C14 LoRA path, m = 40, and no checkpoint in the baseline. It flagged three sentences that claimed more than the tests show (that self targets "removed" the damage, that passing showed the style damage "is gone", and that the solver uses "nothing" from the thoughts). All three are reworded above.
+
+### Acceptance for the code
+
+- CPU unit tests with the tiny model, with no download and no GPU:
+  - only right answers that stopped inside the budget are kept;
+  - a targets file from another model, or in another format, is refused;
+  - the CLI writes the single system's greedy answers in the train-sample order;
+  - with `--targets`, the targets are the kept self answers plus the close, and the other questions are skipped and counted;
+  - without `--targets`, training still uses the gold solutions as in cycle 13;
+  - a file with no kept answer stops the run.
+- No new runtime dependency.
 
 ## Cycle 15 — Teams of many agents, and a split-facts test of the hand-off (defined 2026-11-13, before any run)
 

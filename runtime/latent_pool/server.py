@@ -1,7 +1,12 @@
 """HTTP front for the warm latent pool.  Run: python -m latent_pool.server
 
+It serves the M2a pool (/latent/warm, /latent/read), M2b transfer
+(/latent/mappers, /latent/transfer) and the M2c team (/latent/team, /v1/models,
+/v1/chat/completions).
+
 Listens on 127.0.0.1 only. Requests must carry Host 127.0.0.1:<port> or
-localhost:<port> (blocks DNS rebinding) and no Origin header at all: the
+localhost:<port>, or a host:port opted in with LATENT_ALLOWED_HOSTS (blocks DNS
+rebinding), and no Origin header at all: the
 ledger calls this service server to server, and browsers attach Origin to
 every cross-origin and every POST request, so a web page cannot drive it.
 """
