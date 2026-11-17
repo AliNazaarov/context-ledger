@@ -214,3 +214,71 @@ test('a failed transcript read is not cached', async () => {
   await assert.rejects(source.session(hex(1)));
   assert.equal((await source.session(hex(1))).id, 'x');
 });
+
+// Second Codex round (verification of 418feb4).
+
+test('a morning with no publish yet does not replay yesterday as live', async () => {
+  const yesterday = rowsFor(5, { at: n => startOfToday() - 7_200_000 + n * 1000 });
+  const ledger = fakeLedger(yesterday);
+  const { source, events } = sourceOver(ledger);
+  await source.tick();
+  ledger.calls.length = 0;
+  await source.tick();
+  await source.tick();
+  assert.deepEqual(events, []);
+  assert.equal(graphReads(ledger.calls), 0);
+  assert.deepEqual(ledger.calls, ['/api/graphs?limit=100', '/api/graphs?limit=100']);
+});
+
+test('an older snapshot read after a retry never replaces a newer one with the same time', async () => {
+  const rows = rowsFor(1, { base: 2000, party: () => 'leo' });
+  const failOnce = new Set();
+  const ledger = fakeLedger(rows, { failOnce });
+  const { source, model } = sourceOver(ledger);
+  await source.tick();
+  // Two more leo snapshots in the same millisecond; the older one fails once.
+  const sameTime = new Date(startOfToday() + 99_000).toISOString();
+  const older = { id: hex(2101), sessionId: rows[0].sessionId, party: 'leo', createdAt: sameTime };
+  const newer = { id: hex(2102), sessionId: rows[0].sessionId, party: 'leo', createdAt: sameTime };
+  rows.unshift(newer, older);
+  failOnce.add(`/api/graphs/${older.id}`);
+  await source.tick();
+  assert.equal(model.currentGraphIds()[0], newer.id);
+  await source.tick();
+  assert.equal(model.currentGraphIds()[0], newer.id, 'the late older snapshot is only counted');
+  assert.equal(model.numbers(Date.now()).handoffs, 3);
+});
+
+test('a linked graph that failed to read is tried again later and then resolves', async () => {
+  const model = createModel({ workingMs: 0 });
+  const ask = { id: 'q', kind: 'question', status: 'open', to: 'leo', label: 'Which port?', evidenceLines: [1] };
+  model.apply({ graph: graphOf(hex(51), 'ali', [ask]), provider: 'codex', at: 1 });
+  const links = [{ from: 'port', graph: hex(50), to: 'q', type: 'answers' }];
+  model.apply({ graph: graphOf(hex(52), 'leo', [{ id: 'port', kind: 'decision', label: 'Port', evidenceLines: [1] }], { packet: { links } }), provider: 'claude', at: 2 });
+  let failures = 4;
+  let linked = 0;
+  const source = liveSource({
+    model, pollMs: 0, onGraph() {}, onNote() {}, onStatus() {}, onLinked: () => { linked += 1; },
+    fetchJson: async path => {
+      if (path.startsWith('/api/graphs?')) return { graphs: [], next: null };
+      if (failures > 0) {
+        failures -= 1;
+        throw new Error('Synthetic failure.');
+      }
+      return { graph: graphOf(hex(50), 'ali', [ask]) };
+    },
+  });
+  for (let tick = 0; tick < 40 && linked === 0; tick += 1) await source.tick();
+  assert.equal(linked, 1);
+  assert.equal(model.agents(10).find(agent => agent.label === 'ali').state, 'idle');
+});
+
+test('a reused question ID with the same words but other cited lines is not closed by the old answer', () => {
+  const model = createModel({ workingMs: 0 });
+  const ask = lines => ({ id: 'q', kind: 'question', status: 'open', to: 'leo', label: 'Which port?', evidenceLines: lines });
+  model.apply({ graph: graphOf(hex(61), 'ali', [ask([1])]), provider: 'codex', at: 1 });
+  const links = [{ from: 'port', graph: hex(61), to: 'q', type: 'answers' }];
+  model.apply({ graph: graphOf(hex(62), 'leo', [{ id: 'port', kind: 'decision', label: 'Port', evidenceLines: [1] }], { packet: { links } }), provider: 'claude', at: 2 });
+  model.apply({ graph: graphOf(hex(63), 'ali', [ask([9])]), provider: 'codex', at: 3 });
+  assert.equal(model.agents(10).find(agent => agent.label === 'ali').state, 'waiting');
+});

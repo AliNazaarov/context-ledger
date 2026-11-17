@@ -29,6 +29,11 @@ test('the demo plays from empty to finished, and one click shows the proof', asy
   await page.getByRole('button', { name: 'Play demo' }).click();
   // Mid-run: Ali's second publish links to two of Leo's nodes, so a read line flashes.
   await expect(page.locator('.flash-line.flash-read').first()).toBeVisible({ timeout: 20_000 });
+  // Visible means drawn: a coloured stroke that has not faded out yet.
+  const stroke = await page.locator('.flash-line.flash-read').first()
+    .evaluate(line => ({ opacity: Number(getComputedStyle(line).opacity), color: getComputedStyle(line).stroke }));
+  expect(stroke.opacity).toBeGreaterThan(0.2);
+  expect(stroke.color).not.toBe('none');
   await expect(page.locator('.office-agent[data-state="working"]')).toHaveCount(1);
   await page.screenshot({ path: `${shotsDir}/02-mid-run.png` });
 
