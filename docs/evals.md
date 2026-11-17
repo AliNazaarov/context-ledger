@@ -1601,3 +1601,9 @@ Codex recomputed every figure in these results from the per-question records and
 - a description of `c15_stats.mjs` that overstated what it recomputes.
 
 Each was corrected or narrowed above.
+
+### Suites (2026-11-16, after merging main)
+
+- `npm run -s test:graph` passes; `node --test tests/*.test.mjs` 191 of 192 pass, 1 skipped; `npx playwright test` 13 of 13.
+- Runtime, `python -m unittest discover -s tests -t .`: 211 tests OK in WSL with torch, and 211 OK with 66 skipped on Windows Python 3.13 without torch.
+- The documented command found that `runtime/tests/test_agent_scale.py` imported `test_latent_training` as a top-level module, the problem H1 fixed in the C14 test. It now imports `tests.test_latent_training`.

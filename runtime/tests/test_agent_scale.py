@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 
-from test_latent_training import HAVE_TORCH, QUESTION, tiny_team
+from tests.test_latent_training import HAVE_TORCH, QUESTION, tiny_team
 
 if HAVE_TORCH:
     import torch
