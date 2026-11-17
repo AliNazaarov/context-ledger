@@ -11,7 +11,9 @@ const rlo = String.fromCodePoint(0x202e);
 function watchRequests(page) {
   const methods = [];
   page.on('request', request => methods.push(`${request.method()} ${new URL(request.url()).pathname}`));
-  return () => methods.filter(entry => !entry.startsWith('GET '));
+  const writes = () => methods.filter(entry => !entry.startsWith('GET '));
+  writes.paths = () => methods.map(entry => entry.slice(entry.indexOf(' ') + 1));
+  return writes;
 }
 
 test('the demo plays from empty to finished, and one click shows the proof', async ({ page }) => {
@@ -26,7 +28,7 @@ test('the demo plays from empty to finished, and one click shows the proof', asy
 
   await page.getByRole('button', { name: 'Play demo' }).click();
   // Mid-run: Ali's second publish links to two of Leo's nodes, so a read line flashes.
-  await expect(page.locator('.flash-line.flash-read').first()).toBeAttached({ timeout: 20_000 });
+  await expect(page.locator('.flash-line.flash-read').first()).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('.office-agent[data-state="working"]')).toHaveCount(1);
   await page.screenshot({ path: `${shotsDir}/02-mid-run.png` });
 
@@ -42,7 +44,12 @@ test('the demo plays from empty to finished, and one click shows the proof', asy
   await expect(page.locator('.node[data-mark="none"]')).toHaveCount(11);
   await page.screenshot({ path: `${shotsDir}/03-finished.png`, fullPage: true });
 
-  await page.getByRole('button', { name: /The ledger stays on port 4317/u }).click();
+  // Keyboard: focus the node and press Enter; focus stays on the node.
+  const node = page.getByRole('button', { name: /The ledger stays on port 4317/u });
+  await node.focus();
+  await page.keyboard.press('Enter');
+  await expect(node).toBeFocused();
+  await expect(node).toHaveAttribute('aria-pressed', 'true');
   const evidence = page.locator('#evidence');
   await expect(evidence.locator('#evidence-heading')).toHaveText('The ledger stays on port 4317');
   await expect(evidence.locator('.turn.is-cited')).toHaveCount(2);
@@ -51,10 +58,13 @@ test('the demo plays from empty to finished, and one click shows the proof', asy
   await expect(evidence).toContainText('leo-orbit.jsonl');
   await page.screenshot({ path: `${shotsDir}/04-evidence.png`, fullPage: true });
 
-  // Replay starts again from empty.
+  // Replay starts again from empty, with the evidence panel cleared.
   await page.getByRole('button', { name: 'Replay demo' }).click();
   await expect(page.locator('.brain-empty')).toBeVisible();
+  await expect(evidence.locator('.turn')).toHaveCount(0);
   expect(writes()).toEqual([]);
+  // The demo needs no ledger: it never calls the API.
+  expect(writes.paths().filter(path => !path.startsWith('/console'))).toEqual([]);
 });
 
 test('the page is under 300 KB and paints in under a second', async ({ page }) => {

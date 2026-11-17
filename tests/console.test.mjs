@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
@@ -138,6 +139,9 @@ test('console files stay light and never parse transcript text as HTML', async (
     if (name.endsWith('.mjs')) {
       assert.doesNotMatch(text, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function/u, name);
       assert.doesNotMatch(text, /method:\s*['"](?:POST|PUT|PATCH|DELETE)/iu, `${name} must only read`);
+      // Browser-only modules are not imported by node tests, so check that each parses.
+      const check = spawnSync(process.execPath, ['--check', fileURLToPath(new URL(name, consoleDir))], { encoding: 'utf8' });
+      assert.equal(check.status, 0, `${name}: ${check.stderr}`);
     }
   }
   assert.ok(total < 300 * 1024, `console files are ${total} bytes`);
