@@ -10,7 +10,7 @@ import os
 import re
 import unicodedata
 
-from . import ApiError
+from . import ApiError, rules
 
 MAX_PATHS = 32
 MAX_TOTAL_BYTES = 512 * 1024
@@ -29,13 +29,14 @@ _BAD_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Zl", "Zp"})
 
 # Files that commonly hold secrets. Their text would be quoted into a slice that
 # leaves the machine for a closed model, so they are refused even under the root.
-# The ledger (src/latent.mjs) mirrors this rule so it refuses them up front.
-_SECRET_DIRS = frozenset({".git", ".ssh", ".aws", ".gnupg", ".docker", ".kube"})
-_SECRET_NAMES = frozenset({".npmrc", ".pypirc", ".netrc", ".pgpass", ".git-credentials", "credentials",
-                           "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"})
-_SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".keystore", ".jks")
-# Templates meant to be committed are not secrets.
-_ENV_TEMPLATES = frozenset({".env.example", ".env.sample", ".env.template"})
+# The lists live in rules/latent-rules.json, which the ledger (src/latent.mjs) reads
+# too, so it refuses the same paths up front. Templates meant to be committed are
+# not secrets.
+_SECRET_DIRS = rules.SECRET_DIRS
+_SECRET_NAMES = rules.SECRET_NAMES
+_SECRET_PREFIXES = rules.SECRET_PREFIXES
+_SECRET_SUFFIXES = rules.SECRET_SUFFIXES
+_ENV_TEMPLATES = rules.ENV_TEMPLATES
 
 
 def is_secret_path(segments):
@@ -46,8 +47,7 @@ def is_secret_path(segments):
     name = segments[-1].lower()
     if name in _ENV_TEMPLATES:
         return False
-    return (name.startswith(".env") or name in _SECRET_NAMES or name.startswith("id_rsa")
-            or name.startswith("id_ed25519") or name.endswith(_SECRET_SUFFIXES))
+    return name in _SECRET_NAMES or name.startswith(_SECRET_PREFIXES) or name.endswith(_SECRET_SUFFIXES)
 
 
 def _has_bad_character(text):

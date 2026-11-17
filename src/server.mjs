@@ -75,8 +75,114 @@ function listParameters(url, filters) {
   return values;
 }
 
+// The local latent runtime. LATENT_URL overrides it; it is read on each request.
+const defaultLatentUrl = 'http://127.0.0.1:4320';
+const latentUrl = () => process.env.LATENT_URL ?? defaultLatentUrl;
+
 const port = Number(process.env.PORT ?? 4317);
 const store = openStore(process.env.CONTEXT_LEDGER_DB ?? '.context-ledger/ledger.sqlite');
+
+// A handler returns the JSON body of a 200 response, `sent` when it wrote the response
+// itself, or undefined when the record is not there; the request then goes on down
+// the table and, as no other entry matches, ends in 404.
+const sent = Symbol('sent');
+const hexId = '([a-f0-9]{64})';
+const idPattern = (prefix, suffix = '') => new RegExp(`^${prefix}/${hexId}${suffix}$`, 'u');
+
+// Entries match on the method and the exact path or the anchored pattern, in order.
+// A request that matches none is a 404 whatever its method (there is no 405). The
+// Host and URL checks run before this table; each write checks its Origin in readJson.
+const routes = [
+  ...[...staticFiles].map(([path, [file, contentType]]) => ({
+    method: 'GET', path, handler: async ({ response }) => {
+      const bytes = await readFile(new URL(`../public/${file}`, import.meta.url));
+      response.writeHead(200, { 'Content-Type': `${contentType}; charset=utf-8` });
+      response.end(bytes);
+      return sent;
+    },
+  })),
+  { method: 'POST', path: '/api/import', handler: async ({ request, origin }) => {
+    const input = await readJson(request, origin, 'Import');
+    return { session: store.importTranscript(input) };
+  } },
+  { method: 'POST', path: '/api/graphs', handler: async ({ request, origin }) => {
+    const packet = await readJson(request, origin, 'Graph publication');
+    return { graph: store.publishGraph(packet) };
+  } },
+  { method: 'GET', path: '/api/sessions', handler: ({ url }) => {
+    const query = url.searchParams.get('q') ?? '';
+    const provider = url.searchParams.get('provider') ?? '';
+    if (query.length > 512) throw new InputError('Search is limited to 512 characters.');
+    if (provider && !isProvider(provider)) throw new InputError('Unknown provider.');
+    // The browser and the CLI send neither limit nor after and get every match, as before.
+    if (!url.searchParams.has('limit') && !url.searchParams.has('after')) return { sessions: store.list(query, provider) };
+    const { limit = 100, after } = listParameters(url, []);
+    return store.listSessionsPage({ query, provider, limit, after });
+  } },
+  { method: 'GET', path: '/api/graphs', handler: ({ url }) => {
+    const { limit = 20, after, sessionId, party } = listParameters(url, ['sessionId', 'party']);
+    return store.listGraphs({ sessionId, party, limit, after });
+  } },
+  { method: 'GET', path: '/api/rooms', handler: ({ url }) => {
+    const { limit = 20, after, graphId, party } = listParameters(url, ['graphId', 'party']);
+    return store.listRooms({ graphId, party, limit, after });
+  } },
+  { method: 'GET', pattern: idPattern('/api/sessions'), handler: ({ params: [id] }) => {
+    const session = store.get(id);
+    return session ? { session } : undefined;
+  } },
+  { method: 'GET', pattern: idPattern('/api/graphs'), handler: ({ params: [id] }) => {
+    const graph = store.getGraph(id);
+    return graph ? { graph } : undefined;
+  } },
+  { method: 'GET', pattern: idPattern('/api/graphs', '/context'), handler: ({ params: [id] }) => {
+    const context = store.getGraphContext(id);
+    return context ? { context } : undefined;
+  } },
+  { method: 'POST', path: '/api/latent/read', handler: async ({ request, origin }) => {
+    const input = await readJson(request, origin, 'A latent read');
+    return latentRead(input, { latentUrl: latentUrl(), latentRoot: process.env.LATENT_ROOT });
+  } },
+  { method: 'POST', path: '/api/latent/transfer', handler: async ({ request, origin }) => {
+    const input = await readJson(request, origin, 'A latent transfer');
+    return latentTransfer(input, { latentUrl: latentUrl(), latentRoot: process.env.LATENT_ROOT });
+  } },
+  { method: 'POST', path: '/api/latent/files', handler: async ({ request, origin }) => {
+    // The fallback's numbered text without the runtime: MCP pages a long fallback with it.
+    const input = await readJson(request, origin, 'Reading latent files');
+    return latentFiles(input, { latentRoot: process.env.LATENT_ROOT });
+  } },
+  { method: 'POST', path: '/api/latent/team', handler: async ({ request, origin }) => {
+    const input = await readJson(request, origin, 'A latent team run');
+    return latentTeam(input, { latentUrl: latentUrl() });
+  } },
+  { method: 'POST', path: '/api/rooms', handler: async ({ request, origin }) => {
+    const input = await readJson(request, origin, 'Opening a room');
+    return { room: store.openRoom(input) };
+  } },
+  { method: 'GET', pattern: idPattern('/api/rooms'), handler: ({ params: [id] }) => {
+    const room = store.getRoom(id);
+    return room ? { room } : undefined;
+  } },
+  { method: 'POST', pattern: idPattern('/api/rooms', '/decisions'), handler: async ({ request, origin, params: [id] }) => {
+    // People confirm proposals in the browser. Browsers set Sec-Fetch-Site and page
+    // scripts cannot forge it; a local process can, so this keeps honest agent
+    // clients (the CLI and MCP adapter) out rather than proving who clicked.
+    if (request.headers['sec-fetch-site'] !== 'same-origin') {
+      throw new HttpError(403, 'Proposals are confirmed by people in the browser.');
+    }
+    const input = await readJson(request, origin, 'A room decision');
+    const room = store.decide(id, input);
+    return room ? { room } : undefined;
+  } },
+];
+
+/** The captured groups when the route matches this path, otherwise null. */
+function matchRoute(route, pathname) {
+  if (route.path !== undefined) return route.path === pathname ? [] : null;
+  return route.pattern.exec(pathname)?.slice(1) ?? null;
+}
+
 const server = createServer(async (request, response) => {
   response.setHeader('Cache-Control', 'no-store');
   response.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
@@ -94,115 +200,15 @@ const server = createServer(async (request, response) => {
     }
     const origin = `http://${host}`;
     const url = new URL(request.url, origin);
-    const method = request.method;
 
-    if (method === 'GET' && staticFiles.has(url.pathname)) {
-      const [file, contentType] = staticFiles.get(url.pathname);
-      const bytes = await readFile(new URL(`../public/${file}`, import.meta.url));
-      response.writeHead(200, { 'Content-Type': `${contentType}; charset=utf-8` });
-      return response.end(bytes);
-    }
-
-    if (method === 'POST' && url.pathname === '/api/import') {
-      const input = await readJson(request, origin, 'Import');
-      return json(response, 200, { session: store.importTranscript(input) });
-    }
-
-    if (method === 'POST' && url.pathname === '/api/graphs') {
-      const packet = await readJson(request, origin, 'Graph publication');
-      return json(response, 200, { graph: store.publishGraph(packet) });
-    }
-
-    if (method === 'GET' && url.pathname === '/api/sessions') {
-      const query = url.searchParams.get('q') ?? '';
-      const provider = url.searchParams.get('provider') ?? '';
-      if (query.length > 512) throw new InputError('Search is limited to 512 characters.');
-      if (provider && !isProvider(provider)) throw new InputError('Unknown provider.');
-      // The browser and the CLI send neither limit nor after and get every match, as before.
-      if (!url.searchParams.has('limit') && !url.searchParams.has('after')) {
-        return json(response, 200, { sessions: store.list(query, provider) });
-      }
-      const { limit = 100, after } = listParameters(url, []);
-      return json(response, 200, store.listSessionsPage({ query, provider, limit, after }));
-    }
-
-    if (method === 'GET' && url.pathname === '/api/graphs') {
-      const { limit = 20, after, sessionId, party } = listParameters(url, ['sessionId', 'party']);
-      return json(response, 200, store.listGraphs({ sessionId, party, limit, after }));
-    }
-
-    if (method === 'GET' && url.pathname === '/api/rooms') {
-      const { limit = 20, after, graphId, party } = listParameters(url, ['graphId', 'party']);
-      return json(response, 200, store.listRooms({ graphId, party, limit, after }));
-    }
-
-    const id = url.pathname.match(/^\/api\/sessions\/([a-f0-9]{64})$/u)?.[1];
-    if (method === 'GET' && id) {
-      const session = store.get(id);
-      if (session) return json(response, 200, { session });
-    }
-
-    const graphId = url.pathname.match(/^\/api\/graphs\/([a-f0-9]{64})$/u)?.[1];
-    if (method === 'GET' && graphId) {
-      const graph = store.getGraph(graphId);
-      if (graph) return json(response, 200, { graph });
-    }
-
-    const contextId = url.pathname.match(/^\/api\/graphs\/([a-f0-9]{64})\/context$/u)?.[1];
-    if (method === 'GET' && contextId) {
-      const context = store.getGraphContext(contextId);
-      if (context) return json(response, 200, { context });
-    }
-
-    if (method === 'POST' && url.pathname === '/api/latent/read') {
-      const input = await readJson(request, origin, 'A latent read');
-      return json(response, 200, await latentRead(input, {
-        latentUrl: process.env.LATENT_URL ?? 'http://127.0.0.1:4320',
-        latentRoot: process.env.LATENT_ROOT,
-      }));
-    }
-
-    if (method === 'POST' && url.pathname === '/api/latent/transfer') {
-      const input = await readJson(request, origin, 'A latent transfer');
-      return json(response, 200, await latentTransfer(input, {
-        latentUrl: process.env.LATENT_URL ?? 'http://127.0.0.1:4320',
-        latentRoot: process.env.LATENT_ROOT,
-      }));
-    }
-
-    if (method === 'POST' && url.pathname === '/api/latent/files') {
-      // The fallback's numbered text without the runtime: MCP pages a long fallback with it.
-      const input = await readJson(request, origin, 'Reading latent files');
-      return json(response, 200, await latentFiles(input, { latentRoot: process.env.LATENT_ROOT }));
-    }
-
-    if (method === 'POST' && url.pathname === '/api/latent/team') {
-      const input = await readJson(request, origin, 'A latent team run');
-      return json(response, 200, await latentTeam(input, { latentUrl: process.env.LATENT_URL ?? 'http://127.0.0.1:4320' }));
-    }
-
-    if (method === 'POST' && url.pathname === '/api/rooms') {
-      const input = await readJson(request, origin, 'Opening a room');
-      return json(response, 200, { room: store.openRoom(input) });
-    }
-
-    const roomId = url.pathname.match(/^\/api\/rooms\/([a-f0-9]{64})$/u)?.[1];
-    if (method === 'GET' && roomId) {
-      const room = store.getRoom(roomId);
-      if (room) return json(response, 200, { room });
-    }
-
-    const decisionRoomId = url.pathname.match(/^\/api\/rooms\/([a-f0-9]{64})\/decisions$/u)?.[1];
-    if (method === 'POST' && decisionRoomId) {
-      // People confirm proposals in the browser. Browsers set Sec-Fetch-Site and page
-      // scripts cannot forge it; a local process can, so this keeps honest agent
-      // clients (the CLI and MCP adapter) out rather than proving who clicked.
-      if (request.headers['sec-fetch-site'] !== 'same-origin') {
-        throw new HttpError(403, 'Proposals are confirmed by people in the browser.');
-      }
-      const input = await readJson(request, origin, 'A room decision');
-      const room = store.decide(decisionRoomId, input);
-      if (room) return json(response, 200, { room });
+    for (const route of routes) {
+      if (route.method !== request.method) continue;
+      const params = matchRoute(route, url.pathname);
+      if (!params) continue;
+      const body = await route.handler({ request, response, url, origin, params });
+      if (body === undefined) continue;
+      if (body !== sent) json(response, 200, body);
+      return;
     }
 
     throw new HttpError(404, 'Not found.');

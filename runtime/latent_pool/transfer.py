@@ -92,7 +92,10 @@ class TransferService:
 
 
 def register_from_env(registry, root, env):
-    """LATENT_MAPPER=<checkpoint> loads one trained pair at startup (needs torch and a GPU)."""
+    """LATENT_MAPPER=<checkpoint> loads one trained pair at startup (needs torch).
+
+    It runs on LATENT_MAPPER_DEVICE if set, else on CUDA when available, else on the CPU.
+    """
     checkpoint = env.get("LATENT_MAPPER")
     if not checkpoint:
         return None

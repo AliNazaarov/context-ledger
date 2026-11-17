@@ -1,0 +1,15 @@
+{
+  "about": "Rule data shared by the ledger (src/latent.mjs, Node) and the latent runtime (runtime/latent_pool, Python). Both read this file, so a rule changes in one place. rules/latent-conformance.json holds the cases both test suites run against each side's logic. Contract: docs/latent-read.md.",
+  "secretPaths": {
+    "about": "A path is secret when any segment before the last is one of dirs, or when its last segment (lower-cased) is not one of templates and is one of names, starts with one of prefixes or ends with one of suffixes. Comparisons are on lower-cased segments.",
+    "dirs": [".git", ".ssh", ".aws", ".gnupg", ".docker", ".kube"],
+    "names": [".npmrc", ".pypirc", ".netrc", ".pgpass", ".git-credentials", "credentials", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"],
+    "prefixes": [".env", "id_rsa", "id_ed25519"],
+    "suffixes": [".pem", ".key", ".p12", ".pfx", ".keystore", ".jks"],
+    "templates": [".env.example", ".env.sample", ".env.template"]
+  },
+  "quoteWhitespace": {
+    "about": "The code points folded into one space when a quote is compared with file lines: exactly what JavaScript's \\s matches with the u flag (normalizeSpace in src/latent.mjs, fold_space in runtime/latent_pool/pool.py). Each entry is one hex code point or an inclusive hex range. tests/latent-rules.test.mjs pins this list to /\\s/u.",
+    "codePoints": ["0009-000D", "0020", "00A0", "1680", "2000-200A", "2028", "2029", "202F", "205F", "3000", "FEFF"]
+  }
+}

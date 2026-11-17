@@ -9,7 +9,7 @@
 - [ ] Card claimed on the delivery board and its state updated
 - [ ] Acceptance eval written in `docs/evals.md` before implementation
 - [ ] Tests added: node:test and, for browser flows, Playwright
-- [ ] `npm run -s test:graph`, `node --test tests/*.test.mjs` and `npx playwright test` pass locally
+- [ ] `npm run -s test:graph`, `node --test tests/*.test.mjs`, `npx playwright test` and, in `runtime/`, `python -m unittest discover -s tests -t .` pass locally
 - [ ] Independent review by a different agent or model; findings fixed with regression tests
 - [ ] Review outcome recorded in `docs/evals.md`
 - [ ] `docs/handoff.md` updated for the next owner

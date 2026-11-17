@@ -1,30 +1,19 @@
 """End to end on the real eval fixture (evals/latent) with a fake model.
 
 The fake synthesizer answers each of the eight questions with a canned slice.
-The slice goes through the whole service and is graded with a port of
-evals/latent/grade.mjs.
+The slice goes through the whole service and is graded with tests/grade.py, the
+port of evals/latent/grade.mjs that rules/latent-conformance.json keeps in step.
 """
 
 import json
 import os
 import unittest
 
+from tests.grade import grade_slice
 from tests.helpers import FakeVllm, Service
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 EVALS = os.path.join(REPO, "evals", "latent")
-
-
-def grade_slice(question, slice_):
-    """Python port of gradeSlice in evals/latent/grade.mjs."""
-    haystack = "\n".join([slice_["answer"], *(f["label"] for f in slice_.get("findings", []))]).lower()
-    correct = all(any(option.lower() in haystack for option in group) for group in question["required"])
-    spans = [span for finding in slice_.get("findings", []) for span in finding.get("evidence", [])]
-    cited = any(
-        span["path"] == ev["path"] and span["startLine"] <= ev["lines"][1] and span["endLine"] >= ev["lines"][0]
-        for span in spans for ev in question["evidence"]
-    )
-    return {"id": question["id"], "correct": correct, "cited": cited}
 
 
 def canned_slice(question):

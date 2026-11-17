@@ -4,6 +4,7 @@
 import { open, realpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { InputError } from './errors.mjs';
+import latentRules from '../rules/latent-rules.json' with { type: 'json' };
 
 const maxPaths = 32;
 const maxTextBytes = 512 * 1024;
@@ -19,19 +20,21 @@ export class LatentError extends Error {
   }
 }
 
-// The contract's secret rule, mirrored from runtime/latent_pool/prefix.py so the
-// ledger refuses these paths up front with a clear 400.
-const secretDirs = new Set(['.git', '.ssh', '.aws', '.gnupg', '.docker', '.kube']);
-const secretNames = new Set(['.npmrc', '.pypirc', '.netrc', '.pgpass', '.git-credentials', 'credentials',
-  'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519']);
-const secretSuffixes = ['.pem', '.key', '.p12', '.pfx', '.keystore', '.jks'];
-const envTemplates = new Set(['.env.example', '.env.sample', '.env.template']);
+// The contract's secret rule. Its lists live in rules/latent-rules.json, which the
+// runtime (runtime/latent_pool/prefix.py) reads too, so the ledger refuses these
+// paths up front with a clear 400 and both sides always agree.
+const secretRule = latentRules.secretPaths;
+const secretDirs = new Set(secretRule.dirs);
+const secretNames = new Set(secretRule.names);
+const secretPrefixes = secretRule.prefixes;
+const secretSuffixes = secretRule.suffixes;
+const envTemplates = new Set(secretRule.templates);
 
 export function isSecretPath(segments) {
   if (segments.slice(0, -1).some(segment => secretDirs.has(segment.toLowerCase()))) return true;
   const name = segments.at(-1).toLowerCase();
   if (envTemplates.has(name)) return false;
-  return name.startsWith('.env') || secretNames.has(name) || name.startsWith('id_rsa') || name.startsWith('id_ed25519')
+  return secretNames.has(name) || secretPrefixes.some(prefix => name.startsWith(prefix))
     || secretSuffixes.some(suffix => name.endsWith(suffix));
 }
 
@@ -180,7 +183,9 @@ function cleanStats(stats) {
 
 const maxQuoteChars = 200;
 const maxQuoteLines = 12;
-const normalizeSpace = text => text.replace(/\s+/gu, ' ').trim();
+// Runs of whitespace as one space, trimmed. The runtime folds the same code points
+// (rules/latent-rules.json quoteWhitespace, pinned to /\s/u by tests/latent-rules.test.mjs).
+export const normalizeSpace = text => text.replace(/\s+/gu, ' ').trim();
 
 // A quote shorter than this (non-space characters) proves nothing: "}" occurs anywhere.
 const minQuoteSubstance = 8;
