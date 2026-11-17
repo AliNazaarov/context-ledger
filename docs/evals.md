@@ -1386,3 +1386,25 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## U1 — Console v0, light (defined 2026-11-17, before implementation)
+
+Source: the console direction ([docs/product-direction-console.md](product-direction-console.md)) and the build prompt for the light console. One page in the existing loopback app that shows which agents are working, what they put into the ledger, and the line that proves each fact. It reads; it never runs agents or writes to the ledger. Synthetic data only: the demo replays the committed Orbit transcripts in `demo/`.
+
+Terms used below. A **party** is the `party` of a version 2 graph (the session ID for a version 1 graph). The **current graph** of a party is its newest published graph. A node is **new** in a publish when its party's previous current graph had no node with that ID. **Today** is the viewer's local calendar day.
+
+| Eval | Expected |
+| --- | --- |
+| Served by the app | `npm start` serves the console at `/console/`. Its files come from a fixed list in `src/server.mjs`, like the existing static files; any other path under `/console/` is a 404. No build step and no new runtime dependency. Every response pinned by `tests/routes.test.mjs` is unchanged, and the new files carry the same security headers. |
+| Read-only | The page sends only GET requests, in live mode and in demo mode (Playwright records every request). The only server change is the new static entries: no new write route, and no change to any existing route. |
+| Office | An isometric SVG floor with one room per agent source the ledger imports (Claude Code, Codex). One character per party that published today (live) or in the recording (demo), in its provider's room, labelled with the party. Its state is **working** when that party published in the last 60 seconds (8 seconds in the demo, which runs faster), **waiting** when its current graph has an open question to another party that no current graph answers by link, and **idle** otherwise. The state is text as well as shape, so it does not rely on colour. |
+| Ledger graph | Shows the nodes of every current graph, grouped by party. A new node pops in. Each publish draws a flash line from the publisher's room to each new or changed node, and a dashed line to each node of another party that the publish links to (the evidence that it read that graph). Lines and pops come only from published graphs; nothing moves on a timer of its own. A superseded decision is struck through. A node carrying a G7 quoted or inferred mark gets that colour; without the mark (G7 is not built) every node has one neutral colour. |
+| Evidence in one click | One click on a node, or Enter on it when focused, opens the evidence panel with the cited transcript turns and the turn before and after, the cited lines highlighted, the source agent and the line numbers. Every transcript string is set with `textContent`. A label and a transcript turn containing `<img src=x onerror=…>` and a right-to-left override render as text: no element is created and no script runs. |
+| Numbers | **Hand-offs today:** graphs published today. **Tokens saved:** the sum of `meter.savedTokens` over the current graph of each party that published today, labelled as an estimate with the meter's method. **Superseded decisions:** decisions that a `supersedes` edge replaces in the current graphs (G11's graph diff is not built). In demo mode the finished numbers equal values computed independently from the recording. |
+| Live updates | The page polls `GET /api/graphs` every 2 seconds and reads only graphs it has not seen. A graph published through the API while the page is open appears within 3 seconds. |
+| Demo mode | `/console/?demo` plays a bundled recording of a two-agent session (Leo in Claude Code, Ali in Codex), without any ledger data, in about 35 seconds, with Replay. `node demo/console-recording.mjs` builds the recording by running the real store on the demo transcripts and saving its responses; a node test rebuilds it and compares it with the committed file byte for byte. |
+| Screenshots | A Playwright test runs the demo and saves four screenshots: empty, mid-run with at least one flash line visible, finished, and the evidence panel open. |
+| Light and fast | Measured by Playwright in demo mode and saved next to the screenshots: everything the page loads is under 300 KB, and first contentful paint is under 1 second. No WebGL, canvas 3D or third-party script. |
+| Phone | At 375 px wide there is no horizontal scroll and the parts stack in one column. |
+| Feature map | `docs/feature-map.md` lists each console feature in user words. |
+| Left to a person | The 60-second screen recording (raw material for U3) is not made by an agent; the results say how to record it. |
