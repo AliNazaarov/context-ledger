@@ -484,11 +484,19 @@ test('an upgrade that keeps every table, committed after the last statement is p
     store.close();`;
   const child = spawn(process.execPath, ['--input-type=module', '-e', script],
     { env: { ...process.env, LEDGER_FILE: path, RELEASE: release }, stdio: ['ignore', 'pipe', 'pipe'] });
-  keep(() => child.exitCode === null && child.kill());
+  // Review round 6: wait for the child to end before the folder is removed (Windows keeps the file open).
+  keep(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      const ended = once(child, 'close');
+      child.kill();
+      await ended;
+    }
+  });
   let stdout = '';
   let stderr = '';
   child.stderr.on('data', chunk => { stderr += chunk; });
-  const exit = once(child, 'exit');
+  // Review round 6: close, not exit, so stdout and stderr have drained before they are checked.
+  const exit = once(child, 'close');
   await Promise.race([
     new Promise(resolve => child.stdout.on('data', chunk => {
       stdout += chunk;

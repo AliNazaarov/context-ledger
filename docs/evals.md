@@ -1468,3 +1468,4 @@ Round 5, on 7349ba6:
 Each regression test was checked by removing its fix (twelve mutations across the five rounds); each mutation fails at least its own test.
 
 **Suites (Windows, after the round 5 fix):** `npm run -s test:graph` 9/9; node 204/205 (one skipped; the `main` baseline was 191/192); Playwright 13/13; Python runtime 192 run, OK (50 skipped).
+- **Codex, round 6** (of c442c22, the round 5 test): no high or medium findings. Two low, fixed in the next commit: the test now waits for close rather than exit, so the child's output has drained before it is checked; and its cleanup waits for the child to end before the folder is removed.
