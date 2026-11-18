@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
-import { codeLifetimeMs, createAuth, onlyOwnerAllowed, readTokenFile, restrictToOwner, sessionLifetimeMs, tokenFileFor, tokenForUrl } from '../src/token.mjs';
+import { codeLifetimeMs, createAuth, privateToOwner, readTokenFile, sessionLifetimeMs, tokenFileFor, tokenForUrl } from '../src/token.mjs';
+import { restrictToOwner } from './ledger-auth.mjs';
 import { startMcp } from './mcp-client.mjs';
 
 // P1e: the loopback API token (ADR-10). Synthetic data and temporary databases only.
@@ -38,20 +39,17 @@ async function freePort() {
   return port;
 }
 
-// Windows only: a file's DACL as SDDL, and the current user's SID, from the System32 tools.
+// Windows only: the current user's SID and a file's owner, group and DACL as SDDL,
+// read with Get-Acl (the test's own call; it does not use src/token.mjs).
 const system32 = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
-async function windowsAcl(path) {
-  const folder = await mkdtemp(join(tmpdir(), 'ledger-acl-test-'));
-  try {
-    await execute(join(system32, 'icacls.exe'), [path, '/save', join(folder, 'acl')]);
-    return (await readFile(join(folder, 'acl'))).toString('utf16le');
-  } finally {
-    await rm(folder, { recursive: true, force: true });
-  }
-}
-async function windowsSid() {
-  const { stdout } = await execute(join(system32, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh']);
-  return /"(S-1-[0-9-]+)"\s*$/u.exec(stdout)[1];
+async function windowsSecurity(path) {
+  const script = "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; " +
+    '[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; (Get-Acl -LiteralPath $env:TEST_FILE).Sddl';
+  const { stdout } = await execute(join(system32, 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+    { env: { ...process.env, TEST_FILE: path } });
+  const [sid, sddl] = stdout.split(/\r?\n/u);
+  return { sid, sddl };
 }
 // A token file as the server writes it, for a ledger on this port.
 const tokenRecord = (port, token) => JSON.stringify({ port, token }) + '\n';
@@ -651,49 +649,68 @@ test('two servers on different ports and one database each keep their own token 
   assert.equal((await raw(second.port, { path: '/api/sessions', headers: bearer(first.token) })).status, 401);
 });
 
-test('the Windows ACL check accepts only a DACL whose allow entries are all for the current user', () => {
+test('the Windows check accepts only the current user as owner and as the only allowed account', () => {
   const sid = 'S-1-5-21-1000-2000-3000-1001';
-  const saved = dacl => `ledger.sqlite.4317.token\r\n${dacl}\r\n`;
-  assert.equal(onlyOwnerAllowed(saved(`D:PAI(A;;FA;;;${sid})`), sid), true);
-  assert.equal(onlyOwnerAllowed(String.fromCodePoint(0xfeff) + saved(`D:PAI(A;;FA;;;${sid})`), sid), true);
-  assert.equal(onlyOwnerAllowed(saved(`D:PAI(D;;FA;;;WD)(A;;FA;;;${sid})`), sid), true, 'a deny entry for others is harmless');
-  for (const dacl of [
-    `D:AI(A;ID;FA;;;${sid})(A;ID;FA;;;SY)`, // inherited SYSTEM
-    `D:AI(A;ID;0x1301bf;;;S-1-5-21-1000-2000-3000-1002)(A;ID;FA;;;${sid})`, // another local user
-    `D:P(A;;FR;;;WD)(A;;FA;;;${sid})`, // Everyone
-    `D:P(A;;FA;;;${sid}-5)`, // a longer SID with the same prefix
-    'D:NO_ACCESS_CONTROL', // a NULL DACL allows anyone
-    `D:P(XA;;FA;;;${sid};(WIN://X))`, // a conditional entry
-    `D:P(OA;;FA;;;${sid})`, // an object entry
+  const group = 'G:S-1-5-21-1000-2000-3000-513';
+  assert.equal(privateToOwner(`O:${sid}${group}D:P(A;;FA;;;${sid})`, sid), true);
+  assert.equal(privateToOwner(`O:${sid}D:PAI(A;;FA;;;${sid})\r\n`, sid), true, 'no group, trailing line break');
+  assert.equal(privateToOwner(`O:${sid}${group}D:P(D;;FA;;;WD)(A;;FA;;;${sid})`, sid), true, 'a deny entry for others is harmless');
+  for (const sddl of [
+    `O:S-1-5-21-1000-2000-3000-1002${group}D:P(A;;FA;;;${sid})`, // another owner may always change the DACL
+    `O:BA${group}D:P(A;;FA;;;${sid})`, // owned by Administrators
+    `O:${sid}${group}D:AI(A;ID;FA;;;${sid})(A;ID;FA;;;SY)`, // inherited SYSTEM
+    `O:${sid}${group}D:AI(A;ID;0x1301bf;;;S-1-5-21-1000-2000-3000-1002)(A;ID;FA;;;${sid})`, // another local user
+    `O:${sid}${group}D:P(A;;FR;;;WD)(A;;FA;;;${sid})`, // Everyone
+    `O:${sid}${group}D:P(A;;FA;;;${sid}-5)`, // a longer SID with the same prefix
+    `O:${sid}${group}D:NO_ACCESS_CONTROL`, // a NULL DACL allows anyone
+    `O:${sid}${group}D:P(XA;;FA;;;${sid};(WIN://X))`, // a conditional entry
+    `O:${sid}${group}D:P(OA;;FA;;;${sid})`, // an object entry
+    `D:P(A;;FA;;;${sid})`, // no owner
     '',
   ]) {
-    assert.equal(onlyOwnerAllowed(saved(dacl), sid), false, dacl);
+    assert.equal(privateToOwner(sddl, sid), false, sddl);
   }
-  assert.equal(onlyOwnerAllowed('garbage', sid), false);
-  assert.equal(onlyOwnerAllowed(saved(`D:P(A;;FA;;;${sid})`), 'not a sid'), false);
+  assert.equal(privateToOwner(undefined, sid), false);
+  assert.equal(privateToOwner(`O:${sid}D:P(A;;FA;;;${sid})`, 'not a sid'), false);
 });
 
-test('on Windows the token file is private to the current user, and a file others can read is refused in fixed words', { skip: process.platform !== 'win32' && 'POSIX uses the file mode (tested above).' }, async t => {
+test('on Windows the token file is private to the current user from its creation, even in a folder that grants everyone full control', { skip: process.platform !== 'win32' && 'POSIX uses the file mode (tested above).' }, async t => {
   const place = await temporary(t);
-  const sid = await windowsSid();
-  const server = await place.start();
-  // The server's file has exactly one entry, for this user, and inherits nothing.
-  const written = (await windowsAcl(tokenFileFor(place.database, server.port))).split(/\r?\n/u)[1];
-  assert.match(written, /^D:PA?I?\(A;;FA;;;S-[0-9-]+\)$/u);
-  assert.equal(written.endsWith(`;${sid})`), true);
-  assert.equal(onlyOwnerAllowed(await windowsAcl(tokenFileFor(place.database, server.port)), sid), true);
+  // Every file created the usual way in this folder inherits full control for Everyone,
+  // which includes WRITE_DAC: a token file made that way and fixed later is not private.
+  const open = join(place.directory, 'open');
+  await mkdir(open);
+  await execute(join(system32, 'icacls.exe'), [open, '/grant', '*S-1-1-0:(OI)(CI)F']);
+  const control = join(open, 'control.txt');
+  await writeFile(control, 'synthetic\n');
+  assert.match((await windowsSecurity(control)).sddl, /\(A;ID;FA;;;WD\)/u, 'the folder hands out Everyone:F');
 
-  // The same file, once another account (Everyone) may read it, is refused by every client.
-  const file = tokenFileFor(place.database, server.port);
+  const database = join(open, 'ledger.sqlite');
+  const server = await place.start(database);
+  const { sid, sddl } = await windowsSecurity(tokenFileFor(database, server.port));
+  // Owner and only entry are this user; nothing is inherited from the folder. The DACL
+  // is "P" alone: a file whose ACL was replaced after creation (icacls, SetNamedSecurityInfo)
+  // shows "PAI" instead, so this also pins that the descriptor was set at creation.
+  assert.match(sddl, new RegExp(`^O:${sid}(?:G:[A-Z0-9-]+)?D:P\\(A;;FA;;;${sid}\\)$`, 'u'));
+  assert.equal((await cli(['search', 'vela'], { PORT: String(server.port), CONTEXT_LEDGER_DB: database })).stdout, '[]\n');
+});
+
+test('on Windows a token file others can read is refused in fixed words, and nothing is sent', { skip: process.platform !== 'win32' && 'POSIX uses the file mode (tested above).' }, async t => {
+  const place = await temporary(t);
+  const { seen, port } = await fakeLedger(t);
+  const file = tokenFileFor(place.database, port);
+  await writeTokenText(file, tokenRecord(port, 'E'.repeat(43)));
+  assert.deepEqual(await readTokenFile(file), { port, token: 'E'.repeat(43) });
+  // Once another account (Everyone) may read it, every client refuses it.
   await execute(join(system32, 'icacls.exe'), [file, '/grant', '*S-1-1-0:R']);
   assert.deepEqual(await readTokenFile(file), { exposed: true });
-  const env = { PORT: String(server.port), CONTEXT_LEDGER_DB: place.database };
+  const env = { PORT: String(port), CONTEXT_LEDGER_DB: place.database };
   const run = await cli(['search', 'vela'], env);
   assert.deepEqual({ code: run.code, stdout: run.stdout, stderr: run.stderr }, { code: 1, stdout: '', stderr: exposedToken + '\n' });
   const packet = join(place.directory, 'packet.json');
   await writeFile(packet, JSON.stringify({ version: 2, sessionId: 'b'.repeat(64), party: 'leo', nodes: [], edges: [] }));
   assert.equal((await cli(['graph', 'publish', packet], env)).stderr, exposedToken + '\n');
-  const client = place.mcp(server.port, { CONTEXT_LEDGER_DB: place.database });
+  const client = place.mcp(port, { CONTEXT_LEDGER_DB: place.database });
   await client.request(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {} });
   const result = await client.call(2, 'session_search', { query: 'vela' });
   assert.deepEqual({ isError: result.isError, content: result.content }, { isError: true, content: [{ type: 'text', text: exposedToken }] });
@@ -701,15 +718,18 @@ test('on Windows the token file is private to the current user, and a file other
     .then(() => ({ code: 0 }), error => ({ code: error.code, stderr: error.stderr }));
   assert.deepEqual(demo, { code: 1, stderr: 'The ledger\'s access token file can be read by other users, so it was not used: restart the ledger to write a private one.\n' });
   for (const text of [run.stderr, result.content[0].text, demo.stderr]) {
-    assert.equal(text.includes(server.token), false);
+    assert.equal(text.includes('E'.repeat(43)), false);
     assert.equal(text.includes(place.directory), false);
   }
+  // No client sent anything, with or without the token.
+  assert.deepEqual(seen, []);
 
-  // A file with its folder's inherited ACL (no restriction) is refused too when that
-  // ACL names anyone else; a restricted copy of the same text is read.
+  // A file with its folder's inherited ACL is refused too when that ACL names anyone
+  // else (here the temporary folder's SYSTEM and Administrators entries, at least).
   const plain = anyPortFile(join(place.directory, 'plain.sqlite'));
   await writeFile(plain, tokenRecord(4317, 'N'.repeat(43)));
-  if (!onlyOwnerAllowed(await windowsAcl(plain), sid)) assert.deepEqual(await readTokenFile(plain), { exposed: true });
+  const security = await windowsSecurity(plain);
+  if (!privateToOwner(security.sddl, security.sid)) assert.deepEqual(await readTokenFile(plain), { exposed: true });
   restrictToOwner(plain);
   assert.deepEqual(await readTokenFile(plain), { port: 4317, token: 'N'.repeat(43) });
 });

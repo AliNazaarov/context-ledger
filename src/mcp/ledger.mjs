@@ -31,6 +31,8 @@ export async function ledger(path, { body, notFound, timeoutMs = 5000 } = {}) {
   // The token goes only to the port its file names. Without it the request still goes
   // out, so a ledger that is not running gives the "Cannot reach" message.
   const { token, otherPort, exposed } = await clientToken(port);
+  // A token file others can read is not used, and nothing is sent.
+  if (exposed) throw new ToolError(exposedToken);
   const init = { redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers: {} };
   if (token !== undefined) init.headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) {
@@ -54,7 +56,7 @@ export async function ledger(path, { body, notFound, timeoutMs = 5000 } = {}) {
   }
   if (response.status === 401) {
     await response.body?.cancel().catch(() => {});
-    throw new ToolError(token !== undefined ? refusedToken : otherPort !== undefined ? tokenForOtherPort(otherPort) : exposed ? exposedToken : noToken);
+    throw new ToolError(token !== undefined ? refusedToken : otherPort !== undefined ? tokenForOtherPort(otherPort) : noToken);
   }
   if (response.status === 404 && notFound) {
     await response.body?.cancel().catch(() => {});

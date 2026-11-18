@@ -81,7 +81,9 @@ async function main() {
   // out, so a ledger that is not running gives the "Cannot reach" message.
   const { token, otherPort, exposed } = await clientToken(port);
   const headers = token === undefined ? {} : { Authorization: `Bearer ${token}` };
-  const withoutToken = otherPort !== undefined ? tokenForOtherPort(otherPort) : exposed ? exposedToken : noToken;
+  // A token file others can read is not used, and nothing is sent.
+  if (exposed) throw new Error(exposedToken);
+  const withoutToken = otherPort !== undefined ? tokenForOtherPort(otherPort) : noToken;
   // A graph packet is not sent where the token does not go: the listener on this port
   // is not known to be the ledger.
   if (packetPath !== undefined && token === undefined) throw new Error(withoutToken);
