@@ -1,12 +1,14 @@
 import { constants, open } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { handoffMarkdown } from './handoff.mjs';
+import { setupAgents } from './install.mjs';
 import { terminalJson } from './text.mjs';
 
 const usage = 'Usage: npm run ledger -- search [--provider claude|codex] [query]\n' +
   '       npm run ledger -- handoff <session-id>\n' +
   '       npm run ledger -- graph publish <packet.json>\n' +
-  '       npm run ledger -- graph read <graph-id>';
+  '       npm run ledger -- graph read <graph-id>\n' +
+  '       npm run ledger -- install|uninstall [--agent claude|codex] [--dry-run]';
 const maxGraphPacketBytes = 8 * 1024 * 1024;
 
 function command(argv) {
@@ -63,7 +65,23 @@ async function readGraphPacket(packetPath) {
   }
 }
 
+/** Card G8: install or uninstall the MCP server and instruction block for each agent. */
+function setup(mode, args) {
+  const { values, positionals } = parseArgs({
+    args,
+    options: { agent: { type: 'string' }, 'dry-run': { type: 'boolean', default: false } },
+    allowPositionals: true,
+  });
+  if (positionals.length || (values.agent && !['claude', 'codex'].includes(values.agent))) throw new Error(usage);
+  const agents = values.agent ? [values.agent] : ['claude', 'codex'];
+  const { ok, lines } = setupAgents({ mode, agents, dryRun: values['dry-run'] });
+  console.log(lines.join('\n'));
+  if (!ok) process.exitCode = 1;
+}
+
 async function main() {
+  const [first, ...rest] = process.argv.slice(2);
+  if (first === 'install' || first === 'uninstall') return setup(first, rest);
   const { action, path, packetPath } = command(process.argv.slice(2));
   const port = Number(process.env.PORT ?? 4317);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT.');

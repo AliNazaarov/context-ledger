@@ -235,3 +235,17 @@ Next steps:
 2. G10: a person checks the 82 labels in `evals/handoff/labelled.json`, then live runs (`node evals/handoff/run.mjs --agent claude --model M --runs 10`, the same for codex, then `--summary`). Check token and cost parsing on the first live Claude run.
 3. Still owed from earlier: Ali's review of the runtime changes from cycle 9, the human review of PR #8's schema migration, and Ali's decision on `VLLM_NGRAM=1` (cycle 11).
 4. PR #3 (Ali's draft M0 benchmark, based on `feature/semantic-graph`) was left open: it is Ali's and conflicts with its base.
+
+## Current checkpoint — G8 one-command agent setup (2026-11-17)
+
+Branch `ruslan/g8-agent-install`. `npm run ledger -- install` and `uninstall` (`src/install.mjs`, wired in `src/cli.mjs`) register the MCP server with Claude Code and Codex at user scope through their own CLIs, and add or remove a short marked block in `~/.claude/CLAUDE.md` and `$CODEX_HOME/AGENTS.md`. The eval and results are in the G8 section of [the eval log](evals.md).
+
+- Every change is printed; `--dry-run` changes nothing and runs only `mcp get`.
+- A server already registered is left alone. A second install replaces the block, and text around the block is kept byte for byte (a file with no final line break gets one).
+- The CLI is found on `PATH` by the module itself, because `cmd.exe` gives a missing command the same exit status as a failing one. On Windows a `.cmd` shim runs through `cmd.exe` with every argument quoted; an argument with `"` or `%` is refused.
+- Tests use a fake home and stub CLIs only (`tests/install.test.mjs`). A read-only `--dry-run` against the real CLIs on Windows found `claude.exe` and `codex.cmd`, both already registered.
+
+Next steps:
+
+1. A person runs `install` and then `uninstall` once against their real agents, on Windows and on macOS or Linux, and checks that `claude mcp list` and `codex mcp list` show the change. The tests only use stubs.
+2. U3 (the demo video) was waiting for G8 and can start once this is merged.
