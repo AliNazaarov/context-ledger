@@ -1395,3 +1395,11 @@ ADR-003 picked better-sqlite3 because `node:sqlite` had no FTS5. P1a checks whet
 - **Expected result:** a probe line on every system that runs the Node suites.
 - **Results:** Node 22.14.0 on Windows (local) has SQLite 3.47.2 and no FTS5. Node 22.23.4 on Linux (CI) has SQLite 3.53.4 with FTS5. Public reports agree: 22.19.0 has none and 22.22.2 has it.
 - **Outcome:** a proposed revision of ADR-003 in `docs/architecture.md` §5.1: stay on `node:sqlite`, probe FTS5 at open, fall back to `instr` search with a named warning. It is accepted when the user approves the PR.
+- **Codex, round 1:** one high, three medium and three low findings, all fixed in the document:
+  - (high) The design created the FTS5 table and its triggers unconditionally, so a database made on a build with FTS5 could break writes on one without it. FTS5 is now an optional index the store creates and maintains itself, with a watermark, a rebuild path, and a refusal for deletes it cannot carry into an index it cannot open.
+  - (medium) The fallback contract was not written down. It is today's session-level match, newest first, with the same pagination.
+  - (medium) Older sections still named better-sqlite3. The landing note now marks them as the original plan while P1a is pending.
+  - (medium) The AGENTS.md reason was overstated. It now says a second dependency needs an approved ADR, and that a missing prebuilt binary means a source build.
+  - (low) The evidence table now links the CI run and marks the public reports as unchecked. `doctor` tells users to rerun its check rather than naming a version.
+  - (low) The two approval moments are now one: ADR-003's revision is accepted only with the P1a PR.
+  - (low) §4's legacy-ID formula did not match the store. It now keeps `sessions.id` as it is.

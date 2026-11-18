@@ -2,9 +2,9 @@
 
 Status: proposed, 2026-11-06. Inputs: [product plan](https://github.com/PricePepel/context-ledger/blob/product/v1/docs/strategy/product-plan.md), [engineering gaps](https://github.com/PricePepel/context-ledger/blob/product/v1/docs/strategy/research-engineering-gaps.md) (both on `product/v1`), [handoff](handoff.md), [evals](evals.md).
 
-> **Landed on `main` 2026-11-17 (card P1, design part).** The text below is the 2026-11-06 design from `product/v1`, unchanged except for these links. It stays a proposal: "accepted" in section 9 means accepted once P1's owner approves the pull request that lands it. Until ADR-003 is decided (card P1a), no new runtime dependency is added. Section 11 lists where `main` has moved since the design was written.
+> **Landed on `main` 2026-11-17 (card P1, design part).** The text below is the 2026-11-06 design from `product/v1`, unchanged except for these links. It stays a proposal: "accepted" in section 9 means accepted once P1's owner approves the pull request that lands it. Until ADR-003 is decided (card P1a), no new runtime dependency is added. Section 11 lists where `main` has moved since the design was written. **P1a proposes revising ADR-003 (§5.1):** while that is pending, every mention of better-sqlite3 below (the §3 diagram, the §5 table and its mitigations, the supply-chain row in §6, the §7 store row and the §10 driver gate) is the original 2026-11-06 plan, and FTS5-only behaviour in §§4, 6 and 7 applies only when FTS5 is present.
 
-Checked locally: Node 22.14.0's `node:sqlite` bundles SQLite 3.47.2 built without FTS3, FTS4, FTS5 or R-Tree. `CREATE VIRTUAL TABLE t USING fts5(x)` fails with `no such module: fts5`. That result decides ADR-003.
+Checked locally on 2026-11-06: Node 22.14.0's `node:sqlite` bundles SQLite 3.47.2 built without FTS3, FTS4, FTS5 or R-Tree. `CREATE VIRTUAL TABLE t USING fts5(x)` fails with `no such module: fts5`. That result was the reason for the original ADR-003; §5.1 records newer builds that do have FTS5.
 
 ## 1. Constraints
 
@@ -121,7 +121,7 @@ CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENC
   source_line INTEGER NOT NULL, record_sha256 TEXT NOT NULL, flags INTEGER NOT NULL DEFAULT 0, -- 1 sidechain, 2 compact
   ts TEXT, UNIQUE (session_id, key), UNIQUE (session_id, seq)) STRICT;
 CREATE VIRTUAL TABLE messages_fts USING fts5(text, content='messages', content_rowid='id',
-  tokenize='unicode61 remove_diacritics 2'); -- kept in sync by AFTER INSERT/DELETE triggers
+  tokenize='unicode61 remove_diacritics 2'); -- under §5.1: optional, created only where FTS5 exists, kept in sync by the store, not by triggers
 INSERT INTO messages_fts(messages_fts, rank) VALUES ('secure-delete', 1);
 CREATE TABLE artifacts (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects ON DELETE CASCADE,
   kind TEXT NOT NULL CHECK (kind IN ('commit','pr','file')), repo TEXT NOT NULL, ref TEXT NOT NULL,
@@ -163,7 +163,7 @@ CREATE TABLE exports (id TEXT PRIMARY KEY, packet_id TEXT NOT NULL REFERENCES pa
 - Forward-only numbered SQL files ship in the package. Each runs in one transaction, records its checksum and bumps `PRAGMA user_version`.
 - `VACUUM INTO 'backups/ledger-v<N>.sqlite'` runs before migrating. Backups expire after 7 days or on purge.
 - A database newer than the code fails with `SchemaTooNewError`. Constraint changes use SQLite's 12-step rebuild.
-- `0002_import_v0` turns today's `sessions` and `graphs` into legacy sessions. `legacy_id` keeps the old `sha256(provider \0 file)` and keys become `l:<line>`, so v1 packets still validate. Re-importing the same bytes reproduces that hash and links the legacy session to its UUID session.
+- `0002_import_v0` turns today's `sessions` and `graphs` into legacy sessions. `legacy_id` keeps the existing `sessions.id` unchanged, which is `sha256(provider, a NUL, the decoded transcript text)` (the design first wrote `sha256(provider \0 file)`; corrected by P1a), and keys become `l:<line>`, so v1 packets still validate. Re-importing the same bytes reproduces that hash and links the legacy session to its UUID session.
 - Postgres migrations live in `migrations/pg/`. One repository contract suite runs against both databases.
 
 ## 5. Storage decision and interface
@@ -190,14 +190,20 @@ Open sets WAL, `busy_timeout = 5000`, `foreign_keys = ON` and `secure_delete = O
 | Build | SQLite | FTS5 | Source |
 | --- | --- | --- | --- |
 | Node 22.14.0, win32-x64 (local) | 3.47.2 | no | `tests/sqlite-fts5-probe.test.mjs` |
-| Node 22.23.4, linux-x64 (CI, `setup-node` 22) | 3.53.4 | yes | the same probe in CI, 2026-11-17 |
-| Node 22.19.0, linux-x64 | — | no | public reports (codegraph #1532) |
-| Node 22.22.2 | — | yes | public reports (openclaw #62328) |
+| Node 22.23.4, linux-x64 (CI, `setup-node` 22) | 3.53.4 | yes | the same probe, [CI run 44253667145](https://github.com/PricePepel/context-ledger/actions/runs/44253667145), 2026-11-17 |
+| Node 22.19.0, linux-x64 | — | no | public report: colbymchenry/codegraph#1532 (not checked here) |
+| Node 22.22.2, platform not stated | — | yes | public report: openclaw/openclaw#62328 (not checked here) |
 
-The first 22.x release with FTS5 lies between 22.19 and 22.22.2. It is not pinned here, so the code must probe rather than trust a version number.
+These are capability checks of particular builds. They suggest, but do not prove, that FTS5 arrived in a 22.x release after 22.19, so the code must probe rather than trust a version number.
 
-- **Decision:** keep `node:sqlite` and add no runtime dependency. At open, probe FTS5 with `CREATE VIRTUAL TABLE … USING fts5` on an in-memory database. With FTS5, P1c's message rows get an FTS5 index (ranking and snippets). Without it, search keeps today's `instr` matching, and the server, CLI and `ledger doctor` name the "degraded search" mode and the Node upgrade that fixes it. CI keeps one job without FTS5 (or a switch that forces the fallback), so both paths stay tested.
-- **Why not better-sqlite3:** it is a native binary per platform and Node ABI. That is the riskiest part of an `npx` install on three systems (the wave-5 gate), and it breaks AGENTS.md's "no build step, dependencies only with an ADR". Its synchronous API is close to `node:sqlite`'s, so switching later stays cheap if `node:sqlite` proves unstable or too slow.
+- **Decision:** keep `node:sqlite` and add no runtime dependency. At open, probe FTS5 with `CREATE VIRTUAL TABLE … USING fts5` on an in-memory database.
+- **FTS5 is an optional index, never part of the canonical schema** (review round 1, high), so one database stays readable and writable on builds with and without FTS5:
+  - Migrations never create it. The store creates `messages_fts` only when the probe finds FTS5, and no trigger on `messages` refers to it, since a trigger naming a missing module would break every write on a build without FTS5.
+  - The store indexes new message rows itself and keeps an indexed-through watermark in `settings`. On an open with FTS5 it catches up from the watermark, so writes made on a build without FTS5 are indexed later. A missing or damaged index is dropped and rebuilt from `messages`.
+  - Deletion and purge on a build without FTS5, when an index exists from an earlier build: the index still holds tokens of the deleted text, and it cannot be edited without the module. Such a delete is refused with a message naming the fix (open on an FTS5 build, or rebuild without the index). Tests cover a fresh open, an upgrade and a downgrade between builds, catch-up after fallback writes, and purge in both modes.
+- **The fallback search contract** (review round 1, medium) is today's, unchanged: a session matches when every whitespace-separated term, lowercased, appears somewhere in that session's text (across messages, not within one), results are newest first with the same cursor pagination, and there is no ranking or snippet. §7's latency targets apply only with FTS5. With FTS5, search returns ranked message hits with snippets.
+- The server, CLI and `ledger doctor` name the "degraded search" mode. `doctor` tells the user to rerun its capability check after upgrading Node, rather than naming a version. CI keeps a switch that forces the fallback, so both paths stay tested.
+- **Why not better-sqlite3:** it is a native addon per platform and Node ABI. Prebuilt binaries cover the common targets, but where none fits, `npm install` falls back to compiling from source, which is the riskiest part of an `npx` install on three systems (the wave-5 gate). It would also be a second runtime dependency, which AGENTS.md allows only with an approved ADR. Its synchronous API is close to `node:sqlite`'s, so switching later stays cheap if `node:sqlite` proves unstable or too slow.
 - **Still open:** the same probe on Windows and macOS CI runners (P5a, #38, runs Node suites on all three, so its first run after this lands records them); and whether `package.json` should require a minimum Node 22.x once the first release with FTS5 is known.
 - **Accepted when:** P1's owner (the user, who approved the P1 takeover) approves the pull request that lands this section. Until then, ADR-003 stands as written and no dependency is added either way.
 
@@ -295,7 +301,7 @@ Each is accepted once P1's owner approves this design (see the note at the top).
 
 1. Local-first, no egress in v1 [cloud ingest, day-one sync].
 2. One in-process `createLedger` core behind CLI, HTTP and MCP [CLI as HTTP client, MCP daemon].
-3. ~~better-sqlite3 with FTS5, §5 [`node:sqlite`, custom index, wasm].~~ **Proposed revision (P1a, 2026-11-17):** `node:sqlite`, with FTS5 when the running Node has it and `instr` search with a named "degraded search" warning when it does not; see §5.1 [better-sqlite3, custom index, wasm].
+3. ~~better-sqlite3 with FTS5, §5 [`node:sqlite`, custom index, wasm].~~ **Proposed revision (P1a, 2026-11-17), accepted only when the user approves the P1a pull request; until then the original stands:** `node:sqlite`, with FTS5 when the running Node has it and `instr` search with a named "degraded search" warning when it does not; see §5.1 [better-sqlite3, custom index, wasm].
 4. Session is `provider:uuid`; message key is the record UUID or a line-and-bytes hash [whole-file hash breaks on append; line-only misses rewrites].
 5. Forward-only migrations with backups; refuse newer schemas [`IF NOT EXISTS` drift, untested down-migrations].
 6. Append-only, hash-chained review events; state is a fold [mutable status columns].
