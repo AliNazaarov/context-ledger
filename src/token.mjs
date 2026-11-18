@@ -8,7 +8,7 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { closeSync, constants, fstatSync, mkdirSync, openSync, readSync, rmSync, writeSync } from 'node:fs';
-import { open, stat } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -46,37 +46,60 @@ export const newToken = newSecret;
 // Windows ignores file modes: a file created the usual way takes its folder's inherited
 // ACL, which outside the user profile often lets other users read it, and an account
 // with WRITE_DAC on it could keep that right through a handle opened before any later
-// change. So the writer has Windows PowerShell create the file (CreateNew, share mode
-// None) with a protected security descriptor from the start: owner and only entry are
-// the current user. Owner and DACL are then read back as SDDL, which does not depend on
-// the display language; readers do the same and refuse a file that another account owns
-// or may open. PowerShell runs from System32 with execFile and no shell, takes its
-// script as -EncodedCommand and the path in an environment variable, and never sees the
-// token.
+// change. So on Windows the token file is written and read by Windows PowerShell, each
+// time through one handle that is both checked and used:
+// - the writer creates the file (CreateNew, share mode None) with a protected security
+//   descriptor whose owner and only entry are the current user, checks that descriptor
+//   on the new handle, and only then writes the record, which it reads from stdin;
+// - a reader opens the file, reads owner and DACL from that handle as SDDL (which does
+//   not depend on the display language) and at most 257 bytes from the same handle.
+// PowerShell runs from System32 with execFile and no shell, and takes its script as
+// -EncodedCommand and the path in an environment variable. The token goes only through
+// the private stdin and stdout pipes of that child process, never its arguments or
+// environment.
 const windows = process.platform === 'win32';
 const powershell = () => join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 const runTool = promisify(execFile);
-// libuv's UV_FS_O_EXLOCK: open with share mode 0. While the writer holds such a handle no
-// other process can open the file for reading, writing or deletion, so the path cannot
-// be renamed or replaced between its security check and the write.
-const exclusiveLock = constants.UV_FS_O_EXLOCK ?? 0x10000000;
 const sidPattern = /^S-1-[0-9]+(?:-[0-9]+)+$/u;
 const pathVariable = 'CONTEXT_LEDGER_PRIVATE_FILE';
-const powershellPreamble = "$ErrorActionPreference = 'Stop'\n$ProgressPreference = 'SilentlyContinue'\n";
-// Prints the current user's SID, then the file's owner, group and DACL as SDDL.
-const describeScript = powershellPreamble +
-  '[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value\n' +
-  `(Get-Acl -LiteralPath $env:${pathVariable}).Sddl\n`;
-// Creates the file, which must not exist, with the current user as owner and only entry.
-const createScript = powershellPreamble +
-  '$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User\n' +
-  '$security = New-Object System.Security.AccessControl.FileSecurity\n' +
-  '$security.SetOwner($sid)\n' +
-  '$security.SetAccessRuleProtection($true, $false)\n' +
-  "$security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule $sid, 'FullControl', 'Allow'))\n" +
-  `$stream = New-Object System.IO.FileStream $env:${pathVariable}, ([System.IO.FileMode]::CreateNew), ` +
-  '([System.Security.AccessControl.FileSystemRights]::FullControl), ([System.IO.FileShare]::None), 4096, ([System.IO.FileOptions]::None), $security\n' +
-  '$stream.Dispose()\n';
+// Exit codes of the write script: the path already names something (nothing was created,
+// so nothing is removed), or a later step failed (the new file was emptied through its
+// handle, so no token is left in it).
+const createCollision = 3;
+const writeFailed = 4;
+const powershellLines = lines => ["$ErrorActionPreference = 'Stop'", "$ProgressPreference = 'SilentlyContinue'", ...lines].join('\n');
+const writeScript = powershellLines([
+  '$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User',
+  '$security = New-Object System.Security.AccessControl.FileSecurity',
+  '$security.SetOwner($sid)',
+  '$security.SetAccessRuleProtection($true, $false)',
+  "$security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule $sid, 'FullControl', 'Allow'))",
+  'try {',
+  `  $stream = New-Object System.IO.FileStream $env:${pathVariable}, ([System.IO.FileMode]::CreateNew), ([System.Security.AccessControl.FileSystemRights]::FullControl), ([System.IO.FileShare]::None), 4096, ([System.IO.FileOptions]::None), $security`,
+  `} catch { exit ${createCollision} }`,
+  'try {',
+  '  $found = $stream.GetAccessControl()',
+  '  $rules = @($found.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))',
+  "  if (-not $found.AreAccessRulesProtected -or $found.GetOwner([System.Security.Principal.SecurityIdentifier]) -ne $sid -or $rules.Count -ne 1 -or $rules[0].IdentityReference -ne $sid -or $rules[0].AccessControlType -ne 'Allow') { throw 'not private' }",
+  '  $record = [System.Text.Encoding]::UTF8.GetBytes([Console]::In.ReadLine() + "`n")',
+  '  $stream.Write($record, 0, $record.Length)',
+  '  $stream.Flush()',
+  "  [Console]::Out.Write($sid.Value + \"`n\" + $found.GetSecurityDescriptorSddlForm('Owner, Group, Access') + \"`n\")",
+  '} catch {',
+  '  $stream.SetLength(0)',
+  `  exit ${writeFailed}`,
+  '} finally { $stream.Dispose() }',
+]);
+const readScript = powershellLines([
+  '$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+  `$stream = [System.IO.File]::Open($env:${pathVariable}, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)`,
+  'try {',
+  "  $sddl = $stream.GetAccessControl().GetSecurityDescriptorSddlForm('Owner, Group, Access')",
+  `  $buffer = New-Object byte[] ${maxTokenFileBytes + 1}`,
+  '  $count = $stream.Read($buffer, 0, $buffer.Length)',
+  '  [Console]::Out.Write($sid + "`n" + $sddl + "`n" + [System.Convert]::ToBase64String($buffer, 0, $count) + "`n")',
+  '} finally { $stream.Dispose() }',
+]);
 const powershellArguments = script => ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
 const powershellOptions = path => ({ env: { ...process.env, [pathVariable]: path }, windowsHide: true, timeout: 30_000, maxBuffer: 64 * 1024 });
 
@@ -94,64 +117,70 @@ export function privateToOwner(sddl, sid) {
   return entries.every(fields => fields[0] === 'D' || (fields[0] === 'A' && fields.length === 6 && fields[5] === sid));
 }
 
-/** The two lines of the describe script: { sid, sddl }, or undefined. */
+/** The lines the scripts print: { sid, sddl, bytes }, or undefined. */
 function described(output) {
-  const [sid, sddl] = String(output).split(/\r?\n/u);
-  return sid && sddl && sidPattern.test(sid) ? { sid, sddl } : undefined;
+  const [sid, sddl, base64] = String(output).split(/\r?\n/u);
+  if (!sid || !sddl || !sidPattern.test(sid)) return undefined;
+  return { sid, sddl, bytes: base64 === undefined ? undefined : Buffer.from(base64, 'base64') };
 }
 
-/** True when the file at this path is private to the current user (Windows). */
-async function isPrivate(path) {
-  const { stdout } = await runTool(powershell(), powershellArguments(describeScript), powershellOptions(path));
+/** Windows: creates the token file private from the start and writes the record through the checked handle. */
+function writePrivateFileSync(path, line) {
+  let output;
+  try {
+    output = execFileSync(powershell(), powershellArguments(writeScript), { ...powershellOptions(path), input: line + '\n', stdio: ['pipe', 'pipe', 'ignore'] });
+  } catch {
+    throw new Error('The token file could not be written privately.');
+  }
+  const found = described(output);
+  if (!found || !privateToOwner(found.sddl, found.sid)) {
+    rmSync(path, { force: true });
+    throw new Error('The token file is not private.');
+  }
+}
+
+/** Windows: { sid, sddl, bytes } of a file, all read through one handle. */
+async function readPrivateFile(path) {
+  const { stdout } = await runTool(powershell(), powershellArguments(readScript), powershellOptions(path));
   const found = described(stdout);
-  if (!found) throw new Error('No security descriptor.');
-  return privateToOwner(found.sddl, found.sid);
-}
-
-function isPrivateSync(path) {
-  const found = described(execFileSync(powershell(), powershellArguments(describeScript), { ...powershellOptions(path), stdio: ['ignore', 'pipe', 'ignore'] }));
-  return found !== undefined && privateToOwner(found.sddl, found.sid);
-}
-
-/** Creates an empty file, which must not exist, private to the current user from the start (Windows). */
-function createPrivateFileSync(path) {
-  execFileSync(powershell(), powershellArguments(createScript), { ...powershellOptions(path), stdio: 'ignore' });
+  if (!found?.bytes) throw new Error('The token file could not be read.');
+  return found;
 }
 
 /**
  * Writes a token file for a server listening on this port. An existing file (or link)
  * at the path is removed first and the new one is created exclusively, so a file or
- * link put there in between makes this fail instead of writing through it. Mode 0600
- * applies on POSIX. On Windows the empty file is created private to the current user
- * (see above), opened with share mode 0, checked for that owner and ACL, and only then
- * written. Any failure removes the file and throws. A link in the folder path is not
- * checked. Returns the file's identity ({ dev, ino } as bigints, from the open
- * descriptor: on Windows only a descriptor's stat names the volume) so readers can
- * refuse the file.
+ * link put there in between makes this fail instead of writing through it (and that
+ * file is not removed). Mode 0600 applies on POSIX; on Windows see above. A short write
+ * or a failed close removes the file; a failure on Windows leaves no token in it. A
+ * link in the folder path is not checked. Returns the file's identity ({ dev, ino } as
+ * bigints, from an open descriptor: on Windows only a descriptor's stat names the
+ * volume) so readers can refuse the file.
  */
 export function writeTokenFile(path, token, port) {
   if (!secretPattern.test(token) || !validPort(port)) throw new Error('Invalid token record.');
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   rmSync(path, { force: true });
-  let descriptor;
-  try {
-    if (windows) {
-      createPrivateFileSync(path);
-      descriptor = openSync(path, constants.O_WRONLY | exclusiveLock);
-    } else {
-      descriptor = openSync(path, 'wx', 0o600);
+  const line = JSON.stringify({ port, token });
+  if (windows) {
+    writePrivateFileSync(path, line);
+    // The identity comes from a descriptor whose content is this start's record, which
+    // nobody else can know, so it is the file just written.
+    const descriptor = openSync(path, constants.O_RDONLY);
+    try {
+      const buffer = Buffer.alloc(maxTokenFileBytes + 1);
+      const bytesRead = readSync(descriptor, buffer, 0, buffer.length, 0);
+      if (buffer.subarray(0, bytesRead).toString('utf8') !== line + '\n') throw new Error('The token file changed.');
+      const { dev, ino } = fstatSync(descriptor, { bigint: true });
+      return { dev, ino };
+    } finally {
+      closeSync(descriptor);
     }
-  } catch (error) {
-    if (windows) rmSync(path, { force: true });
-    throw error;
   }
-  const record = Buffer.from(JSON.stringify({ port, token }) + '\n', 'utf8');
+  const descriptor = openSync(path, 'wx', 0o600);
+  const record = Buffer.from(line + '\n', 'utf8');
   let identity;
   try {
-    if (windows) {
-      const info = fstatSync(descriptor);
-      if (!info.isFile() || info.size !== 0 || !isPrivateSync(path)) throw new Error('The token file is not private.');
-    }
     if (writeSync(descriptor, record, 0, record.length, 0) !== record.length) throw new Error('The token file was not written whole.');
     const { dev, ino } = fstatSync(descriptor, { bigint: true });
     identity = { dev, ino };
@@ -161,7 +190,7 @@ export function writeTokenFile(path, token, port) {
       closeSync(descriptor);
       closed = true;
     } finally {
-      // A file that is not private, not written whole or not closed is not left behind.
+      // A file that is not written whole or not closed is not left behind.
       if (identity === undefined || !closed) rmSync(path, { force: true });
     }
   }
@@ -198,9 +227,10 @@ export function removeTokenFile(path, isOwnToken) {
 /**
  * Reads a token file: { port, token }, or undefined when the file is missing, is not a
  * regular file (a FIFO cannot block the read), is malformed, or on POSIX is a link,
- * belongs to another user or can be read or written by group or others. On Windows a
- * file that another account owns, or whose ACL allows anyone but the current user, gives
- * { exposed: true } and is not read; a file whose security cannot be read gives undefined.
+ * belongs to another user or can be read or written by group or others. On Windows the
+ * owner, the ACL and the content come through one handle (see above): a file that
+ * another account owns, or whose ACL allows anyone but the current user, gives
+ * { exposed: true } and is not used; a file whose security cannot be read gives undefined.
  */
 export async function readTokenFile(path) {
   let file;
@@ -209,20 +239,18 @@ export async function readTokenFile(path) {
     const info = await file.stat();
     if (!info.isFile() || info.size > maxTokenFileBytes) return undefined;
     if (typeof process.getuid === 'function' && (info.uid !== process.getuid() || (info.mode & 0o077) !== 0)) return undefined;
+    let bytes;
     if (windows) {
-      // Owner and ACL are read by path, so the path must still name the open file
-      // afterwards. Swapping it away and back in between needs another account to hold
-      // full control of the folder, which the folder rule excludes. (Holding the file
-      // with share mode 0 for the check would close that too, but made concurrent
-      // clients fail with EBUSY.)
-      if (!(await isPrivate(path))) return { exposed: true };
-      const [opened, named] = await Promise.all([file.stat({ bigint: true }), stat(path, { bigint: true })]);
-      if (opened.ino !== named.ino) return undefined;
+      const found = await readPrivateFile(path);
+      if (!privateToOwner(found.sddl, found.sid)) return { exposed: true };
+      bytes = found.bytes;
+    } else {
+      const buffer = Buffer.alloc(maxTokenFileBytes + 1);
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+      bytes = buffer.subarray(0, bytesRead);
     }
-    const buffer = Buffer.alloc(maxTokenFileBytes + 1);
-    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
-    if (bytesRead > maxTokenFileBytes) return undefined;
-    const record = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'));
+    if (bytes.length > maxTokenFileBytes) return undefined;
+    const record = JSON.parse(bytes.toString('utf8'));
     if (typeof record?.token !== 'string' || !secretPattern.test(record.token) || !validPort(record.port)) return undefined;
     return { port: record.port, token: record.token };
   } catch {
