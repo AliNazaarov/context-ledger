@@ -42,9 +42,6 @@ test('P4b: every listed format is found, with its kind and exact span', () => {
     [`stripe ${fake['stripe-key']}`, 'stripe-key', fake['stripe-key']],
     [`cookie=${fake.jwt}`, 'jwt', fake.jwt],
     [`aws_secret_access_key = ${fake['aws-secret']}`, 'aws-secret-access-key', fake['aws-secret']],
-    [`curl -H "Authorization: Bearer ${fake.bearer}"`, 'bearer-token', fake.bearer],
-    [`DB_PASSWORD="Kx9mQ2vL7p"`, 'assigned-secret', 'Kx9mQ2vL7p'],
-    [`client_secret: Zt4Wq8Lm2Np6Rv0X`, 'assigned-secret', 'Zt4Wq8Lm2Np6Rv0X'],
     [`here is the key:\n${pem}\nthanks`, 'private-key', pem],
   ];
   for (const [text, kind, value] of cases) {
@@ -128,7 +125,7 @@ test('P4b: a masked preview shows only the known prefix', () => {
 });
 
 test('P4b: a 1 MiB transcript and a 1 MiB run of word characters scan in under a second each', () => {
-  const chunk = `Normal text about the build. password: Kx9mQ2vL7p and ${fake['github-token']}\n`;
+  const chunk = `Normal text about the build. password: synthetic-pw-9x and ${fake['github-token']}\n`;
   const big = chunk.repeat(Math.ceil((1024 * 1024) / chunk.length));
   for (const text of [big, 'a'.repeat(1024 * 1024), `${'token'.repeat(200000)}=x`, `sk-${'-'.repeat(1024 * 1024)}`]) {
     const started = performance.now();
@@ -172,31 +169,31 @@ test('P4b: ledger redact reports kinds, lines and masked previews, never a value
   const transcript = [
     line('user', `Deploy the Vega site with ${fake['github-token']} please.`),
     line('assistant', 'Deploying now.'),
-    line('user', `And the DB_PASSWORD="Kx9mQ2vL7p" plus ${fake['aws-access-key-id']}.`),
+    line('user', `And the DB_PASSWORD="synthetic-pw-9x" plus ${fake['aws-access-key-id']}.`),
   ].join('\n');
   const imported = await (await fetch(`${origin}/api/import`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin },
     body: JSON.stringify({ provider: 'claude', source: 'vega.jsonl', transcript }),
   })).json();
   const id = imported.session.id;
-  const values = [fake['github-token'], 'Kx9mQ2vL7p', fake['aws-access-key-id']];
+  const values = [fake['github-token'], fake['aws-access-key-id']];
 
   const report = await cli(['redact', id], port);
   assert.equal(report.code, 0, report.stderr);
   assert.equal(report.stdout, [
     'line 1  github-token  40 characters  ghp_…',
-    'line 3  assigned-secret  10 characters  …',
     'line 3  aws-access-key-id  20 characters  AKIA…',
-    '3 possible secrets in 2 lines. Values are not shown; use --text for the redacted hand-off.',
+    '2 possible secrets in 2 lines. Values are not shown; use --text for the redacted hand-off.',
+    'Only known key formats are checked (provider API keys, JWTs, private keys, AWS keys); passwords and other free-text values are not.',
     '',
   ].join('\n'));
 
   const json = await cli(['redact', id, '--json'], port);
   assert.equal(json.code, 0, json.stderr);
   const parsed = JSON.parse(json.stdout);
-  assert.equal(parsed.count, 3);
+  assert.equal(parsed.count, 2);
   assert.equal(parsed.lines, 2);
-  assert.deepEqual(parsed.findings.map(finding => finding.kind), ['github-token', 'assigned-secret', 'aws-access-key-id']);
+  assert.deepEqual(parsed.findings.map(finding => finding.kind), ['github-token', 'aws-access-key-id']);
 
   const text = await cli(['redact', id, '--text'], port);
   assert.equal(text.code, 0, text.stderr);
@@ -248,18 +245,6 @@ test('P4b review: every GitHub, OpenAI and Stripe variant is found with its exac
   }
 });
 
-test('P4b review: overlapping matches merge into one span, with no fragment or prefix left', () => {
-  const inner = fake['github-token'];
-  const text = `Authorization: Bearer abcdef12.${inner} sent`;
-  const found = findSecrets(text);
-  assert.equal(found.length, 1);
-  assert.equal(found[0].kind, 'github-token');
-  assert.equal(text.slice(found[0].start, found[0].end), `abcdef12.${inner}`);
-  assert.equal(maskedPreview(text, found[0]), '…', 'the inner prefix is part of the bearer value');
-  assert.equal(redactText(text), 'Authorization: Bearer [REDACTED github-token] sent');
-  assert.deepEqual(kinds(`ANTHROPIC_KEY=${fake['anthropic-key']}`), ['anthropic-key']);
-});
-
 test('P4b review: long values, long keys and quoted passwords are redacted whole', () => {
   const longToken = join2('gh', 'p_', body('Ab3D', 80));
   const longBearer = body('Tq8z', 1500);
@@ -268,12 +253,8 @@ test('P4b review: long values, long keys and quoted passwords are redacted whole
   const quote = String.fromCodePoint(39);
   const cases = [
     [`a ${longToken} b`, 'a [REDACTED github-token] b'],
-    [`Authorization: Bearer ${longBearer} b`, 'Authorization: Bearer [REDACTED bearer-token] b'],
     [`x\n${bigPem}\ny`, 'x\n[REDACTED private-key]\ny'],
     [openPem, '[REDACTED private-key]\n\nAfter the key.'],
-    ['password = "correct horse, battery staple 9!" ok', 'password = "[REDACTED assigned-secret]" ok'],
-    [`api_key: ${body('Zk3m', 200)} ok`, 'api_key: [REDACTED assigned-secret] ok'],
-    [`client_secret=${quote}a\\${quote}b9cd efgh${quote} ok`, `client_secret=${quote}[REDACTED assigned-secret]${quote} ok`],
   ];
   for (const [text, expected] of cases) assert.equal(redactText(text), expected, expected);
   assert.ok(bigPem.length > 16384);
@@ -282,8 +263,6 @@ test('P4b review: long values, long keys and quoted passwords are redacted whole
 test('P4b review: placeholders by shape, and UUIDs and commit hashes under a name, are not flagged', () => {
   assert.deepEqual(kinds('token = 0b7e2a4c-9f1d-4e3b-8a5c-6d2f1e0a9b8c'), []);
   assert.deepEqual(kinds('token = 3f2a9c1e7b4d5a6f8e9c0b1a2d3e4f5a6b7c8d9e'), []);
-  assert.deepEqual(kinds('password = my_RealLooking9Secret'), ['assigned-secret'], 'a my_ prefix is not a placeholder by itself');
-  assert.deepEqual(kinds('token = 9f86d081884c7d659a2feaa0c55ad015'), ['assigned-secret'], 'other hex values can be secrets');
   assert.deepEqual(kinds('Authorization: Bearer short1'), [], 'bearer values under eight characters are not flagged');
 });
 
@@ -316,6 +295,7 @@ test('P4b review: the redacted source name, strict escaping, and fixed errors in
     'source name  github-token  40 characters  ghp_…',
     'line 1  stripe-key  32 characters  sk_live_…',
     '2 possible secrets in 2 lines. Values are not shown; use --text for the redacted hand-off.',
+    'Only known key formats are checked (provider API keys, JWTs, private keys, AWS keys); passwords and other free-text values are not.',
     '',
   ].join('\n'));
   const text = await cli(['redact', id, '--text'], port);
@@ -364,12 +344,8 @@ test('P4b review 2: quoted values, long JWTs, encrypted keys and JSON headers ar
   const dek = `-----BEGIN ${pemType}-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0A1B2C3D\n\n${body('q1W2', 16)}\n${body('e3R4', 16)}`;
   const quote = String.fromCodePoint(39);
   const cases = [
-    ['password = " [x] secret 9" ok', 'password = "[REDACTED assigned-secret]" ok'],
-    [`api_key: ${quote} spaced value 42${quote} ok`, `api_key: ${quote}[REDACTED assigned-secret]${quote} ok`],
     [`jwt ${longJwt} end`, 'jwt [REDACTED jwt] end'],
     [`${dek}\nThen prose.`, '[REDACTED private-key]\nThen prose.'],
-    ['{"Authorization":"Bearer abcdefgh12345"}', '{"Authorization":"Bearer [REDACTED bearer-token]"}'],
-    [`{'Authorization': 'Bearer abcdefgh12345'}`, `{'Authorization': 'Bearer [REDACTED bearer-token]'}`],
   ];
   for (const [text, expected] of cases) assert.equal(redactText(text), expected, expected);
 });
@@ -382,35 +358,12 @@ test('P4b review 2: an unfinished key never swallows prose or a later key', () =
   assert.equal(findSecrets(twoBegins).length, 2);
 });
 
-test('P4b review 2: a prefix is hidden when the labelled match does not cover the whole span', () => {
-  const text = `Authorization: Bearer ${fake['github-token']}.more9`;
-  const [finding] = findSecrets(text);
-  assert.equal(finding.kind, 'github-token');
-  assert.equal(maskedPreview(text, finding), '…');
-  assert.equal(redactText(text), 'Authorization: Bearer [REDACTED github-token]');
-  const exact = `Authorization: Bearer ${fake['github-token']}`;
-  assert.equal(maskedPreview(exact, findSecrets(exact)[0]), 'ghp_…', 'a bearer value that is exactly a token keeps its public prefix');
-});
-
-test('P4b review 2: environment-looking values, digit values, and quotes at a line break', () => {
-  assert.deepEqual(kinds('secret = env-9f8a7b6c5d4e'), ['assigned-secret']);
-  assert.deepEqual(kinds('secret = env.prod9key'), ['assigned-secret']);
-  assert.deepEqual(kinds('secret = process.env.SECRET'), []);
-  assert.deepEqual(kinds('secret = 12345678901234'), [], 'a value of digits only is not flagged');
-  for (const newline of ['\n', '\r\n']) {
-    const text = `password = "abc9defg\\${newline}next line stays`;
-    // The value runs to the line break, its trailing backslash included; the next line stays.
-    assert.equal(redactText(text), `password = "[REDACTED assigned-secret]${newline}next line stays`, JSON.stringify(newline));
-  }
-});
-
 test('P4b review 2: every remaining variant has one exact finding and preview', () => {
   const variants = [
     [`value ${join2('sk', '-svcacct-', body('Hk4t', 10))} end`, 'openai-key', 'sk-svcacct-…'],
     [`value ${join2('sk', '-admin-', body('Hk4t', 10))} end`, 'openai-key', 'sk-admin-…'],
     [`value ${join2('rk', '_test_', body('Rf5G', 6))} end`, 'stripe-key', 'rk_test_…'],
     [`aws_secret_access_key = ${fake['aws-secret']}`, 'aws-secret-access-key', '…'],
-    [`Authorization: Bearer ${fake.bearer}`, 'bearer-token', '…'],
     [`here:\n${pem}`, 'private-key', '…'],
   ];
   for (const [text, kind, preview] of variants) {
@@ -478,16 +431,12 @@ test('P4b review 3: escaped JSON values, nested names, padded key lines and AWS 
   const padded = `-----BEGIN ${pemType}-----\n${body('q1W2', 16)}  \n${body('e3R4', 16)}\t\n-----END ${pemType}-----`;
   const paddedOpen = `-----BEGIN ${pemType}-----\n${body('q1W2', 16)} \n${body('e3R4', 16)}\nAfter.`;
   const cases = [
-    ['{"Authorization":"Bearer abc\\/def12345\\u002Fxyz"}', '{"Authorization":"Bearer [REDACTED bearer-token]"}'],
-    ['{"Authorization":"Bearer abcdefgh12\\"}', '{"Authorization":"Bearer [REDACTED bearer-token]\\"}'],
-    ['note = "[REDACTED] then api_key=Zt4Wq8Lm2Np6Rv0X here"', 'note = "[REDACTED] then api_key=[REDACTED assigned-secret] here"'],
     [`x\n${padded}\ny`, 'x\n[REDACTED private-key]\ny'],
     [paddedOpen, '[REDACTED private-key]\nAfter.'],
     [`aws_secret_access_key = ${fake['aws-secret']}.`, 'aws_secret_access_key = [REDACTED aws-secret-access-key].'],
     [`aws_secret_access_key: ${fake['aws-secret']}: next`, 'aws_secret_access_key: [REDACTED aws-secret-access-key]: next'],
   ];
   for (const [text, expected] of cases) assert.equal(redactText(text), expected, expected);
-  assert.deepEqual(kinds('password = "[REDACTED assigned-secret]"'), [], 'a complete redaction marker is a placeholder');
 });
 
 test('P4b review 3: nested candidates give the expected single span at every size', () => {
@@ -499,7 +448,7 @@ test('P4b review 3: nested candidates give the expected single span at every siz
     assert.ok(performance.now() - started < 1000, `${size} kB took too long`);
     assert.deepEqual(found.map(({ kind, start, end }) => ({ kind, start, end })), [{ kind: 'openai-key', start: 0, end: text.length }]);
   }
-  const names = `token=${'token='.repeat(40000)}Zt4Wq8Lm2Np6`;
+  const names = `token=${'token='.repeat(40000)}${fake['github-token']}`;
   const started = performance.now();
   const found = findSecrets(names);
   assert.ok(performance.now() - started < 1000, 'nested names took too long');
@@ -534,7 +483,7 @@ test('P4b review 3: every CLI mode prints exactly the expected output and exits 
   const report = await cli(['redact', id], port);
   assert.equal(report.code, 0);
   assert.equal(report.stderr, '');
-  assert.equal(report.stdout, 'line 1  github-token  40 characters  ghp_…\n1 possible secret in 1 line. Values are not shown; use --text for the redacted hand-off.\n');
+  assert.equal(report.stdout, 'line 1  github-token  40 characters  ghp_…\n1 possible secret in 1 line. Values are not shown; use --text for the redacted hand-off.\nOnly known key formats are checked (provider API keys, JWTs, private keys, AWS keys); passwords and other free-text values are not.\n');
   const json = await cli(['redact', id, '--json'], port);
   assert.equal(json.code, 0);
   assert.equal(json.stderr, '');
@@ -581,15 +530,14 @@ test('P4b review 4: padded BEGIN lines, JSON-escaped AWS secrets, and escapes th
     const text = `{"aws_secret_access_key":"${written}"}`;
     assert.equal(redactText(text), '{"aws_secret_access_key":"[REDACTED aws-secret-access-key]"}', slash);
   }
-  assert.equal(redactText(`{"Authorization":"Bearer abcdefgh123${backslash}nnext"}`), `{"Authorization":"Bearer [REDACTED bearer-token]${backslash}nnext"}`);
-  assert.equal(redactText(`api_key=Zt4Wq8Lm2Np6${backslash},other=1`), 'api_key=[REDACTED assigned-secret],other=1');
 });
 
 test('P4b review 4: a rejected outer value of the same rule keeps the real one inside it', () => {
   const text = `aws_secret_access_key="x aws_secret_access_key=${fake['aws-secret']}"`;
   assert.equal(redactText(text), 'aws_secret_access_key="x aws_secret_access_key=[REDACTED aws-secret-access-key]"');
-  const names = `token=${'token='.repeat(40000)}Zt4Wq8Lm2Np6`;
-  assert.deepEqual(findSecrets(names).map(({ start, end }) => [start, end]), [[6, names.length]]);
+  const names = `token=${'token='.repeat(40000)}${fake['github-token']}`;
+  // Narrowed scope: the names are not a finding; the key format at the end is, exactly.
+  assert.deepEqual(findSecrets(names).map(({ start, end }) => [start, end]), [[names.length - fake['github-token'].length, names.length]]);
 });
 
 test('P4b review 4: long runs of spaces inside a key block stay fast', () => {
@@ -603,30 +551,6 @@ test('P4b review 4: long runs of spaces inside a key block stay fast', () => {
 
 // Review round 5 regressions.
 
-test('P4b review 5: a quoted curl header is read as a string, in both quote styles', () => {
-  const backslash = String.fromCodePoint(92);
-  const value = `abc${backslash}/def12345xyz`;
-  for (const quote of ['"', String.fromCodePoint(39)]) {
-    const text = `curl -H ${quote}Authorization: Bearer ${value}${quote} https://example.test`;
-    const [finding, extra] = findSecrets(text);
-    assert.equal(extra, undefined, quote);
-    assert.equal(finding.kind, 'bearer-token');
-    assert.equal(text.slice(finding.start, finding.end), value, quote);
-    assert.equal(redactText(text), `curl -H ${quote}Authorization: Bearer [REDACTED bearer-token]${quote} https://example.test`);
-  }
-});
-
-test('P4b review 5: a bare value is checked as written, not decoded', () => {
-  const backslash = String.fromCodePoint(92);
-  // Eight characters as written; decoding the backslash would leave seven.
-  const value = `ab${backslash}c1234`;
-  assert.equal(value.length, 8);
-  const text = `password=${value} ok`;
-  const [finding] = findSecrets(text);
-  assert.equal(text.slice(finding.start, finding.end), value);
-  assert.equal(redactText(text), 'password=[REDACTED assigned-secret] ok');
-});
-
 test('P4b review 5: padding after a BEGIN marker is kept when prose follows on its line', () => {
   const text = `-----BEGIN ${pemType}-----   and some prose\nnext line`;
   assert.equal(redactText(text), '[REDACTED private-key]   and some prose\nnext line');
@@ -635,21 +559,6 @@ test('P4b review 5: padding after a BEGIN marker is kept when prose follows on i
 });
 
 // Review round 6 regressions.
-
-test('P4b review 6: a quoted field name does not make a bare value a string', () => {
-  const backslash = String.fromCodePoint(92);
-  const escapedComma = `${backslash}u002c`;
-  const first = `"password": abcd1234${escapedComma}TAIL987`;
-  assert.equal(redactText(first), '"password": [REDACTED assigned-secret]');
-  const value = `ab${backslash}c1234`;
-  const second = `"password": ${value} ok`;
-  const [finding] = findSecrets(second);
-  assert.equal(second.slice(finding.start, finding.end), value);
-  assert.equal(redactText(second), '"password": [REDACTED assigned-secret] ok');
-  // A quoted header still reads its value as a string.
-  const header = `"Authorization: Bearer abc${backslash}/def12345xyz"`;
-  assert.equal(redactText(header), '"Authorization: Bearer [REDACTED bearer-token]"');
-});
 
 test('P4b review 6: padding after a BEGIN marker at the end of the text is kept', () => {
   for (const padding of ['  ', '\t']) {
@@ -662,12 +571,6 @@ test('P4b review 6: padding after a BEGIN marker at the end of the text is kept'
 
 // Review round 7 regressions: missing a secret is worse than redacting a function name.
 
-test('P4b review 7: values followed by a parenthesis, and tokens with a tail, are redacted', () => {
-  assert.equal(redactText('Authorization: Bearer abc12345678(note)'), 'Authorization: Bearer [REDACTED bearer-token](note)');
-  assert.equal(redactText('password=abc12345678(note)'), 'password=[REDACTED assigned-secret](note)');
-  assert.equal(redactText(`password=${fake['github-token']}.tail987(note)`), 'password=[REDACTED github-token](note)');
-});
-
 test('P4b review 7: an escaped AWS key inside a quoted assignment is redacted whole', () => {
   const backslash = String.fromCodePoint(92);
   const secret = `${body('wJal', 9)}abc/`;
@@ -678,8 +581,36 @@ test('P4b review 7: an escaped AWS key inside a quoted assignment is redacted wh
   }
 });
 
-test('P4b review 7: quoted passwords that look like names or special tokens are still flagged', () => {
-  assert.deepEqual(kinds('password="river_stone_orchid"'), ['assigned-secret']);
-  assert.deepEqual(kinds('password="<|R7x9_secret|>"'), ['assigned-secret']);
-  assert.deepEqual(kinds('api_key: some_function_name_here'), ['assigned-secret'], 'code under a secret-like name is over-redacted, by design');
+test('P4b narrowed: free-text guesses are out of scope, while key formats inside them are still found', () => {
+  // The user narrowed P4b to well-defined key formats on 2026-11-18. A bearer header's value
+  // or a value after a name such as password= is not flagged unless it is itself a key format.
+  for (const text of [
+    'Authorization: Bearer abcdefgh12345',
+    '{"Authorization":"Bearer abcdefgh12345"}',
+    'DB_PASSWORD="synthetic-pw-9x"',
+    'client_secret: Zt4Wq8Lm2Np6Rv0X',
+    'password=abc12345678(note)',
+  ]) assert.deepEqual(kinds(text), [], text);
+  assert.equal(redactText(`Authorization: Bearer ${fake['github-token']}`), 'Authorization: Bearer [REDACTED github-token]');
+  assert.equal(redactText(`password=${fake['stripe-key']}`), 'password=[REDACTED stripe-key]');
+  assert.equal(redactText(`aws_secret_access_key = ${fake['aws-secret']}`), 'aws_secret_access_key = [REDACTED aws-secret-access-key]');
+});
+
+test('P4b narrowed: a password on its own is not a finding (the report says it is not checked)', () => {
+  // The CLI tests above check the report's scope line word for word.
+  assert.deepEqual(kinds('DB_PASSWORD="synthetic-pw-9x"'), []);
+});
+
+test('P4b narrowed: a prefix is hidden when the labelled match covers only part of the span', () => {
+  // An AWS access key ID inside an AWS secret access key: the ID is the more specific kind,
+  // but it covers only the end of the merged span, so its AKIA prefix must not be shown.
+  const secret = `${body('wJal', 4)}abc/${fake['aws-access-key-id']}`;
+  assert.equal(secret.length, 40);
+  const text = `aws_secret_access_key = ${secret}`;
+  const [finding, extra] = findSecrets(text);
+  assert.equal(extra, undefined);
+  assert.equal(finding.kind, 'aws-access-key-id');
+  assert.equal(text.slice(finding.start, finding.end), secret);
+  assert.equal(maskedPreview(text, finding), '…');
+  assert.equal(redactText(text), 'aws_secret_access_key = [REDACTED aws-access-key-id]');
 });

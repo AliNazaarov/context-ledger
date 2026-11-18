@@ -11,12 +11,9 @@
 // - Each pattern resumes after the whole value it found, so long runs are scanned once.
 // - Overlapping candidates merge into one span, labelled with the most specific kind.
 
-const nameKeywords = 'password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key|access[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token';
-
 // Keys have letters and digits; a long hyphenated word that starts with sk- does not.
 const mixed = value => /[A-Za-z]/u.test(value) && /[0-9]/u.test(value);
 const base64url = /[A-Za-z0-9_-]/u;
-const unquoted = /[^\s"'`,;<>(){}[\]]/u;
 
 /** The end of a run of characters matching cls, starting at from. */
 function runEnd(text, from, cls) {
@@ -110,40 +107,10 @@ const simpleRules = [
  */
 const valueRules = [
   { kind: 'aws-secret-access-key', lead: /\baws_secret_access_key\b["']?\s{0,8}[:=]\s{0,8}/giu, cls: /[A-Za-z0-9/+=]/u, accept: value => /^[A-Za-z0-9/+=]{40}$/u.test(value) },
-  // Bearer values of eight characters or more, as a bare header or inside JSON or a
-  // quoted string; shorter ones are too likely to be examples.
-  { kind: 'bearer-token', lead: /\bAuthorization["']?\s{0,8}:\s{0,8}["']?\s{0,8}Bearer\s{1,8}/giu, cls: /[A-Za-z0-9._~+/=-]/u, accept: value => value.length >= 8 },
-  {
-    kind: 'assigned-secret',
-    lead: new RegExp(`\\b(?:[A-Za-z0-9]{1,32}[_.-])?(?:${nameKeywords})\\b["']?\\s{0,8}[:=]\\s{0,8}`, 'giu'),
-    accept: value => !isPlaceholder(value) && looksSecret(value),
-  },
+  // Card P4b, narrowed on 2026-11-18 at the user's choice: free-text guesses (a bearer
+  // header's value, or any value after a name such as password=) are out of scope here.
+  // Seven review rounds showed each fix to them opening a new gap; they move to card P4c.
 ];
-
-/** Values people write instead of a real secret, judged by their shape. */
-function isPlaceholder(value) {
-  return /^(?:x+|\*+|\.+|#+|-+|0+)$/iu.test(value)
-    || /^(?:changeme|change[_-]?me|password|passw0rd|secret|token|redacted|placeholder|example|sample|dummy|test|null|none|nil|undefined|true|false|required|optional|string|value)$/iu.test(value)
-    || /^\$[{(]?[A-Za-z_][A-Za-z0-9_]*[})]?$/u.test(value)
-    || /^%[A-Za-z_][A-Za-z0-9_]*%$/u.test(value)
-    // A complete reference to an environment variable, not a value.
-    || /^(?:process\.env|import\.meta\.env|os\.environ)(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/u.test(value)
-    || /^\[REDACTED [a-z-]{1,32}\]$/u.test(value)
-    // Identifiers that are not secrets: a UUID, and a 40-character git commit hash.
-    || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)
-    || /^[0-9a-f]{40}$/iu.test(value);
-}
-
-/**
- * A value that looks secret: at least eight characters, not all digits, not a short word,
- * and not a dotted or camel-case code name such as config.apiKey.
- */
-function looksSecret(value) {
-  if (value.length < 8) return false;
-  if (/^[0-9]+$/u.test(value)) return false;
-  if (/^[A-Za-z]+$/u.test(value)) return value.length >= 24;
-  if (/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/u.test(value) && !/[0-9]/u.test(value)) return false;  return mixed(value) || /[^A-Za-z0-9]/u.test(value) || value.length >= 24;
-}
 
 /** JSON Web Tokens: two base64url segments that start eyJ and a signature that may be empty. */
 function jwts(text) {
@@ -243,16 +210,13 @@ function candidates(text) {
         end = quotedEnd(text, start, quote);
         inString = true;
       } else {
-        const cls = rule.cls ?? unquoted;
-        // Escapes count only inside a string: a bearer value after a quoted header such as
-        // "Authorization": "Bearer …", or inside a quoted whole header such as curl's
-        // -H "Authorization: Bearer …". A bare value ends at its first character outside cls.
-        // The value is inside a string when a quote opens the whole assignment or header,
-        // as in "aws_secret_access_key=…" or curl's -H "Authorization: Bearer …", or when a
-        // quote follows the colon of a bearer header. A quote that only wraps the field
-        // name, as in "password": …, leaves the value bare.
+        const cls = rule.cls;
+        // Escapes count only inside a string. A bare value ends at its first character
+        // outside cls. The value is inside a string when a quote opens the whole assignment,
+        // as in "aws_secret_access_key=…"; a quote that only wraps the field name, as in
+        // "aws_secret_access_key": …, leaves the value bare.
         const opensWhole = /["'`]/u.test(text[match.index - 1] ?? '') && !/^[^:=]*["'`]\s{0,8}[:=]/u.test(match[0]);
-        inString = opensWhole || /["']\s{0,8}Bearer\s{1,8}$/iu.test(match[0]);
+        inString = opensWhole;
         // Reuse the end of the run this start lies in, so nested names in one long run do
         // not each scan its rest again.
         if (cached && cached.cls === cls && cached.inString === inString && start >= cached.from && start < cached.end) end = cached.end;

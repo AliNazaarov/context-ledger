@@ -1512,3 +1512,19 @@ All fixtures are synthetic. The fake credentials are put together at test time f
   - (high) Limiting the quoted-header check to bearer values dropped escaped AWS keys inside a quoted assignment. The check is general again, and precise: a value is inside a string when a quote opens the whole assignment or header, not when it only wraps the field name.
   - (medium) The snake_case and special-token exclusions hid quoted passwords. Both are removed. Missing a secret is worse than redacting a function name, so code under a secret-like name is over-redacted by design.
 - **Not reviewed again:** the fixes after round 7. Each round found new edge cases: this is a heuristic scanner over free text, not a guarantee. The PR asks for a human security review before merge (AGENTS.md section 4.4), and the report tells people that values are not shown, not that every secret was found.
+
+### P4b narrowed to key formats (2026-11-18)
+
+Seven Codex rounds kept finding new gaps in the free-text rules, each fix opening another. On 2026-11-18 the user chose to narrow P4b to well-defined key formats.
+
+- **Kept:** provider key formats (Anthropic, OpenAI, GitHub, AWS access key IDs, Slack, Stripe), JWTs, PEM private-key blocks, and the AWS secret access key, which has a fixed 40-character shape under its own name.
+- **Removed:** the `bearer-token` rule (the value of an `Authorization: Bearer` header) and the `assigned-secret` rule (any value after a name such as `password`, `api_key` or `token`), with their helpers. A key format inside such a value is still found: `Authorization: Bearer <a GitHub token>` is redacted as `github-token`.
+- **What this means for users:** a password or a bearer value that is not in a known key format is no longer flagged. The redaction report says what it looks for, and free-text detection is card P4c.
+- **Tests:** tests that covered only the removed rules were dropped, and table rows and assertions about them were removed. The CLI test now expects two findings. A new test pins the scope: free-text values are not flagged, and key formats inside them still are. `tests/secrets.test.mjs` passes 31/31.
+- The spec bullets above that describe bearer and assigned values, and review rounds 1 to 7, describe the scanner before it was narrowed.
+- **Codex review of the narrowed scanner:** no high findings. One medium and three low, fixed:
+  - (medium) "No secrets found" could be read as a clean transcript. The report now says "No known key formats found" and always adds a line saying passwords and other free-text values are not checked.
+  - (low) Two branches served only the removed rules (the `unquoted` fallback and the bearer quote check). They are removed.
+  - (low) The test that a prefix is hidden when the labelled match covers only part of a span was lost with the bearer cases. It is restored with an AWS access key ID inside an AWS secret access key.
+  - (low) The older handoff checkpoint still listed bearer and password detection. It is marked superseded.
+  - The realistic-looking password literal in the tests is replaced with an obviously synthetic one.

@@ -247,8 +247,14 @@ Next steps:
 
 ## Current checkpoint — P4b secret scanner and redaction diff (2026-11-17)
 
+*Superseded on 2026-11-18: P4b was narrowed to key formats; see the next checkpoint. The bearer and password rules described here were removed.*
+
 Branch `ruslan/p4b-secret-scanner`. `src/secrets.mjs` finds text that looks like a credential: cloud, GitHub, model-provider, Slack and Stripe keys, JWTs, private keys, bearer tokens, and secret-looking values under names such as `password` or `api_key`. It redacts each one as `[REDACTED <kind>]`.
 
 `npm run ledger -- redact <session-id> [--json | --text]` reports line, kind, length and a known public prefix, never a value; `--text` prints the redacted hand-off. `ledger handoff`, the store, the browser and MCP are unchanged.
 
 Next owner: P4a can call `redactSession` before signing an export. The scanner is a heuristic. Codex ran four rounds and every finding is fixed, but round 4's fixes are not reviewed again, and a human security review is still owed.
+
+## Current checkpoint — P4b narrowed to key formats (2026-11-18)
+
+PR #47 now detects only well-defined key formats (provider keys, JWTs, PEM private keys, AWS secret access keys). The free-text `bearer-token` and `assigned-secret` rules were removed at the user's choice after seven Codex rounds kept finding gaps; that work is card P4c. A human security review is still required before merge.
