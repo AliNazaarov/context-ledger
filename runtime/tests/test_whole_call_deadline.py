@@ -74,6 +74,22 @@ class TrickleServer:
                 body += chunk
             headers = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
                        b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(REPLY))
+            if self.mode == "error503":
+                # The status line and headers at once, then the error body trickled.
+                text = b'{"error": "model is loading, please wait a little longer"}'
+                conn.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n"
+                             b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(text))
+                for index in range(len(text)):
+                    if self.closing:
+                        return
+                    conn.sendall(text[index:index + 1])
+                    time.sleep(self.gap)
+                return
+            if self.mode == "truncated400":
+                # Says 100 bytes, sends 10, and hangs up.
+                conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n"
+                             b"Content-Length: 100\r\nConnection: close\r\n\r\n0123456789")
+                return
             if self.mode == "whole":
                 conn.sendall(headers + REPLY)
                 return
@@ -146,6 +162,100 @@ class TrickledReplyTest(unittest.TestCase):
             server.close()
         self.assertEqual(result.content, "ok")
         self.assertEqual(len(run.calls), 1)
+
+
+class _SilentTimer:
+    """A watch timer that never fires, as if its thread had not been scheduled yet."""
+
+    def __init__(self, *args, **kwargs):
+        self.daemon = True
+
+    def start(self):
+        pass
+
+    def cancel(self):
+        pass
+
+
+class ReviewRoundOneTest(unittest.TestCase):
+    """Codex review of 5686880."""
+
+    def test_a_late_reply_is_refused_even_if_the_timer_has_not_run(self):
+        server = TrickleServer("body", gap=0.02)  # about 1.4 s for the whole body
+        try:
+            client = VllmClient(server.url, "m", timeout=30)
+            with mock.patch("latent_pool.vllm_client.threading.Timer", _SilentTimer):
+                with self.assertRaises(ModelTimeout):
+                    client.chat("system", "user", 16, timeout=0.3)
+        finally:
+            server.close()
+
+    def test_a_slow_503_body_after_the_deadline_is_504(self):
+        server = TrickleServer("error503")
+        try:
+            run = run_with(VllmClient(server.url, "m", timeout=30), 1)
+            started = time.monotonic()
+            with self.assertRaises(ApiError) as caught:
+                run.call("reader", "user", 16)
+            elapsed = time.monotonic() - started
+        finally:
+            server.close()
+        self.assertEqual((caught.exception.status, caught.exception.message), (504, DEADLINE))
+        self.assertLess(elapsed, 2)
+
+    def test_a_truncated_error_body_is_still_mapped(self):
+        server = TrickleServer("truncated400")
+        try:
+            run = run_with(VllmClient(server.url, "m", timeout=30), 5)
+            with self.assertRaises(ApiError) as caught:
+                run.call("reader", "user", 16)
+        finally:
+            server.close()
+        self.assertEqual((caught.exception.status, caught.exception.message),
+                         (502, "Model server returned HTTP 400."))
+
+    def test_a_stalled_name_lookup_stops_at_the_deadline(self):
+        real = socket.getaddrinfo
+
+        def stalled(host, *args, **kwargs):
+            if host == "model.invalid":
+                time.sleep(3)
+            return real(host, *args, **kwargs)
+
+        client = VllmClient("http://model.invalid:8000/v1", "m", timeout=30)
+        started = time.monotonic()
+        with mock.patch("latent_pool.vllm_client.socket.getaddrinfo", stalled):
+            with self.assertRaises(ModelTimeout):
+                client.chat("system", "user", 16, timeout=0.5)
+        self.assertLess(time.monotonic() - started, 1.5)
+
+    def test_a_stalled_tls_handshake_stops_at_the_deadline(self):
+        listener = socket.create_server(("127.0.0.1", 0))
+        held = []
+        stop = threading.Event()
+
+        def accept_and_say_nothing():
+            listener.settimeout(0.2)
+            while not stop.is_set():
+                try:
+                    held.append(listener.accept()[0])
+                except OSError:
+                    continue
+
+        thread = threading.Thread(target=accept_and_say_nothing, daemon=True)
+        thread.start()
+        try:
+            client = VllmClient(f"https://127.0.0.1:{listener.getsockname()[1]}/v1", "m", timeout=30)
+            started = time.monotonic()
+            with self.assertRaises(ModelTimeout):
+                client.chat("system", "user", 16, timeout=0.5)
+            self.assertLess(time.monotonic() - started, 1.5)
+        finally:
+            stop.set()
+            thread.join(5)
+            for conn in held:
+                conn.close()
+            listener.close()
 
 
 class ConnectTimeoutTest(unittest.TestCase):

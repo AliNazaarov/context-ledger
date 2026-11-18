@@ -992,6 +992,22 @@ From the H7 Codex review. `VllmClient._chat` passes the call's budget (the clien
 | Nothing else changes | Normal replies, HTTP errors (400, 413 hints, 500, 503), the folded retry and its budget, and the H7 tests behave as before. The pool releases the slot when the call ends. |
 | Suites | The four suites pass; the runtime suite passes on Windows and in WSL. |
 
+**Results — H8 (2026-11-18):**
+
+- **How it works:** each model call has one absolute deadline, set when `chat` starts and shared by the folded retry. A timer shuts the call's socket down at the deadline, which wakes a blocked connect, TLS handshake or receive. The socket is handed over before it connects, through a connection factory that also bounds the name lookup and gives each address only the time left. Every step also checks the clock itself, so a reply that completes late is never used, even if the timer has not run yet.
+- **Rows 1–5:** pass. `runtime/tests/test_whole_call_deadline.py` uses a loopback server that trickles its reply a byte at a time. Against `main`'s client the four trickle tests and the three connect-mapping tests fail; only the prompt-reply test passes.
+- **Nothing else changes:** the existing runtime tests pass. Three tests changed on purpose:
+  - The H7 tests in `test_deadline_clock.py` patch the new `_open` seam instead of `urlopen`.
+  - The H7 refusal test now moves its fake clock when the refusal arrives, not after a fixed number of clock reads.
+  - The retry-budget test in `test_server.py` is re-timed: a 0.1 s refusal, then a 0.4 s reply, in a 0.45 s budget. Its old 0.3 s refusal left only 0.15 s of margin once the budget covered the whole call, and it failed once under full-suite load. It now also checks that the retry ran, folded, with less time than the first attempt, and that it ended in `ModelTimeout`.
+- **Not covered:** an opener installed with `install_opener()` is not used; the runtime installs none. A name lookup still running at the deadline is abandoned on its helper thread, not cancelled.
+- **Codex, round 1** (of 5686880): one high, two medium and two low findings, fixed with tests. Three of the five new tests fail against 5686880; the truncated-body and TLS tests are added coverage.
+  - (high) DNS, each TCP address, a proxy's CONNECT reply and the TLS handshake ran before the socket reached the timer. The socket is now created by a factory that bounds the lookup on a helper thread, gives each address only what is left, and hands the socket over before it connects. Tests: a lookup that stalls for 3 s ends at a 0.5 s budget, and so does a TLS handshake against a server that never answers.
+  - (medium) Expiry during an HTTP error body was not checked, so a deadline-capped 503 stayed 503, and a truncated error body could raise from inside the handler. The error is now closed, body-read failures are caught, and the deadline is checked after the body. Tests: a slow 503 body returns 504; a truncated 400 body returns 502 "Model server returned HTTP 400.".
+  - (medium) A late reply could be used when the timer thread had not run yet. The deadline is now checked before opening, after the body and after parsing. Test: with the timer disabled, a reply that finishes after the budget raises `ModelTimeout`.
+  - (low) A TLS context was built even for plain http. It is now built only for https, once, and reused. Proxies still come from the environment, as with `urlopen`.
+  - (low) The re-timed retry test could pass without a retry. It now checks the second attempt directly (see above).
+
 ## Cycle 11 — Latent runtime performance baseline (defined 2026-11-12, before measuring)
 
 Card C11. Until now the latent runtime had accuracy evals but no performance figures. This cycle measures it on the RTX 4090 Laptop GPU (16 GB), vLLM 0.33.0 in WSL2, with the synthetic fixtures only.

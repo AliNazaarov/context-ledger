@@ -37,32 +37,41 @@ class ChatResult:
 
 
 class _Watch:
-    """Card H8: ends one model call when its whole budget runs out.
+    """Card H8: keeps one model call inside its whole budget.
 
     A socket timeout limits each connect, send and receive on its own, so a model
-    server that trickles its reply could keep a call going past its budget. This
-    timer shuts the call's socket down when the budget ends, which wakes a blocked
-    receive at once, and marks the call expired so a reply that completes late is
-    never used.
+    server that trickles its reply could keep a call going past its budget. The
+    watch holds the call's absolute deadline (on time.perf_counter()). A timer shuts
+    the call's socket down when the deadline comes, which wakes a blocked connect,
+    TLS handshake or receive at once, and every step checks the clock itself, so a
+    reply that completes late is never used even if the timer has not run yet.
     """
 
-    def __init__(self, seconds):
-        self.expired = False
+    def __init__(self, deadline):
+        self.deadline = deadline
+        self._fired = False
         self._sock = None
         self._lock = threading.Lock()
-        self._timer = threading.Timer(max(seconds, 0), self._expire)
+        self._timer = threading.Timer(max(self.left(), 0), self._expire)
         self._timer.daemon = True
         self._timer.start()
+
+    def left(self):
+        return self.deadline - time.perf_counter()
+
+    @property
+    def expired(self):
+        return self._fired or self.left() <= 0
 
     def attach(self, sock):
         with self._lock:
             self._sock = sock
-            if self.expired:
+            if self._fired:
                 self._shut()
 
     def _expire(self):
         with self._lock:
-            self.expired = True
+            self._fired = True
             self._shut()
 
     def _shut(self):
@@ -76,13 +85,65 @@ class _Watch:
         self._timer.cancel()
 
 
+def _resolve(host, port, watch):
+    """getaddrinfo has no timeout, so it runs on a helper thread that the call waits
+    on only until its deadline. A lookup still running then finishes on its own."""
+    done = threading.Event()
+    outcome = {}
+
+    def lookup():
+        try:
+            outcome["addresses"] = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+        except OSError as error:
+            outcome["error"] = error
+        done.set()
+
+    threading.Thread(target=lookup, daemon=True).start()
+    if not done.wait(max(watch.left(), 0)):
+        raise socket.timeout("name lookup ran out of time")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["addresses"]
+
+
+def _connector(watch):
+    """socket.create_connection kept to the call's deadline: the lookup is bounded,
+    each address gets only what is left, and the socket is handed to the watch before
+    it connects, so the connect, a proxy's CONNECT reply and the TLS handshake can all
+    be cut off at the deadline."""
+
+    def create_connection(address, timeout=None, source_address=None, **kwargs):
+        host, port = address
+        last = None
+        for family, kind, proto, _, sockaddr in _resolve(host, port, watch):
+            left = watch.left()
+            if left <= 0:
+                raise socket.timeout("connect ran out of time")
+            sock = socket.socket(family, kind, proto)
+            try:
+                sock.settimeout(left if timeout is None else min(timeout, left))
+                if source_address:
+                    sock.bind(source_address)
+                watch.attach(sock)
+                sock.connect(sockaddr)
+                return sock
+            except OSError as error:
+                sock.close()
+                last = error
+                if watch.expired:
+                    raise socket.timeout("connect ran out of time") from None
+        raise last if last is not None else OSError("no address to connect to")
+
+    return create_connection
+
+
 def _watched(connection_class, watch):
-    """A connection class that hands its socket to watch as soon as it connects."""
+    """A connection class whose socket is made by _connector."""
 
     class Watched(connection_class):
-        def connect(self):
-            super().connect()
-            watch.attach(self.sock)
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._create_connection = _connector(watch)
 
     return Watched
 
@@ -96,9 +157,21 @@ class _WatchedHTTPHandler(urllib.request.HTTPHandler):
         return self.do_open(_watched(http.client.HTTPConnection, self.watch), req)
 
 
+_tls = None
+
+
+def _tls_context():
+    """One verifying TLS context, made the first time a call uses https."""
+    global _tls
+    if _tls is None:
+        import ssl
+        _tls = ssl.create_default_context()
+    return _tls
+
+
 class _WatchedHTTPSHandler(urllib.request.HTTPSHandler):
     def __init__(self, watch):
-        super().__init__()
+        super().__init__(context=_tls_context())
         self.watch = watch
 
     def https_open(self, req):
@@ -107,9 +180,15 @@ class _WatchedHTTPSHandler(urllib.request.HTTPSHandler):
 
 
 def _open(request, timeout, watch):
-    """urlopen, with the call's socket handed to watch (the seam tests patch)."""
-    opener = urllib.request.build_opener(_WatchedHTTPHandler(watch), _WatchedHTTPSHandler(watch))
-    return opener.open(request, timeout=timeout)
+    """urlopen, with every socket of the call kept to watch (the seam tests patch).
+
+    Plain http gets no TLS context. Proxies come from the environment as with
+    urlopen; an opener installed with install_opener() is not used.
+    """
+    handlers = [_WatchedHTTPHandler(watch)]
+    if request.type == "https":
+        handlers.append(_WatchedHTTPSHandler(watch))
+    return urllib.request.build_opener(*handlers).open(request, timeout=timeout)
 
 
 def _is_timeout(error):
@@ -150,23 +229,24 @@ class VllmClient:
         """
         budget = self.timeout if timeout is None else min(self.timeout, timeout)
         started = time.perf_counter()
+        # One absolute deadline for the call, both attempts included (card H8).
+        deadline = started + budget
         try:
-            return self._chat(system, user, max_tokens, schema, schema_name, budget)
+            return self._chat(system, user, max_tokens, schema, schema_name, deadline)
         except _SystemRoleRefused:
             self.fold_system = True
         # The retry gets only what is left of this call's budget, and the receipt's ms
         # covers both attempts, so a slow refusal cannot hold a slot past the deadline.
-        left = budget - (time.perf_counter() - started)
-        if left <= 0:
+        if deadline - time.perf_counter() <= 0:
             raise ModelTimeout()
         try:
-            result = self._chat(system, user, max_tokens, schema, schema_name, left)
+            result = self._chat(system, user, max_tokens, schema, schema_name, deadline)
         except _SystemRoleRefused:
             raise ApiError(502, "Model server returned HTTP 400.") from None
         result.ms = round((time.perf_counter() - started) * 1000)
         return result
 
-    def _chat(self, system, user, max_tokens, schema, schema_name, timeout):
+    def _chat(self, system, user, max_tokens, schema, schema_name, deadline):
         folded = self.fold_system
         body = {
             "model": self.model,
@@ -187,22 +267,27 @@ class VllmClient:
             headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
         started = time.perf_counter()
-        budget = self.timeout if timeout is None else min(self.timeout, timeout)
         # The socket timeout still bounds each operation; the watch bounds the call.
-        watch = _Watch(budget)
+        watch = _Watch(deadline)
         try:
-            with _open(request, timeout=budget, watch=watch) as response:
+            if watch.expired:
+                raise ModelTimeout()
+            with _open(request, timeout=watch.left(), watch=watch) as response:
                 raw = response.read()
             if watch.expired:
                 raise ModelTimeout()
         except urllib.error.HTTPError as error:
-            if watch.expired:
-                raise ModelTimeout() from None
             detail = ""
             try:
                 detail = error.read(4096).decode("utf-8", "replace").lower()
-            except OSError:
+            except (OSError, http.client.HTTPException):
                 pass
+            finally:
+                error.close()
+            # Checked after the body: an error that finishes late is a timeout, so a
+            # deadline-capped 503 or 400 is never reported as the model's answer.
+            if watch.expired:
+                raise ModelTimeout() from None
             if error.code == 503:
                 raise ApiError(503, NOT_READY) from None
             if error.code == 400 and any(hint in detail for hint in _CONTEXT_HINTS):
@@ -240,6 +325,8 @@ class VllmClient:
         usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
         details = usage.get("prompt_tokens_details")
         cached = _int(details.get("cached_tokens")) if isinstance(details, dict) else 0
+        if time.perf_counter() >= deadline:
+            raise ModelTimeout()  # read and parsed, but after the deadline: never used
         return ChatResult(
             content=content,
             finish_reason=choice.get("finish_reason") if isinstance(choice, dict) else None,
