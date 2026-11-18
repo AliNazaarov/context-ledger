@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { graphContext } from './context.mjs';
 import { InputError } from './errors.mjs';
 import { canonicalPacket, validateGraph } from './graph.mjs';
-import { defaultProject, migrate } from './migrate.mjs';
+import { defaultProject, migrate, refuseNewerSchema } from './migrate.mjs';
 import { mountRooms, roomsSchema } from './rooms.mjs';
 
 export { InputError };
@@ -216,6 +216,15 @@ export function openStore(path) {
       AND ($before IS NULL OR g.rowid < $before)
     ORDER BY g.rowid DESC LIMIT $n
   `);
+  // A current file opens without the lock, so a newer build may have upgraded it while
+  // the statements above were prepared. Refuse it now rather than hand out the store.
+  // (An upgrade after this point, while the store is open, is not detected.)
+  try {
+    refuseNewerSchema(database);
+  } catch (error) {
+    database.close();
+    throw error;
+  }
 
   return {
     /**

@@ -413,10 +413,13 @@ test('a file that a newer build upgrades while this one opens it gets no DDL', a
     { version: 1, make: async () => (await oldLedger(directory, 1)).path, stderr: /written by a newer Context Ledger \(schema 3\)/u },
     // A current file needs no lock and gets no DDL; the child then fails on the missing table.
     { version: 2, make: async () => { const path = join(directory, 'current.sqlite'); openStore(path).close(); return path; }, stderr: /room_choices/u },
+    // Review round 4: an upgrade that keeps every table is refused by the check before openStore returns.
+    { version: 2, keepTables: true, make: async () => { const path = join(directory, 'compatible.sqlite'); openStore(path).close(); return path; },
+      stderr: /written by a newer Context Ledger \(schema 3\)/u },
   ];
-  for (const { version, make, stderr: expected } of cases) {
+  for (const [index, { version, keepTables = false, make, stderr: expected }] of cases.entries()) {
     const path = await make();
-    const release = join(directory, `release-${version}`);
+    const release = join(directory, `release-${index}`);
     const child = spawn(process.execPath, ['--input-type=module', '-e', script],
       { env: { ...process.env, LEDGER_FILE: path, RELEASE: release }, stdio: ['ignore', 'pipe', 'pipe'] });
     keep(() => child.exitCode === null && child.kill());
@@ -433,12 +436,13 @@ test('a file that a newer build upgrades while this one opens it gets no DDL', a
     ]);
     assert.equal(stdout, `read ${version}\n`);
     const holder = new DatabaseSync(path);
-    holder.exec('BEGIN IMMEDIATE; DROP TABLE room_choices; PRAGMA user_version = 3; COMMIT;');
+    holder.exec(`BEGIN IMMEDIATE; ${keepTables ? '' : 'DROP TABLE room_choices;'} PRAGMA user_version = 3; COMMIT;`);
     await writeFile(release, '');
     const [code] = await exit;
-    assert.equal(code, 1, `version ${version}: ${stderr}`);
-    assert.match(stderr, expected, `version ${version}`);
-    assert.deepEqual(rows(holder, "SELECT name FROM sqlite_master WHERE name = 'room_choices'"), [], `version ${version}`);
+    assert.equal(code, 1, `case ${index}: ${stderr}`);
+    assert.match(stderr, expected, `case ${index}`);
+    assert.deepEqual(rows(holder, "SELECT name FROM sqlite_master WHERE name = 'room_choices'"), keepTables ? [{ name: 'room_choices' }] : [],
+      `case ${index}`);
     assert.equal(userVersion(holder), 3);
     holder.close();
   }

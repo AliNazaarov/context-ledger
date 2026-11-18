@@ -20,6 +20,11 @@ const refuseNewer = version => {
   }
 };
 
+/** Throws when the file now has a newer schema than this build; writes nothing. */
+export function refuseNewerSchema(database) {
+  refuseNewer(userVersion(database));
+}
+
 /**
  * Version 1 adds created_at and party to graphs and created_at to rooms, with indexes
  * for listing. Version 2 adds projects and puts every session in one: existing
