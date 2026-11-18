@@ -7,7 +7,7 @@
 // on different ports and one database do not replace each other's token.
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { closeSync, constants, fstatSync, mkdirSync, openSync, readSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, constants, fstatSync, ftruncateSync, mkdirSync, openSync, readSync, rmSync, writeSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,6 +67,8 @@ const pathVariable = 'CONTEXT_LEDGER_PRIVATE_FILE';
 // handle, so no token is left in it).
 const createCollision = 3;
 const writeFailed = 4;
+// Exit code of the read script for a handle that is not a small regular file.
+const notATokenFile = 5;
 const powershellLines = lines => ["$ErrorActionPreference = 'Stop'", "$ProgressPreference = 'SilentlyContinue'", ...lines].join('\n');
 const writeScript = powershellLines([
   '$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User',
@@ -90,13 +92,19 @@ const writeScript = powershellLines([
   `  exit ${writeFailed}`,
   '} finally { $stream.Dispose() }',
 ]);
+// The reader shares the file for reading, writing and deletion, so a server that stops
+// during a read can still remove it. Type and size are checked on the same handle (.NET
+// already refuses handles that are not disk files). CONTEXT_LEDGER_TEST_READ_HOLD_MS is
+// a test hook: it only keeps the handle open longer after the read.
 const readScript = powershellLines([
   '$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
-  `$stream = [System.IO.File]::Open($env:${pathVariable}, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)`,
+  `$stream = [System.IO.File]::Open($env:${pathVariable}, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))`,
   'try {',
+  `  if (-not $stream.CanSeek -or $stream.Length -gt ${maxTokenFileBytes}) { exit ${notATokenFile} }`,
   "  $sddl = $stream.GetAccessControl().GetSecurityDescriptorSddlForm('Owner, Group, Access')",
   `  $buffer = New-Object byte[] ${maxTokenFileBytes + 1}`,
   '  $count = $stream.Read($buffer, 0, $buffer.Length)',
+  '  if ($env:CONTEXT_LEDGER_TEST_READ_HOLD_MS) { Start-Sleep -Milliseconds ([int]$env:CONTEXT_LEDGER_TEST_READ_HOLD_MS) }',
   '  [Console]::Out.Write($sid + "`n" + $sddl + "`n" + [System.Convert]::ToBase64String($buffer, 0, $count) + "`n")',
   '} finally { $stream.Dispose() }',
 ]);
@@ -134,8 +142,28 @@ function writePrivateFileSync(path, line) {
   }
   const found = described(output);
   if (!found || !privateToOwner(found.sddl, found.sid)) {
-    rmSync(path, { force: true });
+    emptyIfOwnRecord(path, line);
     throw new Error('The token file is not private.');
+  }
+}
+
+/**
+ * Empties the file at this path through its own descriptor, but only when it holds
+ * exactly this record (which only this start knows), so a file that replaced it is left
+ * alone. Nothing is removed by path. Errors are swallowed: this is cleanup.
+ */
+export function emptyIfOwnRecord(path, line) {
+  let descriptor;
+  try {
+    descriptor = openSync(path, constants.O_RDWR | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
+    if (!fstatSync(descriptor).isFile()) return;
+    const buffer = Buffer.alloc(maxTokenFileBytes + 1);
+    const bytesRead = readSync(descriptor, buffer, 0, buffer.length, 0);
+    if (buffer.subarray(0, bytesRead).toString('utf8') === line + '\n') ftruncateSync(descriptor, 0);
+  } catch {
+    // Gone, replaced or unreadable: nothing of ours to empty.
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 
@@ -165,16 +193,20 @@ export function writeTokenFile(path, token, port) {
   if (windows) {
     writePrivateFileSync(path, line);
     // The identity comes from a descriptor whose content is this start's record, which
-    // nobody else can know, so it is the file just written.
-    const descriptor = openSync(path, constants.O_RDONLY);
+    // nobody else can know, so it is the file just written. Every failure here is the
+    // same fixed sentence, so no file system message (which names the path) escapes.
+    let descriptor;
     try {
+      descriptor = openSync(path, constants.O_RDONLY);
       const buffer = Buffer.alloc(maxTokenFileBytes + 1);
       const bytesRead = readSync(descriptor, buffer, 0, buffer.length, 0);
-      if (buffer.subarray(0, bytesRead).toString('utf8') !== line + '\n') throw new Error('The token file changed.');
+      if (buffer.subarray(0, bytesRead).toString('utf8') !== line + '\n') throw new Error('changed');
       const { dev, ino } = fstatSync(descriptor, { bigint: true });
       return { dev, ino };
+    } catch {
+      throw new Error('The token file could not be written privately.');
     } finally {
-      closeSync(descriptor);
+      if (descriptor !== undefined) closeSync(descriptor);
     }
   }
   const descriptor = openSync(path, 'wx', 0o600);
@@ -228,23 +260,24 @@ export function removeTokenFile(path, isOwnToken) {
  * Reads a token file: { port, token }, or undefined when the file is missing, is not a
  * regular file (a FIFO cannot block the read), is malformed, or on POSIX is a link,
  * belongs to another user or can be read or written by group or others. On Windows the
- * owner, the ACL and the content come through one handle (see above): a file that
+ * type, size, owner, ACL and content come through one handle (see above): a file that
  * another account owns, or whose ACL allows anyone but the current user, gives
  * { exposed: true } and is not used; a file whose security cannot be read gives undefined.
  */
 export async function readTokenFile(path) {
   let file;
   try {
-    file = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
-    const info = await file.stat();
-    if (!info.isFile() || info.size > maxTokenFileBytes) return undefined;
-    if (typeof process.getuid === 'function' && (info.uid !== process.getuid() || (info.mode & 0o077) !== 0)) return undefined;
     let bytes;
     if (windows) {
+      // One open, in PowerShell: type, size, owner, ACL and content all come from it.
       const found = await readPrivateFile(path);
       if (!privateToOwner(found.sddl, found.sid)) return { exposed: true };
       bytes = found.bytes;
     } else {
+      file = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
+      const info = await file.stat();
+      if (!info.isFile() || info.size > maxTokenFileBytes) return undefined;
+      if (typeof process.getuid === 'function' && (info.uid !== process.getuid() || (info.mode & 0o077) !== 0)) return undefined;
       const buffer = Buffer.alloc(maxTokenFileBytes + 1);
       const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
       bytes = buffer.subarray(0, bytesRead);

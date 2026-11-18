@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
-import { codeLifetimeMs, createAuth, privateToOwner, readTokenFile, sessionLifetimeMs, tokenFileFor, tokenForUrl } from '../src/token.mjs';
+import { codeLifetimeMs, createAuth, emptyIfOwnRecord, privateToOwner, readTokenFile, sessionLifetimeMs, tokenFileFor, tokenForUrl } from '../src/token.mjs';
 import { restrictToOwner } from './ledger-auth.mjs';
 import { startMcp } from './mcp-client.mjs';
 
@@ -732,4 +732,57 @@ test('on Windows a token file others can read is refused in fixed words, and not
   if (!privateToOwner(security.sddl, security.sid)) assert.deepEqual(await readTokenFile(plain), { exposed: true });
   restrictToOwner(plain);
   assert.deepEqual(await readTokenFile(plain), { port: 4317, token: 'N'.repeat(43) });
+});
+
+test('cleanup empties a token file only through its own descriptor and only when it holds this record', async t => {
+  const place = await temporary(t);
+  const line = JSON.stringify({ port: 4317, token: 'C'.repeat(43) });
+  const own = anyPortFile(join(place.directory, 'own.sqlite'));
+  await writeTokenText(own, line + '\n');
+  emptyIfOwnRecord(own, line);
+  // Emptied in place, not removed by path: the entry is still there, with no token in it.
+  assert.equal((await stat(own)).size, 0);
+  // A file that replaced it (other content) is left exactly as it is.
+  const replaced = anyPortFile(join(place.directory, 'replaced.sqlite'));
+  await writeTokenText(replaced, tokenRecord(4317, 'D'.repeat(43)));
+  emptyIfOwnRecord(replaced, line);
+  assert.equal(await readFile(replaced, 'utf8'), tokenRecord(4317, 'D'.repeat(43)));
+  // A missing file is not an error.
+  assert.doesNotThrow(() => emptyIfOwnRecord(anyPortFile(join(place.directory, 'none.sqlite')), line));
+});
+
+test('on Windows a reader takes type and size from its own handle', { skip: process.platform !== 'win32' && 'POSIX checks the open descriptor (tested above).' }, async t => {
+  const place = await temporary(t);
+  const folder = anyPortFile(join(place.directory, 'folder.sqlite'));
+  await mkdir(folder);
+  assert.equal(await readTokenFile(folder), undefined);
+  // Private, a valid record at the start, but longer than a token file may be.
+  const long = anyPortFile(join(place.directory, 'long.sqlite'));
+  await writeTokenText(long, tokenRecord(4317, 'L'.repeat(43)).padEnd(300, ' '));
+  assert.equal(await readTokenFile(long), undefined);
+  const exact = anyPortFile(join(place.directory, 'exact.sqlite'));
+  await writeTokenText(exact, tokenRecord(4317, 'K'.repeat(43)).padEnd(256, ' '));
+  assert.deepEqual(await readTokenFile(exact), { port: 4317, token: 'K'.repeat(43) });
+});
+
+test('on Windows a token file can be removed while a client is reading it', { skip: process.platform !== 'win32' && 'Share modes are a Windows feature.' }, async t => {
+  const place = await temporary(t);
+  const file = anyPortFile(place.database);
+  await writeTokenText(file, tokenRecord(4317, 'H'.repeat(43)));
+  // The test hook keeps the reader's handle open for 6 s after its read; PowerShell
+  // starts in well under 3 s, so the removal below lands while the handle is open.
+  const previous = process.env.CONTEXT_LEDGER_TEST_READ_HOLD_MS;
+  process.env.CONTEXT_LEDGER_TEST_READ_HOLD_MS = '6000';
+  let reading;
+  try {
+    reading = readTokenFile(file);
+  } finally {
+    if (previous === undefined) delete process.env.CONTEXT_LEDGER_TEST_READ_HOLD_MS;
+    else process.env.CONTEXT_LEDGER_TEST_READ_HOLD_MS = previous;
+  }
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  // A clean stop removes the file this way; a reader without delete sharing makes it EBUSY.
+  await rm(file);
+  assert.deepEqual(await reading, { port: 4317, token: 'H'.repeat(43) });
+  await assert.rejects(stat(file), { code: 'ENOENT' });
 });
