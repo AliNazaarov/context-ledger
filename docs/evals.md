@@ -1456,7 +1456,10 @@ All fixtures are synthetic. The fake credentials are put together at test time f
 
 ### P4b results (2026-11-17)
 
-- `tests/secrets.test.mjs` has 36 tests. Fake credentials are assembled at run time. Running the scanner over every committed file finds no provider-format credential; it finds no provider-format credential. Its generic hits are all synthetic test fixtures: in `tests/secrets.test.mjs`, 19 secret-looking values under names such as `password` and 5 generic `Authorization: Bearer` examples; elsewhere, 5 more in existing tests (a `TOKEN=` line written to a test `.env` in `runtime/tests/test_review_fixes.py`, a test bearer header in `runtime/tests/test_team_service.py`, and `const secret = ...` in `tests/list-api.test.mjs` and `tests/paging.test.mjs`).
+- `tests/secrets.test.mjs` has 38 tests. Fake credentials are assembled at run time. Running the scanner over every committed file finds no provider-format credential; it finds no provider-format credential. Its generic hits:
+  - in `tests/secrets.test.mjs`, 23 secret-looking values under names such as `password` and 6 generic `Authorization: Bearer` examples, all synthetic;
+  - in existing tests, 4 synthetic fixtures (a test bearer header in `runtime/tests/test_team_service.py`, and three test secrets assigned to a `secret` constant in `tests/list-api.test.mjs` and `tests/paging.test.mjs`);
+  - 3 lines of code, which the scanner over-redacts by design: a helper call under a `token` name in `runtime/latent_team/chat_turns.py`, and two special-token strings under `eos_token` and `pad_token` in `runtime/tests/test_latent_training.py`.
 - **Codex, round 1** (of 742b071): three high, four medium and three low findings, all fixed with tests:
   - (high) Overlapping matches kept only one span, so part of an enclosing bearer value could stay visible. Overlaps now merge into one span, and the prefix is hidden unless the labelled match begins it.
   - (high) Length caps could leave the tail of a long value: private keys over 16 KiB, long bearer values, quoted passwords with spaces. Values are now extended by a linear scan to their real end.
@@ -1503,5 +1506,9 @@ All fixtures are synthetic. The fake credentials are put together at test time f
 - **Codex, round 6** (of cfbc2fd): one high and two low findings, fixed with tests:
   - (high) The round 5 quote check applied to every rule, so a quoted field name such as `"password": …` made a bare value count as a string, leaving part or all of it visible. Only the bearer rule now reads a whole quoted header, and only when the quote opens the header rather than the field name.
   - (low) Padding after a BEGIN marker at the end of the text was still taken. It is now taken only before an LF or CRLF line break.
-  - (low) The fixture audit now covers every committed file, as listed above. Two hits it found were code, not fixtures: a function name and a model special token under a `token` name. Bare values followed by `(`, snake_case names without digits, and `<|name|>` special tokens are no longer flagged.
-- **Not reviewed again:** the fixes after round 6. Each round found new edge cases: this is a heuristic scanner over free text, not a guarantee. The PR asks for a human security review before merge (AGENTS.md section 4.4), and the report tells people that values are not shown, not that every secret was found.
+  - (low) The fixture audit now covers every committed file, as listed above. Exclusions added here for code (calls, snake_case names, special tokens) were removed again after round 7.
+- **Codex, round 7** (of 53c9156): two high and one medium finding, all regressions from round 6, fixed with tests:
+  - (high) The exclusion for values followed by `(` hid real bearer and password values, and left the tail of a token visible. It is removed.
+  - (high) Limiting the quoted-header check to bearer values dropped escaped AWS keys inside a quoted assignment. The check is general again, and precise: a value is inside a string when a quote opens the whole assignment or header, not when it only wraps the field name.
+  - (medium) The snake_case and special-token exclusions hid quoted passwords. Both are removed. Missing a secret is worse than redacting a function name, so code under a secret-like name is over-redacted by design.
+- **Not reviewed again:** the fixes after round 7. Each round found new edge cases: this is a heuristic scanner over free text, not a guarantee. The PR asks for a human security review before merge (AGENTS.md section 4.4), and the report tells people that values are not shown, not that every secret was found.

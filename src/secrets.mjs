@@ -142,12 +142,7 @@ function looksSecret(value) {
   if (value.length < 8) return false;
   if (/^[0-9]+$/u.test(value)) return false;
   if (/^[A-Za-z]+$/u.test(value)) return value.length >= 24;
-  if (/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/u.test(value) && !/[0-9]/u.test(value)) return false;
-  // A snake_case name without digits, such as single_token_id, is code, not a value.
-  if (/^[A-Za-z_]+$/u.test(value) && value.length < 32) return false;
-  // A model's special token, such as <|im_end|>, is not a secret.
-  if (/^<\|[A-Za-z0-9_]{1,32}\|>$/u.test(value)) return false;
-  return mixed(value) || /[^A-Za-z0-9]/u.test(value) || value.length >= 24;
+  if (/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/u.test(value) && !/[0-9]/u.test(value)) return false;  return mixed(value) || /[^A-Za-z0-9]/u.test(value) || value.length >= 24;
 }
 
 /** JSON Web Tokens: two base64url segments that start eyJ and a signature that may be empty. */
@@ -252,11 +247,12 @@ function candidates(text) {
         // Escapes count only inside a string: a bearer value after a quoted header such as
         // "Authorization": "Bearer …", or inside a quoted whole header such as curl's
         // -H "Authorization: Bearer …". A bare value ends at its first character outside cls.
-        // Only the bearer rule reads a whole quoted header, and only when the quote opens the
-        // header itself ("Authorization: Bearer …"), not just the field name
-        // ("Authorization": …, already covered by the quote after the colon).
-        inString = rule.kind === 'bearer-token' && (/["']\s{0,8}Bearer\s{1,8}$/iu.test(match[0])
-          || (/["'`]/u.test(text[match.index - 1] ?? '') && !/^Authorization["']/iu.test(match[0])));
+        // The value is inside a string when a quote opens the whole assignment or header,
+        // as in "aws_secret_access_key=…" or curl's -H "Authorization: Bearer …", or when a
+        // quote follows the colon of a bearer header. A quote that only wraps the field
+        // name, as in "password": …, leaves the value bare.
+        const opensWhole = /["'`]/u.test(text[match.index - 1] ?? '') && !/^[^:=]*["'`]\s{0,8}[:=]/u.test(match[0]);
+        inString = opensWhole || /["']\s{0,8}Bearer\s{1,8}$/iu.test(match[0]);
         // Reuse the end of the run this start lies in, so nested names in one long run do
         // not each scan its rest again.
         if (cached && cached.cls === cls && cached.inString === inString && start >= cached.from && start < cached.end) end = cached.end;
@@ -266,9 +262,7 @@ function candidates(text) {
         }
       }
       const value = text.slice(start, end);
-      // A bare value followed by ( is a function call, such as token = make_token(...).
-      const call = !inString && text[end] === '(';
-      if (value && !call && rule.accept(inString ? decoded(value) : value)) {
+      if (value && rule.accept(inString ? decoded(value) : value)) {
         all.push({ kind: rule.kind, start, end, rank: 2 + simpleRules.length + index, prefix: 0 });
         pattern.lastIndex = Math.max(pattern.lastIndex, end);
       }

@@ -660,10 +660,26 @@ test('P4b review 6: padding after a BEGIN marker at the end of the text is kept'
   assert.equal(redactText(crlf), '[REDACTED private-key]');
 });
 
-test('P4b review 6: code under a secret-like name is not flagged', () => {
-  assert.deepEqual(kinds('token = single_token_id(tokenizer, close)'), []);
-  assert.deepEqual(kinds('token = build_token_from_parts'), []);
-  assert.deepEqual(kinds('{"eos_token": "<|im_end|>", "pad_token": "<|endoftext|>"}'), []);
-  assert.deepEqual(kinds('token = make9token(x)'), [], 'a call is code even with digits');
-  assert.deepEqual(kinds('password = s3cret_Value9'), ['assigned-secret'], 'a value with digits is still flagged');
+// Review round 7 regressions: missing a secret is worse than redacting a function name.
+
+test('P4b review 7: values followed by a parenthesis, and tokens with a tail, are redacted', () => {
+  assert.equal(redactText('Authorization: Bearer abc12345678(note)'), 'Authorization: Bearer [REDACTED bearer-token](note)');
+  assert.equal(redactText('password=abc12345678(note)'), 'password=[REDACTED assigned-secret](note)');
+  assert.equal(redactText(`password=${fake['github-token']}.tail987(note)`), 'password=[REDACTED github-token](note)');
+});
+
+test('P4b review 7: an escaped AWS key inside a quoted assignment is redacted whole', () => {
+  const backslash = String.fromCodePoint(92);
+  const secret = `${body('wJal', 9)}abc/`;
+  const written = `${secret.slice(0, -1)}${backslash}/`;
+  for (const quote of ['"', String.fromCodePoint(39)]) {
+    const text = `env ${quote}aws_secret_access_key=${written}${quote} end`;
+    assert.equal(redactText(text), `env ${quote}aws_secret_access_key=[REDACTED aws-secret-access-key]${quote} end`, quote);
+  }
+});
+
+test('P4b review 7: quoted passwords that look like names or special tokens are still flagged', () => {
+  assert.deepEqual(kinds('password="river_stone_orchid"'), ['assigned-secret']);
+  assert.deepEqual(kinds('password="<|R7x9_secret|>"'), ['assigned-secret']);
+  assert.deepEqual(kinds('api_key: some_function_name_here'), ['assigned-secret'], 'code under a secret-like name is over-redacted, by design');
 });
