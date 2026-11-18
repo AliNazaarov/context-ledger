@@ -5,24 +5,25 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { exportNodeId } from '../src/export.mjs';
-import { openStore } from '../src/store.mjs';
+import { InputError, openStore } from '../src/store.mjs';
 
-// Card G12: a decision graph as node-link JSON for code-graph tools. Synthetic data only.
+// Card G12: graphs as one node-link file for code-graph tools. Synthetic data only.
 const say = text => JSON.stringify({ type: 'user', message: { role: 'user', content: text } });
 const idPattern = /^[a-z0-9_]+$/u;
+const cp = (...points) => String.fromCodePoint(...points);
 
-function twoParties(store, { leoParty = 'leo' } = {}) {
+function twoParties(store) {
   const aliSession = store.importTranscript({ provider: 'codex', source: 'ali.jsonl', transcript: JSON.stringify({
     type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'GPU time. Which port?' }] },
   }) });
   const ali = store.publishGraph({ version: 2, sessionId: aliSession.id, party: 'ali', edges: [], nodes: [
     { id: 'gpu-time', kind: 'offer', label: 'GPU time', evidenceLines: [1] },
-    { id: 'which-port', kind: 'question', to: leoParty, status: 'open', label: 'Which port?', evidenceLines: [1] },
+    { id: 'which-port', kind: 'question', to: 'leo', status: 'open', label: 'Which port?', evidenceLines: [1] },
   ] });
   const leoSession = store.importTranscript({ provider: 'claude', source: 'leo-orbit.jsonl', transcript: [
     say('First plan: port 4400.'), say('Port 4317 now. Pair on the adapter. Record the demo.'),
   ].join('\n') });
-  const leo = store.publishGraph({ version: 2, sessionId: leoSession.id, party: leoParty,
+  const leo = store.publishGraph({ version: 2, sessionId: leoSession.id, party: 'leo',
     nodes: [
       { id: 'port', kind: 'decision', label: 'Use port 4317', evidenceLines: [2] },
       { id: 'old-port', kind: 'decision', label: 'Use port 4400', evidenceLines: [1] },
@@ -33,66 +34,76 @@ function twoParties(store, { leoParty = 'leo' } = {}) {
     edges: [{ from: 'port', to: 'old-port', type: 'supersedes' }, { from: 'record', to: 'demo', type: 'advances' }],
     links: [{ from: 'port', graph: ali.id, to: 'which-port', type: 'answers' }, { from: 'pairing', graph: ali.id, to: 'gpu-time', type: 'matches' }],
   });
-  return { ali, leo };
+  return { ali, leo, aliSession, leoSession };
 }
 
-test('the export is undirected node-link JSON with one node per graph node and one link per edge and cross-graph link', () => {
+const id = (graph, node) => exportNodeId(graph.id, node);
+
+test('a bundle of two parties is one undirected node-link file whose links reach both graphs', () => {
   const store = openStore(':memory:');
   const { ali, leo } = twoParties(store);
-  const out = store.exportGraph(leo.id);
+  const out = store.exportGraphs([leo.id, ali.id]);
   assert.equal(out.directed, false, 'Graphify merges into an undirected graph');
   assert.equal(out.multigraph, false);
-  assert.deepEqual(out.graph, { source: 'context-ledger', ledger_graph: leo.id, party: 'leo', session: leo.packet.sessionId, source_file: 'leo-orbit.jsonl' });
-  assert.equal(out.nodes.length, 5);
+  assert.deepEqual(out.graph, { source: 'context-ledger', links_left_out: 0, ledger_graphs: [
+    { id: leo.id, party: 'leo', session: leo.packet.sessionId }, { id: ali.id, party: 'ali', session: ali.packet.sessionId }] });
+  assert.equal(out.nodes.length, 7);
   assert.deepEqual(out.nodes.find(node => node.ledger_node === 'record'), {
-    id: 'ctm_leo__record', label: 'Record the demo', file_type: 'concept', source_file: 'leo-orbit.jsonl', source_location: 'L1, L2',
-    kind: 'action', status: 'pending', ledger_graph: leo.id, ledger_node: 'record',
+    id: id(leo, 'record'), label: 'Record the demo', file_type: 'concept', source_file: 'leo-orbit.jsonl', source_location: 'L1, L2',
+    kind: 'action', status: 'pending', party: 'leo', ledger_graph: leo.id, ledger_node: 'record',
   });
-  assert.equal(out.nodes.find(node => node.ledger_node === 'old-port').id, 'ctm_leo__old_port');
+  assert.equal(out.nodes.find(node => node.ledger_node === 'which-port').to, 'leo');
   assert.equal(out.nodes.find(node => node.ledger_node === 'port').file_type, 'rationale');
-  const relations = out.links.map(link => [link.ledger_from, link.ledger_to, link.relation]);
-  assert.deepEqual(relations.sort(), [
-    ['ctm_leo__pairing', 'ctm_ali__gpu_time', 'matches'],
-    ['ctm_leo__port', 'ctm_ali__which_port', 'answers'],
-    ['ctm_leo__port', 'ctm_leo__old_port', 'supersedes'],
-    ['ctm_leo__record', 'ctm_leo__demo', 'advances'],
-  ]);
-  for (const link of out.links) {
-    assert.deepEqual([link.source, link.target], [link.ledger_from, link.ledger_to]);
-    assert.equal(link.confidence, 'EXTRACTED');
-    assert.equal(link.weight, 1);
-  }
-  // Every end is a node of this export or of the other party's.
-  const aliOut = store.exportGraph(ali.id);
-  const known = new Set([...out.nodes, ...aliOut.nodes].map(node => node.id));
-  for (const link of out.links) assert.ok(known.has(link.source) && known.has(link.target), JSON.stringify(link));
-  assert.equal(out.links.find(link => link.relation === 'answers').ledger_graph, ali.id);
-  assert.deepEqual(store.exportGraph(leo.id), out, 'the same IDs every time');
-  for (const node of [...out.nodes, ...aliOut.nodes]) assert.match(node.id, idPattern);
-  assert.equal(store.exportGraph('e'.repeat(64)), undefined);
+  assert.deepEqual(out.links.find(link => link.relation === 'supersedes'), {
+    source: id(leo, 'port'), target: id(leo, 'old-port'), relation: 'supersedes',
+    ledger_from: id(leo, 'port'), ledger_to: id(leo, 'old-port'), confidence: 'EXTRACTED', confidence_score: 1,
+    source_file: 'leo-orbit.jsonl', weight: 1, ledger_graph: leo.id,
+  });
+  const answers = out.links.find(link => link.relation === 'answers');
+  assert.deepEqual([answers.ledger_from, answers.ledger_to, answers.ledger_link_graph], [id(leo, 'port'), id(ali, 'which-port'), ali.id]);
+  const known = new Set(out.nodes.map(node => node.id));
+  for (const link of out.links) assert.ok(known.has(link.source) && known.has(link.target), 'every end is a node of the bundle');
+  for (const node of out.nodes) assert.match(node.id, idPattern);
+  assert.equal(out.links.length, 4);
+  assert.deepEqual(store.exportGraphs([leo.id, ali.id]), out, 'the same IDs every time');
   store.close();
 });
 
-test('a hyphen in the party or the node never makes two names one', () => {
-  const party = (name, sessionId = 'a'.repeat(64)) => ({ party: name, sessionId });
-  assert.notEqual(exportNodeId(party('leo-x'), 'y'), exportNodeId(party('leo'), 'x-y'));
-  assert.equal(exportNodeId(party('leo-x'), 'y'), 'ctm_leo_x__y');
-  assert.equal(exportNodeId(party('leo'), 'x-y'), 'ctm_leo__x_y');
-  assert.equal(exportNodeId({ sessionId: 'abcdef0123'.padEnd(64, '0') }, 'goal-1'), 'ctm_session_abcdef01__goal_1', 'version 1: the session namespace');
+test('two snapshots of one party never share a node ID', () => {
   const store = openStore(':memory:');
-  const { leo } = twoParties(store, { leoParty: 'leo-x' });
-  for (const node of store.exportGraph(leo.id).nodes) assert.match(node.id, /^ctm_leo_x__[a-z0-9_]+$/u);
+  const { aliSession, ali } = twoParties(store);
+  const again = store.publishGraph({ version: 2, sessionId: aliSession.id, party: 'ali', edges: [], nodes: [
+    { id: 'which-port', kind: 'question', to: 'leo', status: 'open', label: 'Which port, still?', evidenceLines: [1] }] });
+  const out = store.exportGraphs([ali.id, again.id]);
+  const ports = out.nodes.filter(node => node.ledger_node === 'which-port');
+  assert.equal(ports.length, 2);
+  assert.notEqual(ports[0].id, ports[1].id);
+  assert.match(ports[0].id, /^ctm_[a-f0-9]{16}__which_port$/u);
   store.close();
 });
 
-test('a version 1 graph exports in its session namespace', () => {
+test('a link to a graph outside the bundle is left out and counted, never a node without a label', () => {
+  const store = openStore(':memory:');
+  const { leo } = twoParties(store);
+  const alone = store.exportGraphs([leo.id]);
+  assert.equal(alone.graph.links_left_out, 2);
+  assert.deepEqual(alone.links.map(link => link.relation).sort(), ['advances', 'supersedes']);
+  const known = new Set(alone.nodes.map(node => node.id));
+  for (const link of alone.links) assert.ok(known.has(link.target));
+  assert.equal(store.exportGraphs([leo.id, 'e'.repeat(64)]), undefined, 'an unknown graph is not found');
+  assert.throws(() => store.exportGraphs([leo.id, leo.id]), error => error instanceof InputError && /once/u.test(error.message));
+  store.close();
+});
+
+test('a version 1 graph exports under its graph ID too', () => {
   const store = openStore(':memory:');
   const session = store.importTranscript({ provider: 'claude', source: 'v1.jsonl', transcript: say('Ship it, then test.') });
   const graph = store.publishGraph({ version: 1, sessionId: session.id, edges: [],
-    nodes: [{ id: 'ship', kind: 'goal', label: 'Ship it', evidenceLines: [1] }] });
-  const out = store.exportGraph(graph.id);
-  assert.deepEqual(out.nodes.map(node => node.id), [`ctm_session_${session.id.slice(0, 8)}__ship`]);
-  assert.equal('party' in out.graph, false);
+    nodes: [{ id: 'ship-it', kind: 'goal', label: 'Ship it', evidenceLines: [1] }] });
+  const out = store.exportGraphs([graph.id]);
+  assert.deepEqual(out.nodes.map(node => node.id), [`ctm_${graph.id.slice(0, 16)}__ship_it`]);
+  assert.equal('party' in out.nodes[0], false);
+  assert.equal(exportNodeId('a'.repeat(64), 'x-y'), `ctm_${'a'.repeat(16)}__x_y`);
   store.close();
 });
 
@@ -115,30 +126,49 @@ async function startServer(t) {
   throw new Error('server did not start');
 }
 
-test('the export route and the CLI: fixed refusals, escaped output that parses back', async t => {
+test('the export routes and the CLI: escaped JSON that parses back, fixed refusals', async t => {
   const { origin, port } = await startServer(t);
   const post = (path, body) => fetch(origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify(body) })
     .then(response => response.json());
-  const rlo = String.fromCodePoint(0x202e);
+  const rlo = cp(0x202e);
+  // Labels may not hold controls (the schema refuses them), but a format character such as a
+  // zero-width space is allowed there and must still come out escaped.
+  const c1 = cp(0x200b);
   const { session } = await post('/api/import', { provider: 'claude', source: `odd${rlo}name.jsonl`, transcript: say('Port 4317.') });
   const { graph } = await post('/api/graphs', { version: 2, sessionId: session.id, party: 'leo', edges: [],
-    nodes: [{ id: 'port', kind: 'decision', label: 'Use port 4317', evidenceLines: [1] }] });
-  const get = query => fetch(`${origin}/api/graphs/${graph.id}/export${query}`).then(async response => ({ status: response.status, body: await response.json() }));
-  const plain = await get('');
-  const named = await get('?format=node-link');
-  assert.equal(plain.status, 200);
-  assert.deepEqual(named.body, plain.body);
-  for (const query of ['?format=graphml', '?format=node-link&format=node-link', '?format=node-link&x=1', '?x=1']) {
-    assert.deepEqual(await get(query), { status: 400, body: { error: 'The export takes format=node-link or no parameter.' } }, query);
+    nodes: [{ id: 'port', kind: 'decision', label: `Use port 4317 ${c1}now`, evidenceLines: [1] }] });
+
+  const single = await fetch(`${origin}/api/graphs/${graph.id}/export`);
+  assert.equal(single.status, 200);
+  const raw = await single.text();
+  for (const character of [rlo, c1]) assert.ok(!raw.includes(character), 'no raw control or bidi character in the HTTP body');
+  const body = JSON.parse(raw);
+  assert.equal(body.nodes[0].label, `Use port 4317 ${c1}now`, 'the escapes read back as the same text');
+  assert.equal(body.nodes[0].source_file, `odd${rlo}name.jsonl`);
+  assert.equal(body.directed, false, 'the body is the node-link JSON itself, with no wrapper');
+  const bundle = await fetch(`${origin}/api/export?graph=${graph.id}`).then(response => response.json());
+  assert.deepEqual(bundle, body);
+
+  const refused = async (path, error) => {
+    const response = await fetch(origin + path);
+    assert.deepEqual({ status: response.status, body: await response.json() }, { status: 400, body: { error } }, path);
+  };
+  const many = 'The export takes 1 to 20 graph=<graph ID> parameters and nothing else.';
+  for (const query of ['', '?x=1', `?graph=${graph.id}&x=1`, '?graph=nope', `?${Array.from({ length: 21 }, () => `graph=${graph.id}`).join('&')}`]) {
+    await refused(`/api/export${query}`, many);
   }
-  const missing = await fetch(`${origin}/api/graphs/${'e'.repeat(64)}/export`);
-  assert.equal(missing.status, 404);
+  await refused(`/api/export?graph=${graph.id}&graph=${graph.id}`, 'Each graph may appear once in an export.');
+  await refused(`/api/graphs/${graph.id}/export?format=node-link`, 'This export takes no parameters.');
+  for (const path of [`/api/graphs/${'e'.repeat(64)}/export`, `/api/export?graph=${'e'.repeat(64)}`]) {
+    const missing = await fetch(origin + path);
+    assert.deepEqual({ status: missing.status, body: await missing.json() }, { status: 404, body: { error: 'Not found.' } }, path);
+  }
 
   const cli = spawnSync(process.execPath, ['src/cli.mjs', 'graph', 'export', graph.id], { env: { ...process.env, PORT: port }, encoding: 'utf8' });
   assert.equal(cli.status, 0, cli.stderr);
-  assert.ok(!cli.stdout.includes(rlo), 'the bidi control in the file name is escaped');
+  for (const character of [rlo, c1]) assert.ok(!cli.stdout.includes(character));
   assert.ok(cli.stdout.includes(`odd${String.fromCodePoint(0x5c)}u202ename.jsonl`));
-  assert.deepEqual(JSON.parse(cli.stdout), plain.body.export, 'escaped JSON parses back to the same export');
+  assert.deepEqual(JSON.parse(cli.stdout), body);
   const bad = spawnSync(process.execPath, ['src/cli.mjs', 'graph', 'export', 'nope'], { env: { ...process.env, PORT: port }, encoding: 'utf8' });
   assert.equal(bad.status, 1);
   assert.match(bad.stderr, /Usage:/u);

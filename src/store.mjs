@@ -4,7 +4,7 @@ import { basename, dirname, win32 } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { graphContext } from './context.mjs';
 import { InputError } from './errors.mjs';
-import { nodeLinkExport } from './export.mjs';
+import { graphPrefixLength, nodeLinkBundle } from './export.mjs';
 import { canonicalPacket, validateGraph } from './graph.mjs';
 import { migrate } from './migrate.mjs';
 import { mountRooms } from './rooms.mjs';
@@ -272,11 +272,15 @@ export function openStore(path) {
       database.close();
     },
 
-    /** Card G12: the graph as node-link JSON for code-graph tools. */
-    exportGraph(id) {
-      const graph = readGraph(id);
-      if (!graph) return;
-      return nodeLinkExport(graph, getDetail.get(graph.packet.sessionId), { lookupGraph: readGraph });
+    /** Card G12: one or more graphs as one node-link file for code-graph tools; undefined if one is unknown. */
+    exportGraphs(ids) {
+      const graphs = ids.map(readGraph);
+      if (graphs.some(graph => !graph)) return;
+      const prefixes = new Set(graphs.map(graph => graph.id.slice(0, graphPrefixLength)));
+      if (prefixes.size !== graphs.length && new Set(ids).size === ids.length) {
+        throw new InputError('Two of these graphs share the first 16 characters of their IDs; export them apart.');
+      }
+      return nodeLinkBundle(graphs, graph => getDetail.get(graph.packet.sessionId));
     },
 
     getGraphContext(id) {

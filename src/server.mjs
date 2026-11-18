@@ -1,4 +1,6 @@
 import { readFile } from 'node:fs/promises';
+import { maxBundleGraphs } from './export.mjs';
+import { terminalJson } from './text.mjs';
 import { createServer } from 'node:http';
 import { GraphInputError } from './graph.mjs';
 import { LatentError, latentFiles, latentRead, latentTeam, latentTransfer } from './latent.mjs';
@@ -92,6 +94,18 @@ const idPattern = (prefix, suffix = '') => new RegExp(`^${prefix}/${hexId}${suff
 // Entries match on the method and the exact path or the anchored pattern, in order.
 // A request that matches none is a 404 whatever its method (there is no 405). The
 // Host and URL checks run before this table; each write checks its Origin in readJson.
+/**
+ * Card G12: an export is the node-link JSON itself, so a download loads straight into
+ * Graphify, and it is escaped like any other export: controls, bidi and format
+ * characters become \u escapes, which JSON reads back as the same text.
+ */
+function sendExport(response, bundle) {
+  if (!bundle) return undefined;
+  response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+  response.end(terminalJson(bundle) + '\n');
+  return sent;
+}
+
 const routes = [
   ...[...staticFiles].map(([path, [file, contentType]]) => ({
     method: 'GET', path, handler: async ({ response }) => {
@@ -135,14 +149,17 @@ const routes = [
     const graph = store.getGraph(id);
     return graph ? { graph } : undefined;
   } },
-  { method: 'GET', pattern: idPattern('/api/graphs', '/export'), handler: ({ params: [id], url }) => {
-    // Card G12. One format today; the parameter is there so another can be added.
+  { method: 'GET', pattern: idPattern('/api/graphs', '/export'), handler: ({ params: [id], url, response }) => {
+    if ([...url.searchParams.keys()].length) throw new InputError('This export takes no parameters.');
+    return sendExport(response, store.exportGraphs([id]));
+  } },
+  { method: 'GET', path: '/api/export', handler: ({ url, response }) => {
     const keys = [...url.searchParams.keys()];
-    if (keys.some(key => key !== 'format') || keys.length > 1 || (keys.length && url.searchParams.get('format') !== 'node-link')) {
-      throw new InputError('The export takes format=node-link or no parameter.');
+    const ids = url.searchParams.getAll('graph');
+    if (keys.some(key => key !== 'graph') || !ids.length || ids.length > maxBundleGraphs || ids.some(id => !/^[a-f0-9]{64}$/u.test(id))) {
+      throw new InputError(`The export takes 1 to ${maxBundleGraphs} graph=<graph ID> parameters and nothing else.`);
     }
-    const graph = store.exportGraph(id);
-    return graph ? { export: graph } : undefined;
+    return sendExport(response, store.exportGraphs(ids));
   } },
   { method: 'GET', pattern: idPattern('/api/graphs', '/context'), handler: ({ params: [id] }) => {
     const context = store.getGraphContext(id);

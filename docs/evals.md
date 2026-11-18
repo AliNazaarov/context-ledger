@@ -1387,23 +1387,25 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - a file with no kept answer stops the run.
 - No new runtime dependency.
 
-## G12 — Export for code-graph tools (defined 2026-11-17, before the code; revised after trying the real Graphify)
+## G12 — Export for code-graph tools (defined 2026-11-17, before the code; revised after trying the real Graphify and after review round 1)
 
-A decision graph can be exported as node-link JSON, the format NetworkX writes and Graphify keeps in `graphify-out/graph.json` (edges under `links`). `graphify merge-graphs` can then put the decisions beside a code graph. The export is `GET /api/graphs/:id/export` and `npm run ledger -- graph export <graph-id>`.
+Graphs can be exported as node-link JSON, the format NetworkX writes and Graphify keeps in `graphify-out/graph.json` (edges under `links`), so `graphify merge-graphs` can put decisions beside a code graph. Several graphs go into **one file, a bundle**. `merge-graphs` gives each input file its own ID prefix when their tags collide, so links between graphs only survive inside one file. The routes are `GET /api/export?graph=<id>&graph=<id>…` (1 to 20 graphs) and `GET /api/graphs/:id/export` (one graph). The CLI is `npm run ledger -- graph export <id> [<id>…]`. The HTTP body is the node-link JSON itself, with no wrapper, escaped like every export.
 
-- **Graph:** `directed: false` and `multigraph: false`, as Graphify's own graphs are. `merge-graphs` composes into an undirected graph and refuses a directed one; this was found by running it. `graph` names the source (`context-ledger`), the graph ID, the party and the session.
-- **Nodes:** one per graph node, with the ID `ctm_<party>__<node id>` and every `-` turned into `_`, to fit Graphify's `[a-z0-9_]` alphabet. Party names and node IDs allow only lowercase letters, digits and single hyphens in both schemas, so this never makes two names one. A double underscore cannot come from a single hyphen, so it separates party and node without ambiguity (`leo-x` with `y`, against `leo` with `x-y`). Version 1 graphs have no party and use `ctm_session_<first 8 characters of the session ID>__…`.
-  - Each node keeps its `label`, and gets `file_type` (`rationale` for decisions and constraints, `concept` for the other kinds) and `source_file` (the transcript's file name).
-  - `source_location` holds the cited lines (`L2, L5`), and `kind`, `status` and `to` are kept as they are.
-  - `ledger_graph` and `ledger_node` lead back to the ledger.
-- **Links:** one per edge, with `relation` set to the edge type (`supersedes`, `depends_on`…), `confidence` `EXTRACTED`, `confidence_score` 1 and `weight` 1. Because the graph is undirected, `ledger_from` and `ledger_to` keep the direction. Each cross-graph link becomes a link to the other party's node ID in the same naming, so the two parties' exports join when they are merged. `merge-graphs` prefixes IDs with the name of the folder above the file's folder, so the exports go in the same `graphify-out` folder as the code graph.
+- **Graph:** `directed: false` and `multigraph: false`, as Graphify's own graphs are. `merge-graphs` composes into an undirected graph and refuses a directed one; running it showed this. `graph` lists the exported graphs (ID, party, session) and `links_left_out`.
+- **Nodes:** `ctm_<first 16 hex digits of the graph ID>__<node id>`, with `-` turned into `_`. The graph ID is immutable, so two snapshots of one party never share a node. Node IDs allow only lowercase letters, digits and single hyphens in both schemas, so the rest is one-to-one. Each node keeps `label`, `kind`, `status`, `to` and `party`, and gets:
+  - `file_type`: `rationale` for decisions and constraints, `concept` for the rest;
+  - `source_file` and `source_location`: the transcript's file name and the cited lines, which are ledger evidence, not a code path;
+  - `ledger_graph` and `ledger_node`, which lead back to the ledger.
+- **Links:** one per edge, and one per cross-graph link whose other graph is in the bundle. Each has `relation` (the edge or link type), `confidence` `EXTRACTED`, `confidence_score` 1, `weight` 1, `source_file` and `ledger_graph`. Because the graph is undirected, `ledger_from` and `ledger_to` keep the direction. A link to a graph outside the bundle is left out and counted, so the merge never gains a node without a label or provenance. Two relationships can never share one unordered pair: within a graph the schema allows one edge per pair, and two snapshots cannot link to each other, since a link points at a graph that already exists.
 
 ### What is tested (synthetic transcripts only)
 
-- The export of a two-party fixture has the fields above, one node per graph node and one link per edge and cross-graph link. Every link's ends are node IDs of the export or of the other party's export.
-- IDs: a party with a hyphen and a node with a hyphen never give the same ID as another split, exporting twice gives the same IDs, and every ID matches `^[a-z0-9_]+$`. A version 1 graph uses the session namespace.
-- The route refuses any parameter other than `format=node-link`, with a fixed message, and answers 404 for an unknown graph. The CLI prints the export, with control and bidi characters escaped, as JSON that parses back to the same export.
-- Merging the two parties' exports with the real `graphify merge-graphs` (run by hand on Windows; Graphify is not a dependency) gives one graph with both parties' nodes and the links between them. The result is recorded below.
+- **A two-party bundle:** every field above, one node per graph node, one link per edge and in-bundle cross-graph link, every link end a node of the bundle, every ID matching `^[a-z0-9_]+$`, and the same output twice.
+- **IDs:** two snapshots of one party with the same node ID get different export IDs. A version 1 graph is exported under its graph ID too.
+- **Links out of the bundle** are left out and counted. An unknown graph is not found, and a graph listed twice is refused.
+- **HTTP:** the body holds no raw bidi or format character and parses back to the same text. Refusals use fixed messages: no graph, more than 20, an unknown parameter, a bad ID, a repeat, a parameter on the single-graph route. An unknown graph gives a fixed 404.
+- **CLI:** prints the same JSON, escaped.
+- **A real merge,** by hand with Graphify 0.9.4 (Graphify is not a dependency): a bundle of two parties and a synthetic code graph give one graph with all their nodes and the cross-party links. The result is recorded below.
 
 ### Acceptance
 

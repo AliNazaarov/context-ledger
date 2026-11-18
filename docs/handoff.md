@@ -238,13 +238,13 @@ Next steps:
 
 ## Current checkpoint — G12 export for code-graph tools (2026-11-17)
 
-Branch `ruslan/g12-graph-export`. `GET /api/graphs/:id/export` and `npm run ledger -- graph export <graph-id>` write a graph as node-link JSON for Graphify (`src/export.mjs`). The eval and results are in the G12 section of [the eval log](evals.md).
+Branch `ruslan/g12-graph-export`. `GET /api/export?graph=…`, `GET /api/graphs/:id/export` and `npm run ledger -- graph export <id>…` write graphs as one node-link file for Graphify (`src/export.mjs`). The eval and results are in the G12 section of [the eval log](evals.md).
 
-- Node IDs are `ctm_<party>__<node id>` with `-` turned into `_` (version 1 graphs: `ctm_session_<8 characters>__…`). The schemas' ID rule makes this one-to-one, and the double underscore keeps party and node apart.
-- The export is undirected (`directed: false`), because `graphify merge-graphs` composes into an undirected graph and refuses a directed one. That was found by running the real Graphify. `ledger_from` and `ledger_to` keep each link's direction.
-- Cross-graph links point at the other party's node IDs, so two parties' exports in one `graphify-out` folder join when merged.
+- Several graphs go in one file because `graphify merge-graphs` prefixes each input file's IDs, and links between graphs survive only inside one file.
+- Node IDs are `ctm_<16 hex of the graph ID>__<node id>`, so two snapshots never share a node. Links to graphs outside the export are left out and counted.
+- The export is undirected (`merge-graphs` refuses directed graphs), and `ledger_from` and `ledger_to` keep the direction. The HTTP body is the node-link JSON itself, escaped.
 
 Next steps:
 
-1. Merge with a real code graph and check that `graphify query` and `graphify explain` find the decisions. This card only merged two exports with each other.
-2. Decisions that name files or functions could link to the matching code nodes; that needs Graphify's code node IDs and would be a new card.
+1. Merge with a real code graph from `graphify extract` and check that `graphify query` and `graphify explain` find the decisions. This card merged with a small synthetic code graph.
+2. Decisions that name files or functions could link to the matching code nodes. That needs Graphify's code node IDs and would be a new card.
