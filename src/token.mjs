@@ -94,8 +94,9 @@ const writeScript = powershellLines([
 ]);
 // The reader shares the file for reading, writing and deletion, so a server that stops
 // during a read can still remove it. Type and size are checked on the same handle (.NET
-// already refuses handles that are not disk files). CONTEXT_LEDGER_TEST_READ_HOLD_MS is
-// a test hook: it only keeps the handle open longer after the read.
+// already refuses handles that are not disk files). CONTEXT_LEDGER_TEST_READ_MARKER is a
+// test hook: after the read, with the handle still open, it creates that marker file
+// and waits (at most 10 s) until the test removes it.
 const readScript = powershellLines([
   '$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
   `$stream = [System.IO.File]::Open($env:${pathVariable}, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))`,
@@ -104,7 +105,11 @@ const readScript = powershellLines([
   "  $sddl = $stream.GetAccessControl().GetSecurityDescriptorSddlForm('Owner, Group, Access')",
   `  $buffer = New-Object byte[] ${maxTokenFileBytes + 1}`,
   '  $count = $stream.Read($buffer, 0, $buffer.Length)',
-  '  if ($env:CONTEXT_LEDGER_TEST_READ_HOLD_MS) { Start-Sleep -Milliseconds ([int]$env:CONTEXT_LEDGER_TEST_READ_HOLD_MS) }',
+  '  if ($env:CONTEXT_LEDGER_TEST_READ_MARKER) {',
+  "    [System.IO.File]::WriteAllText($env:CONTEXT_LEDGER_TEST_READ_MARKER, 'open')",
+  '    $deadline = [DateTime]::UtcNow.AddSeconds(10)',
+  '    while ((Test-Path -LiteralPath $env:CONTEXT_LEDGER_TEST_READ_MARKER) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }',
+  '  }',
   '  [Console]::Out.Write($sid + "`n" + $sddl + "`n" + [System.Convert]::ToBase64String($buffer, 0, $count) + "`n")',
   '} finally { $stream.Dispose() }',
 ]);
@@ -141,30 +146,61 @@ function writePrivateFileSync(path, line) {
     throw new Error('The token file could not be written privately.');
   }
   const found = described(output);
-  if (!found || !privateToOwner(found.sddl, found.sid)) {
-    emptyIfOwnRecord(path, line);
-    throw new Error('The token file is not private.');
-  }
+  if (!found || !privateToOwner(found.sddl, found.sid)) throw new Error(failedWrite(path, line));
 }
+
+// Fixed sentences for a Windows write that failed after the record was written: they
+// say whether the record is still in the file, and never name the path.
+const notWritten = 'The token file could not be written privately.';
+const notWrittenNotEmptied = 'The token file could not be written privately, and it could not be emptied: delete it before the next start.';
+const failedWrite = (path, line) => (emptyIfOwnRecord(path, line) === 'failed' ? notWrittenNotEmptied : notWritten);
 
 /**
  * Empties the file at this path through its own descriptor, but only when it holds
  * exactly this record (which only this start knows), so a file that replaced it is left
- * alone. Nothing is removed by path. Errors are swallowed: this is cleanup.
+ * alone. Nothing is removed by path. Returns 'emptied', 'not ours' (missing, not a
+ * regular file or other content) or 'failed' (the record may still be there: the file
+ * could not be opened for writing, or truncating it failed). Never throws.
  */
 export function emptyIfOwnRecord(path, line) {
   let descriptor;
+  let result = 'not ours';
   try {
-    descriptor = openSync(path, constants.O_RDWR | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
-    if (!fstatSync(descriptor).isFile()) return;
+    try {
+      descriptor = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
+    } catch {
+      return 'not ours';
+    }
+    if (!fstatSync(descriptor).isFile()) return 'not ours';
     const buffer = Buffer.alloc(maxTokenFileBytes + 1);
     const bytesRead = readSync(descriptor, buffer, 0, buffer.length, 0);
-    if (buffer.subarray(0, bytesRead).toString('utf8') === line + '\n') ftruncateSync(descriptor, 0);
+    if (buffer.subarray(0, bytesRead).toString('utf8') !== line + '\n') return 'not ours';
+    result = 'failed';
+    // Ours: reopen for writing and check the content again on that descriptor.
+    const writable = openSync(path, constants.O_RDWR | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
+    try {
+      const again = Buffer.alloc(maxTokenFileBytes + 1);
+      const againRead = readSync(writable, again, 0, again.length, 0);
+      if (again.subarray(0, againRead).toString('utf8') !== line + '\n') return (result = 'not ours');
+      ftruncateSync(writable, 0);
+      result = 'emptied';
+    } finally {
+      try {
+        closeSync(writable);
+      } catch {
+        // The truncation, if any, is already done.
+      }
+    }
   } catch {
-    // Gone, replaced or unreadable: nothing of ours to empty.
+    // result says what is known.
   } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
+    try {
+      if (descriptor !== undefined) closeSync(descriptor);
+    } catch {
+      // Cleanup only.
+    }
   }
+  return result;
 }
 
 /** Windows: { sid, sddl, bytes } of a file, all read through one handle. */
@@ -196,18 +232,26 @@ export function writeTokenFile(path, token, port) {
     // nobody else can know, so it is the file just written. Every failure here is the
     // same fixed sentence, so no file system message (which names the path) escapes.
     let descriptor;
+    let identity;
     try {
       descriptor = openSync(path, constants.O_RDONLY);
       const buffer = Buffer.alloc(maxTokenFileBytes + 1);
       const bytesRead = readSync(descriptor, buffer, 0, buffer.length, 0);
-      if (buffer.subarray(0, bytesRead).toString('utf8') !== line + '\n') throw new Error('changed');
-      const { dev, ino } = fstatSync(descriptor, { bigint: true });
-      return { dev, ino };
+      if (buffer.subarray(0, bytesRead).toString('utf8') === line + '\n') {
+        const { dev, ino } = fstatSync(descriptor, { bigint: true });
+        identity = { dev, ino };
+      }
     } catch {
-      throw new Error('The token file could not be written privately.');
-    } finally {
-      if (descriptor !== undefined) closeSync(descriptor);
+      // identity stays undefined.
     }
+    try {
+      if (descriptor !== undefined) closeSync(descriptor);
+    } catch {
+      identity = undefined;
+    }
+    // A failed lookup empties the record this start wrote, as for a rejected descriptor.
+    if (identity === undefined) throw new Error(failedWrite(path, line));
+    return identity;
   }
   const descriptor = openSync(path, 'wx', 0o600);
   const record = Buffer.from(line + '\n', 'utf8');

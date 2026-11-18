@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { chmod, link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer, request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -734,23 +735,6 @@ test('on Windows a token file others can read is refused in fixed words, and not
   assert.deepEqual(await readTokenFile(plain), { port: 4317, token: 'N'.repeat(43) });
 });
 
-test('cleanup empties a token file only through its own descriptor and only when it holds this record', async t => {
-  const place = await temporary(t);
-  const line = JSON.stringify({ port: 4317, token: 'C'.repeat(43) });
-  const own = anyPortFile(join(place.directory, 'own.sqlite'));
-  await writeTokenText(own, line + '\n');
-  emptyIfOwnRecord(own, line);
-  // Emptied in place, not removed by path: the entry is still there, with no token in it.
-  assert.equal((await stat(own)).size, 0);
-  // A file that replaced it (other content) is left exactly as it is.
-  const replaced = anyPortFile(join(place.directory, 'replaced.sqlite'));
-  await writeTokenText(replaced, tokenRecord(4317, 'D'.repeat(43)));
-  emptyIfOwnRecord(replaced, line);
-  assert.equal(await readFile(replaced, 'utf8'), tokenRecord(4317, 'D'.repeat(43)));
-  // A missing file is not an error.
-  assert.doesNotThrow(() => emptyIfOwnRecord(anyPortFile(join(place.directory, 'none.sqlite')), line));
-});
-
 test('on Windows a reader takes type and size from its own handle', { skip: process.platform !== 'win32' && 'POSIX checks the open descriptor (tested above).' }, async t => {
   const place = await temporary(t);
   const folder = anyPortFile(join(place.directory, 'folder.sqlite'));
@@ -765,24 +749,83 @@ test('on Windows a reader takes type and size from its own handle', { skip: proc
   assert.deepEqual(await readTokenFile(exact), { port: 4317, token: 'K'.repeat(43) });
 });
 
+test('cleanup empties a token file only through its own descriptor and only when it holds this record, and says when it cannot', async t => {
+  const place = await temporary(t);
+  const line = JSON.stringify({ port: 4317, token: 'C'.repeat(43) });
+  const own = anyPortFile(join(place.directory, 'own.sqlite'));
+  await writeTokenText(own, line + '\n');
+  assert.equal(emptyIfOwnRecord(own, line), 'emptied');
+  // Emptied in place, not removed by path: the entry is still there, with no token in it.
+  assert.equal((await stat(own)).size, 0);
+  // A file that replaced it (other content) is left exactly as it is.
+  const replaced = anyPortFile(join(place.directory, 'replaced.sqlite'));
+  await writeTokenText(replaced, tokenRecord(4317, 'D'.repeat(43)));
+  assert.equal(emptyIfOwnRecord(replaced, line), 'not ours');
+  assert.equal(await readFile(replaced, 'utf8'), tokenRecord(4317, 'D'.repeat(43)));
+  // A missing file is not an error.
+  assert.equal(emptyIfOwnRecord(anyPortFile(join(place.directory, 'none.sqlite')), line), 'not ours');
+  // Its own record in a file it cannot open for writing (read-only here; on Windows a
+  // reader that denies write sharing has the same effect): reported, not hidden.
+  const stuck = anyPortFile(join(place.directory, 'stuck.sqlite'));
+  await writeTokenText(stuck, line + '\n');
+  await chmod(stuck, 0o400);
+  t.after(() => chmod(stuck, 0o600).catch(() => {}));
+  assert.equal(emptyIfOwnRecord(stuck, line), 'failed');
+  assert.equal(await readFile(stuck, 'utf8'), line + '\n');
+});
+
+test('a reader opens the token file from Node only on POSIX; on Windows the one open is PowerShell\'s', async t => {
+  const place = await temporary(t);
+  const file = anyPortFile(place.database);
+  await writeTokenText(file, tokenRecord(4317, 'U'.repeat(43)));
+  // Count the opens src/token.mjs makes through node:fs/promises (its named import is
+  // kept in step with the builtin by syncBuiltinESMExports).
+  const promisesModule = createRequire(import.meta.url)('node:fs/promises');
+  const original = promisesModule.open;
+  let opens = 0;
+  promisesModule.open = (path, ...rest) => {
+    if (String(path) === file) opens += 1;
+    return original(path, ...rest);
+  };
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(await readTokenFile(file), { port: 4317, token: 'U'.repeat(43) });
+  } finally {
+    promisesModule.open = original;
+    syncBuiltinESMExports();
+  }
+  assert.equal(opens, process.platform === 'win32' ? 0 : 1);
+});
+
 test('on Windows a token file can be removed while a client is reading it', { skip: process.platform !== 'win32' && 'Share modes are a Windows feature.' }, async t => {
   const place = await temporary(t);
   const file = anyPortFile(place.database);
+  const marker = join(place.directory, 'reader-open.marker');
   await writeTokenText(file, tokenRecord(4317, 'H'.repeat(43)));
-  // The test hook keeps the reader's handle open for 6 s after its read; PowerShell
-  // starts in well under 3 s, so the removal below lands while the handle is open.
-  const previous = process.env.CONTEXT_LEDGER_TEST_READ_HOLD_MS;
-  process.env.CONTEXT_LEDGER_TEST_READ_HOLD_MS = '6000';
+  // The test hook makes the reader create the marker once it has read, with its handle
+  // still open, and wait until the marker is gone.
+  const previous = process.env.CONTEXT_LEDGER_TEST_READ_MARKER;
+  process.env.CONTEXT_LEDGER_TEST_READ_MARKER = marker;
   let reading;
   try {
     reading = readTokenFile(file);
   } finally {
-    if (previous === undefined) delete process.env.CONTEXT_LEDGER_TEST_READ_HOLD_MS;
-    else process.env.CONTEXT_LEDGER_TEST_READ_HOLD_MS = previous;
+    if (previous === undefined) delete process.env.CONTEXT_LEDGER_TEST_READ_MARKER;
+    else process.env.CONTEXT_LEDGER_TEST_READ_MARKER = previous;
   }
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  const started = Date.now();
+  for (;;) {
+    try {
+      await stat(marker);
+      break;
+    } catch {
+      assert.ok(Date.now() - started < 30_000, 'the reader opened the file');
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
   // A clean stop removes the file this way; a reader without delete sharing makes it EBUSY.
   await rm(file);
+  await rm(marker);
   assert.deepEqual(await reading, { port: 4317, token: 'H'.repeat(43) });
   await assert.rejects(stat(file), { code: 'ENOENT' });
 });
