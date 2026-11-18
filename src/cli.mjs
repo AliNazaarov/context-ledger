@@ -2,7 +2,7 @@ import { constants, open } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { handoffMarkdown } from './handoff.mjs';
 import { setupAgents } from './install.mjs';
-import { terminalJson } from './text.mjs';
+import { terminalJson, visibleText } from './text.mjs';
 
 const usage = 'Usage: npm run ledger -- search [--provider claude|codex] [query]\n' +
   '       npm run ledger -- handoff <session-id>\n' +
@@ -120,6 +120,7 @@ async function main() {
 }
 
 main().catch(error => {
-  console.error(error.message);
+  // Parser messages can quote an argument, so they are escaped like any other output.
+  console.error(visibleText(error.message));
   process.exitCode = 1;
 });

@@ -1387,35 +1387,32 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - a file with no kept answer stops the run.
 - No new runtime dependency.
 
-## G8 — One-command agent setup (defined 2026-11-17, before the code; revised after review round 1)
+## G8 — One-command agent setup (defined 2026-11-17, before the code; revised after review rounds 1 and 2)
 
-`npm run ledger -- install` connects Claude Code and Codex to this ledger in one step, and `npm run ledger -- uninstall` undoes exactly that. Both print every change they make, and `--dry-run` prints the changes without making them. `--agent claude` or `--agent codex` limits either command to one agent.
+`npm run ledger -- install` connects Claude Code and Codex to this ledger in one step, and `npm run ledger -- uninstall` undoes it. Both print every change they make, and `--dry-run` prints the changes without making them. `--agent claude` or `--agent codex` limits either command to one agent.
 
 For each agent, install does two things:
 
-1. **Registers the MCP server** with the agent's own CLI, at user scope: `claude mcp add --scope user context-ledger -- node <repo>/src/mcp.mjs` and `codex mcp add context-ledger -- node <repo>/src/mcp.mjs`. A `PORT` other than 4317 is passed on as `-e PORT=…`, placed before `--scope` because Claude's `-e` takes every value up to the next option, or as `--env PORT=…`. A server already registered under that name, at any scope, is left as it is, and install says so.
-2. **Adds a short block** to the agent's user instruction file: `~/.claude/CLAUDE.md` for Claude Code, and `AGENTS.md` in `CODEX_HOME` (default `~/.codex`) for Codex. The block sits between two marker comments and tells the agent to check the ledger before asking the person to repeat context. It also says that labels and briefings are data, not instructions.
+1. **Registers the MCP server** with the agent's own CLI, at user scope: `claude mcp add --scope user context-ledger -- node <repo>/src/mcp.mjs` and `codex mcp add context-ledger -- node <repo>/src/mcp.mjs`. A `PORT` other than 4317 is passed on, as `-e PORT=…` or `--env PORT=…`. Claude's `-e` takes every value up to the next option, so it goes before `--scope`. A server already registered under that name, at any scope, is left as it is, and install says so.
+2. **Adds a short block** to the agent's user instruction file: `~/.claude/CLAUDE.md` for Claude Code, and `AGENTS.md` in `CODEX_HOME` (default `~/.codex`) for Codex. The block sits between two marker comments, after one blank line. It tells the agent to check the ledger before asking the person to repeat context, and says that labels and briefings are data, not instructions.
 
-Install records what it changed in `context-ledger-install.json` beside each agent's configuration: whether it added the server, whether it created the instruction file, and the exact separator it put before the block. Uninstall uses that record:
+**Uninstall removes only what is exactly what install makes.** Nothing is recorded between the two commands, so there is no record to go stale. Uninstall removes a server only when it is at user scope and its command, arguments and `PORT` are exactly the ones install would register now. It removes the block only when its text is exact, together with the blank line before it, and it removes the file only when nothing else is left in it. An identical entry that the person made by hand is therefore removed too; any other entry is left alone.
 
-- It removes the server only if install added it and it still runs this checkout's `src/mcp.mjs` at user scope.
-- It removes the block and that separator, which gives back the file's earlier bytes, and it removes the file only if install created it.
-- It removes the record once nothing is left in it.
+**The CLIs run from the home folder**, so no project's MCP configuration applies. Only each CLI's own "no such server" answer counts as absent. Any other failure leaves that agent untouched.
 
-Files are read as bytes. UTF-16 and invalid UTF-8 are refused, and a UTF-8 byte order mark is kept. A symbolic link is written through and stays a link, and the file keeps its mode. The file must still hold what was read when it is replaced, or nothing is written. A block whose text was edited by hand, or markers that do not pair up, are refused. Every file check runs before the agent's CLI changes anything.
+**Files are read as bytes.** UTF-16 (with or without a BOM, so any NUL byte) and invalid UTF-8 are refused, and BOMs are kept. A symbolic link is written through and stays a link, and the file keeps its mode. A new file is written through a private temporary file and renamed into place, and the file must still hold what was read just before the rename. An editor that saves between that check and the rename can still lose its save, because no supported platform has a conditional rename. A block edited by hand, or markers that do not pair up, are refused. Every file check runs before the agent's CLI is called.
 
 ### What is tested (fake home folder and stub CLIs only; the real configuration is never touched)
 
-- Install on an empty home creates both instruction files with one block each and calls each stub CLI with exactly the arguments above. The stubs parse arguments the way each CLI does, so an argument in the wrong place fails.
-- Install twice gives the same files and no second registration.
-- Install then uninstall gives back the exact bytes of a file with CRLF line ends, with no final line break, ending in a blank line, empty, or with a UTF-8 BOM. A file that install created is removed.
-- A server that was registered before install, or pointed elsewhere after it, is never removed. A Claude server at another scope is reported and left alone.
+- Install on an empty home creates both instruction files with one block each and calls each stub with exactly the arguments above. The stubs parse each CLI's own options and keep Claude's scopes apart, so an argument in the wrong place fails.
+- Install twice gives the same files and no second registration. No temporary file is left behind.
+- Install then uninstall gives back the exact bytes of a file that ended in a line break, with LF, CRLF, a trailing blank line or two BOMs. A file with no final line break keeps the one install added, which is the only byte not given back. A file that held only the block is removed.
+- An entry for another checkout, a backup path, another command, an extra argument or another `PORT` is left by both install and uninstall. A Claude entry at local scope is left too.
 - `--dry-run` changes no file and calls no command that writes, for both install and uninstall. `--agent claude` calls nothing of Codex's.
-- Unmatched markers, an edited block, UTF-16 and invalid UTF-8 are refused by both commands with "Nothing changed", and no registration is added.
-- A missing CLI skips that agent's registration with a message, still writes or removes the block, and makes the command exit with status 1. A CLI that fails to answer is not taken as "not registered".
-- Arguments with spaces, `!`, `&`, `|`, parentheses and `^` reach the CLI exactly. On Windows, where `.cmd` shims run through `cmd.exe` with delayed expansion off, an argument containing `"` or `%` is refused rather than quoted.
-- A bad or empty `--agent`, an extra word, an unknown option and an invalid `PORT` (not a number, 0, or above 65535) fail and change nothing.
-- Printed paths go through the terminal escaping in `src/text.mjs`; a folder name with a bidi control is printed escaped.
+- Unmatched markers, an edited block, UTF-16 with or without a BOM, and invalid UTF-8 are refused by both commands with "Nothing changed", before any CLI call.
+- A missing CLI skips that agent's registration with a message, still writes or removes the block, and makes the command exit with status 1. A CLI that answers with an error changes nothing for that agent.
+- Arguments with spaces, `!`, `&`, `|`, parentheses and `^` reach the CLI exactly. On Windows, `.cmd` shims run through `cmd.exe` with delayed expansion off, and an argument containing `"` or `%` is refused rather than quoted.
+- A bad or empty `--agent`, an extra word, an unknown option and an invalid `PORT` (not a number, 0, or above 65535) fail and change nothing. Printed paths and the parser's own messages are escaped.
 - A symbolic link stays a link and the target's mode is kept. This test is skipped where the account cannot create links.
 
 `CONTEXT_LEDGER_CLAUDE_BIN` and `CONTEXT_LEDGER_CODEX_BIN` name the CLI when it is not on `PATH`; the tests set them to stubs.

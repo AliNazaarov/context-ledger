@@ -3,9 +3,9 @@
 // own CLI at user scope, and a short marked block in its user instruction file.
 // Every change is printed; --dry-run prints them without making them.
 //
-// Install writes a small record of what it changed beside each agent's configuration
-// (context-ledger-install.json), so uninstall removes only what install added: a
-// server that was registered before, or changed since, is left alone.
+// Nothing is recorded between the two commands. Uninstall removes only what is exactly
+// what install makes: a server entry with this checkout's command, arguments and PORT
+// at user scope, and the block with its exact text. Anything else is left alone.
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
@@ -20,7 +20,6 @@ import { inlineText } from './text.mjs';
 export const serverName = 'context-ledger';
 export const startMarker = '<!-- context-ledger:start -->';
 export const endMarker = '<!-- context-ledger:end -->';
-export const manifestName = 'context-ledger-install.json';
 export const mcpPath = join(dirname(fileURLToPath(import.meta.url)), 'mcp.mjs');
 const defaultPort = '4317';
 const commandTimeoutMs = 60_000;
@@ -43,37 +42,37 @@ export class InstallError extends Error {}
 
 const shown = value => inlineText(String(value));
 
-/** The two agents, with their CLI, files and MCP commands. */
+/** The two agents, with their CLI, instruction file, MCP commands and expected entry. */
 export function agentTargets(env = process.env) {
   const home = homedir();
   const port = env.PORT && env.PORT !== defaultPort ? env.PORT : undefined;
   if (port !== undefined && (!/^[1-9]\d{0,4}$/u.test(port) || Number(port) > 65535)) throw new InstallError('Invalid PORT.');
   const server = ['node', mcpPath];
-  const claudeHome = join(home, '.claude');
-  const codexHome = env.CODEX_HOME || join(home, '.codex');
   return {
     claude: {
       key: 'claude',
       name: 'Claude Code',
       envName: 'CONTEXT_LEDGER_CLAUDE_BIN',
       bin: env.CONTEXT_LEDGER_CLAUDE_BIN || 'claude',
-      instructions: join(claudeHome, 'CLAUDE.md'),
-      manifest: join(claudeHome, manifestName),
+      instructions: join(home, '.claude', 'CLAUDE.md'),
       get: ['mcp', 'get', serverName],
       // -e takes every value up to the next option, so it must not sit just before the name.
       add: ['mcp', 'add', ...(port ? ['-e', `PORT=${port}`] : []), '--scope', 'user', serverName, '--', ...server],
       remove: ['mcp', 'remove', '--scope', 'user', serverName],
+      absent: /^No MCP server found with name: "context-ledger"\./mu,
+      expected: { env: port ? { PORT: port } : {} },
     },
     codex: {
       key: 'codex',
       name: 'Codex',
       envName: 'CONTEXT_LEDGER_CODEX_BIN',
       bin: env.CONTEXT_LEDGER_CODEX_BIN || 'codex',
-      instructions: join(codexHome, 'AGENTS.md'),
-      manifest: join(codexHome, manifestName),
+      instructions: join(env.CODEX_HOME || join(home, '.codex'), 'AGENTS.md'),
       get: ['mcp', 'get', serverName, '--json'],
       add: ['mcp', 'add', serverName, ...(port ? ['--env', `PORT=${port}`] : []), '--', ...server],
       remove: ['mcp', 'remove', serverName],
+      absent: /^Error: No MCP server named 'context-ledger' found\.$/mu,
+      expected: { env: port ? { PORT: port } : {} },
     },
   };
 }
@@ -112,16 +111,17 @@ function isExecutableFile(path, windows) {
 }
 
 /**
- * Run an agent CLI. On Windows the CLIs are usually .cmd shims, which only cmd.exe can
- * run: each argument is double-quoted on one cmd.exe line, with delayed expansion off so
- * ! stays literal. An argument with a quote, a percent sign or a line break could escape
- * that quoting, so it is refused. On POSIX the CLI is run directly, with no shell.
- * Returns { status, stdout, detail } or { missing: true } or { unsafe: true }.
+ * Run an agent CLI from the home folder, so no project's MCP configuration applies. On
+ * Windows the CLIs are usually .cmd shims, which only cmd.exe can run: each argument is
+ * double-quoted on one cmd.exe line, with delayed expansion off so ! stays literal. An
+ * argument with a quote, a percent sign or a line break could escape that quoting, so
+ * it is refused. On POSIX the CLI is run directly, with no shell.
+ * Returns { status, stdout, output, detail } or { missing: true } or { unsafe: true }.
  */
-export function runAgent(bin, args, { platform = process.platform, env = process.env } = {}) {
+export function runAgent(bin, args, { platform = process.platform, env = process.env, cwd = homedir() } = {}) {
   const path = findCommand(bin, { platform, env });
   if (!path) return { missing: true };
-  const options = { encoding: 'utf8', env, timeout: commandTimeoutMs, windowsHide: true };
+  const options = { encoding: 'utf8', env, cwd, timeout: commandTimeoutMs, windowsHide: true };
   let result;
   if (platform === 'win32' && /\.(?:cmd|bat)$/iu.test(path)) {
     if ([path, ...args].some(arg => /["%\r\n]/u.test(arg))) return { unsafe: true };
@@ -131,8 +131,10 @@ export function runAgent(bin, args, { platform = process.platform, env = process
   } else {
     result = spawnSync(path, args, options);
   }
-  if (result.error) return { status: null, stdout: '', detail: shown(result.error.code ?? 'failed') };
-  return { status: result.status, stdout: result.stdout ?? '', detail: firstLine(result.stderr || result.stdout) };
+  if (result.error) return { status: null, stdout: '', output: '', detail: shown(result.error.code ?? 'failed') };
+  const stdout = result.stdout ?? '';
+  const output = `${stdout}\n${result.stderr ?? ''}`;
+  return { status: result.status, stdout, output, detail: firstLine(result.stderr || stdout) };
 }
 
 const firstLine = text => shown(String(text ?? '').trim().split(/\r?\n/u)[0] ?? '').slice(0, 200);
@@ -140,30 +142,59 @@ const samePath = value => {
   const slashes = String(value).replace(/\\/gu, '/');
   return process.platform === 'win32' ? slashes.toLowerCase() : slashes;
 };
+const sameEnv = (actual, expected) => {
+  const keys = Object.keys(actual ?? {});
+  return keys.length === Object.keys(expected).length && keys.every(key => actual[key] === expected[key]);
+};
+
+/** Claude prints an entry as indented "Key: value" lines, with environment pairs under Environment. */
+function claudeEntry(output) {
+  const lines = output.split(/\r?\n/u);
+  const field = name => lines.find(line => line.trimStart().startsWith(`${name}:`))?.trimStart().slice(name.length + 1).trim();
+  const env = {};
+  const at = lines.findIndex(line => line.trim() === 'Environment:');
+  if (at >= 0) {
+    const indent = lines[at].length - lines[at].trimStart().length;
+    for (const line of lines.slice(at + 1)) {
+      if (!line.trim() || line.length - line.trimStart().length <= indent) break;
+      const pair = /^([^=]+)=(.*)$/u.exec(line.trim());
+      if (pair) env[pair[1]] = pair[2];
+    }
+  }
+  return { userScope: /^user\b/iu.test(field('Scope') ?? ''), command: field('Command'), args: field('Args'), env };
+}
+
+function codexEntry(output) {
+  const entry = JSON.parse(output);
+  const transport = entry?.transport ?? {};
+  return {
+    userScope: true,
+    command: transport.command,
+    args: Array.isArray(transport.args) ? transport.args.join(' ') : undefined,
+    env: transport.env && typeof transport.env === 'object' ? transport.env : {},
+  };
+}
 
 /**
- * What the agent's CLI says about the server name: present (with scope and whether it
- * runs this checkout's src/mcp.mjs), absent, or unknown when the CLI failed.
+ * What the agent's CLI says about the server name: present (and whether the entry is
+ * exactly the one install makes), absent (the CLI's own "no such server" answer), or
+ * failed. Only those exact answers count, so a broken configuration is never "absent".
  */
 function probe(target, run) {
   const result = run(target.bin, target.get);
   if (result.missing || result.unsafe) return result;
-  const output = String(result.stdout ?? '');
   if (result.status === 0) {
-    if (target.key === 'codex') {
-      try {
-        const entry = JSON.parse(output);
-        const args = Array.isArray(entry?.transport?.args) ? entry.transport.args : [];
-        return { present: true, userScope: true, ours: args.some(arg => samePath(arg) === samePath(mcpPath)) };
-      } catch {
-        return { failed: true, detail: 'unreadable output from codex mcp get' };
-      }
+    let entry;
+    try {
+      entry = target.key === 'codex' ? codexEntry(result.stdout) : claudeEntry(result.stdout);
+    } catch {
+      return { failed: true, detail: 'its answer could not be read' };
     }
-    const scope = /^\s*Scope:\s*(.+)$/mu.exec(output)?.[1] ?? '';
-    const args = /^\s*Args:\s*(.*)$/mu.exec(output)?.[1] ?? '';
-    return { present: true, userScope: /^user\b/iu.test(scope.trim()), ours: samePath(args).includes(samePath(mcpPath)) };
+    const ours = entry.userScope && entry.command === 'node' && samePath(entry.args ?? '') === samePath(mcpPath)
+      && sameEnv(entry.env, target.expected.env);
+    return { present: true, userScope: entry.userScope, ours };
   }
-  if (result.status === 1 && /no mcp server/iu.test(`${output}\n${result.detail}`)) return { absent: true };
+  if (result.status === 1 && target.absent.test(result.output ?? '')) return { absent: true };
   return { failed: true, detail: result.detail || `exit status ${result.status}` };
 }
 
@@ -187,41 +218,40 @@ const newlineOf = text => (text.includes('\r\n') ? '\r\n' : '\n');
 // Lines with their line endings, so text outside the block is kept byte for byte.
 const splitLines = text => text.split(/(?<=\n)/u).filter(line => line !== '');
 
-/** The text with the block at its end, and the separator put before it. */
+/** The text with the block at its end, or null when it already has the block. */
 export function withBlock(text, path = 'file') {
-  const lines = splitLines(text);
-  if (findBlock(lines, path)) return { text, separator: null };
+  if (findBlock(splitLines(text), path)) return null;
   const nl = newlineOf(text);
   const block = blockLines.map(line => line + nl).join('');
-  if (!text) return { text: block, separator: '' };
-  const separator = (text.endsWith('\n') ? '' : nl) + nl;
-  return { text: text + separator + block, separator };
+  if (!text) return block;
+  // A blank line between the text and the block; uninstall takes one blank line back.
+  return (text.endsWith('\n') ? text : text + nl) + nl + block;
 }
 
 /**
- * The text without the block. When install's separator is known, it goes too, so the
- * file is as it was; without it only the block's own lines are removed.
+ * The text without the block and the one blank line before it, or null when it has no
+ * block. A file that ended without a line break keeps the one install added.
  */
-export function withoutBlock(text, separator, path = 'file') {
+export function withoutBlock(text, path = 'file') {
   const lines = splitLines(text);
   const found = findBlock(lines, path);
-  if (!found) return text;
-  const [start, end] = found;
-  let before = lines.slice(0, start).join('');
-  if (separator && before.endsWith(separator)) before = before.slice(0, -separator.length);
-  return before + lines.slice(end + 1).join('');
+  if (!found) return null;
+  let [start, end] = found;
+  if (start > 0 && lines[start - 1].trim() === '') start -= 1;
+  return [...lines.slice(0, start), ...lines.slice(end + 1)].join('');
 }
 
 /** A file's text and how to write it back, or null if it does not exist. */
 function readFileText(path) {
   let real = path;
+  let link = false;
   try {
-    if (lstatSync(path).isSymbolicLink()) real = realpathSync(path);
-  } catch (error) {
-    if (error.code === 'ENOENT') {
-      // A link that points nowhere is not followed or replaced.
-      if (existsSync(path) || !isDanglingLink(path)) return null;
+    if (lstatSync(path).isSymbolicLink()) {
+      link = true;
+      real = realpathSync(path);
     }
+  } catch (error) {
+    if (error.code === 'ENOENT' && !link) return null;
     throw new InstallError(`Cannot read ${shown(path)} (${shown(error.code ?? 'error')}).`);
   }
   let bytes;
@@ -231,201 +261,148 @@ function readFileText(path) {
     if (error.code === 'ENOENT') return null;
     throw new InstallError(`Cannot read ${shown(path)} (${shown(error.code ?? 'error')}).`);
   }
-  if ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff)) {
-    throw new InstallError(`${shown(path)} is UTF-16 text; convert it to UTF-8 or add the block by hand.`);
-  }
   const bom = bytes.subarray(0, 3).equals(utf8Bom);
+  const body = bom ? bytes.subarray(3) : bytes;
+  // UTF-16 holds NUL bytes (and may carry no BOM), which UTF-8 would accept.
+  if ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff) || body.includes(0)) {
+    throw new InstallError(`${shown(path)} is not UTF-8 text (it looks like UTF-16); convert it or add the block by hand.`);
+  }
   let text;
   try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(bom ? bytes.subarray(3) : bytes);
+    // ignoreBOM: the one BOM is handled above, and a second one is text to keep.
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(body);
   } catch {
     throw new InstallError(`${shown(path)} is not valid UTF-8; nothing was changed in it.`);
   }
-  return { real, bytes, bom, text, mode: statSync(real).mode & 0o777, link: real !== path };
-}
-
-function isDanglingLink(path) {
-  try {
-    return lstatSync(path).isSymbolicLink();
-  } catch {
-    return false;
-  }
+  return { real, bytes, bom, text, link, mode: statSync(real).mode & 0o777 };
 }
 
 const encode = (text, bom) => (bom ? Buffer.concat([utf8Bom, Buffer.from(text, 'utf8')]) : Buffer.from(text, 'utf8'));
 
-function currentBytes(path) {
+function assertUnchanged(file, path) {
+  let now = null;
   try {
-    return readFileSync(path);
+    now = readFileSync(file?.real ?? path);
   } catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw error;
+    if (error.code !== 'ENOENT') throw error;
   }
-}
-
-function assertUnchanged(path, shownPath, expected) {
-  const now = currentBytes(path);
-  const same = expected === null ? now === null : now !== null && now.equals(expected);
-  if (!same) throw new InstallError(`${shown(shownPath)} changed while it was being updated; nothing was written to it. Run the command again.`);
+  const same = file ? now !== null && now.equals(file.bytes) : now === null;
+  if (!same) throw new InstallError(`${shown(path)} changed while it was being updated; nothing was written to it. Run the command again.`);
 }
 
 /**
  * Replace a file's contents through a private temporary file in the same folder. A
- * symbolic link is written through, so it stays a link; the mode of an existing file is
- * kept; and the file must still hold what was read, or nothing is written.
+ * symbolic link is written through, so it stays a link; an existing file keeps its
+ * mode; and the file must still hold what was read just before the rename. An editor
+ * that saves between that check and the rename can still lose its save: no platform
+ * this runs on offers a conditional rename.
  */
-function writeFileSafely(shownPath, file, bytes) {
-  const real = file?.real ?? shownPath;
+function writeFileSafely(path, file, bytes) {
+  const real = file?.real ?? path;
   mkdirSync(dirname(real), { recursive: true });
   const temporary = join(dirname(real), `.${basename(real)}.${randomBytes(6).toString('hex')}.tmp`);
   const descriptor = openSync(temporary, 'wx', 0o600);
   try {
     try {
-      writeSync(descriptor, bytes);
+      if (writeSync(descriptor, bytes) !== bytes.length) throw new InstallError(`Cannot write ${shown(path)} (short write).`);
     } finally {
       closeSync(descriptor);
     }
     chmodSync(temporary, file ? file.mode : 0o644);
-    assertUnchanged(real, shownPath, file ? file.bytes : null);
+    assertUnchanged(file, path);
     renameSync(temporary, real);
   } finally {
     if (existsSync(temporary)) unlinkSync(temporary);
   }
 }
 
-function removeFileSafely(shownPath, file) {
-  assertUnchanged(file.real, shownPath, file.bytes);
-  unlinkSync(file.real);
-}
-
-function readManifest(path) {
-  const file = readFileText(path);
-  if (!file) return { file: null, data: {} };
-  try {
-    const data = JSON.parse(file.text);
-    return { file, data: data && typeof data === 'object' && !Array.isArray(data) ? data : {} };
-  } catch {
-    throw new InstallError(`${shown(path)} is not valid JSON; fix or remove it by hand.`);
-  }
-}
-
 /** Plan the instruction file change, or throw an InstallError before anything changes. */
-function planInstructions(target, mode, manifest) {
+function planInstructions(target, mode) {
   const path = target.instructions;
   const file = readFileText(path);
   const before = file?.text ?? '';
   if (mode === 'install') {
-    const { text, separator } = withBlock(before, path);
-    if (separator === null) return { line: `${shown(path)} already has the block.`, change: null };
-    const verb = file ? 'add a block to' : 'create';
-    return { verb, path, file, text, record: { created: !file, separator } };
+    const after = withBlock(before, path);
+    if (after === null) return { note: `${shown(path)} already has the block.` };
+    return { path, file, text: after, verb: file ? 'add a block to' : 'create', done: file ? 'added a block to' : 'created' };
   }
-  if (!file || !splitLines(before).some(line => [startMarker, endMarker].includes(line.trim()))) {
-    return { line: `no block in ${shown(path)}.`, change: null };
-  }
-  const recorded = manifest.instructions ?? {};
-  const text = withoutBlock(before, typeof recorded.separator === 'string' ? recorded.separator : undefined, path);
-  const remove = recorded.created === true && text === '' && !file.link;
-  return { verb: remove ? 'remove' : 'remove the block from', path, file, text, remove, record: null };
+  const after = file ? withoutBlock(before, path) : null;
+  if (after === null) return { note: `no block in ${shown(path)}.` };
+  // A file that held only the block goes; a link is emptied instead, so it does not dangle.
+  const remove = after === '' && !file.link;
+  return { path, file, text: after, remove, verb: remove ? 'remove' : 'remove the block from', done: remove ? 'removed' : 'removed the block from' };
 }
-
-const pastTense = { create: 'created', 'add a block to': 'added a block to', remove: 'removed', 'remove the block from': 'removed the block from' };
 
 function applyInstructions(plan) {
-  if (plan.remove) removeFileSafely(plan.path, plan.file);
-  else writeFileSafely(plan.path, plan.file, encode(plan.text, plan.file?.bom));
+  if (plan.remove) {
+    assertUnchanged(plan.file, plan.path);
+    unlinkSync(plan.file.real);
+  } else {
+    writeFileSafely(plan.path, plan.file, encode(plan.text, plan.file?.bom));
+  }
 }
 
-function serverStep(target, mode, dryRun, run, manifest) {
+const failure = result => (result.unsafe ? 'a path holds " or %' : result.detail || `exit status ${result.status}`);
+
+function serverStep(target, mode, dryRun, run) {
   const command = args => shown([target.bin, ...args].join(' '));
-  const owned = manifest.server?.added === true;
   const state = probe(target, run);
   if (state.missing) {
     return { ok: false, line: `${shown(target.bin)} was not found, so the server was not ${mode === 'install' ? 'registered' : 'removed'}. Install the CLI or set its path in ${target.envName}.` };
   }
-  if (state.unsafe) return { ok: false, line: 'a path holds " or %, which cmd.exe cannot be given safely; register the server by hand (see README).' };
-  if (state.failed) return { ok: false, line: `${command(target.get)} failed (${state.detail}); nothing was changed.` };
+  if (state.unsafe) return { ok: false, stop: true, line: 'a path holds " or %, which cmd.exe cannot be given safely; register the server by hand (see README).' };
+  if (state.failed) return { ok: false, stop: true, line: `${command(target.get)} failed (${state.detail}).` };
 
   if (mode === 'install') {
     if (state.present) {
-      if (owned) return { ok: true, line: `${serverName} is registered (by an earlier install).` };
-      const where = state.userScope ? '' : ' at another scope';
-      return { ok: true, line: `${serverName} is already registered${where}; left as it is.` };
+      const what = state.ours ? '' : state.userScope ? ' with another command or PORT' : ' at another scope';
+      return { ok: true, line: `${serverName} is already registered${what}; left as it is.` };
     }
     if (dryRun) return { ok: true, line: `would run ${command(target.add)}` };
     const result = run(target.bin, target.add);
-    if (result.status === 0) return { ok: true, line: `ran ${command(target.add)}`, owned: true };
-    return { ok: false, line: `${command(target.add)} failed (${result.unsafe ? 'a path holds " or %' : result.detail || `exit status ${result.status}`}).` };
+    if (result.status === 0) return { ok: true, line: `ran ${command(target.add)}` };
+    return { ok: false, line: `${command(target.add)} failed (${failure(result)}).` };
   }
 
-  if (!owned) {
-    return { ok: true, line: state.present ? `${serverName} was not added by install; left as it is.` : `${serverName} is not registered.` };
-  }
-  if (state.absent) return { ok: true, line: `${serverName} is already gone.`, owned: false };
-  if (!state.userScope || !state.ours) {
-    return { ok: true, line: `${serverName} was changed since install; left as it is.`, owned: false };
-  }
+  if (state.absent) return { ok: true, line: `${serverName} is not registered.` };
+  if (!state.ours) return { ok: true, line: `${serverName} is not the entry install makes (another command, PORT or scope); left as it is.` };
   if (dryRun) return { ok: true, line: `would run ${command(target.remove)}` };
   const result = run(target.bin, target.remove);
-  if (result.status === 0) return { ok: true, line: `ran ${command(target.remove)}`, owned: false };
-  return { ok: false, line: `${command(target.remove)} failed (${result.unsafe ? 'a path holds " or %' : result.detail || `exit status ${result.status}`}).` };
-}
-
-function saveManifest(target, manifestFile, data) {
-  const empty = !data.server && !data.instructions;
-  if (empty) {
-    if (manifestFile) removeFileSafely(target.manifest, manifestFile);
-    return;
-  }
-  writeFileSafely(target.manifest, manifestFile, Buffer.from(JSON.stringify({ version: 1, ...data }, null, 2) + '\n'));
+  if (result.status === 0) return { ok: true, line: `ran ${command(target.remove)}` };
+  return { ok: false, line: `${command(target.remove)} failed (${failure(result)}).` };
 }
 
 function setupOne(target, mode, dryRun, run) {
   const lines = [target.name + (dryRun ? ' (dry run)' : '')];
   const say = text => lines.push('  ' + text);
-  let manifest;
   let plan;
   try {
-    // Check the files first, so a refused file stops this agent before its CLI changes anything.
-    manifest = readManifest(target.manifest);
-    plan = planInstructions(target, mode, manifest.data);
+    // Check the file first, so a refused file stops this agent before its CLI changes anything.
+    plan = planInstructions(target, mode);
   } catch (error) {
     if (!(error instanceof InstallError)) throw error;
-    say('Nothing changed: ' + error.message);
+    say(`Nothing changed for ${target.name}: ${error.message}`);
     return { ok: false, lines };
   }
-
-  const server = serverStep(target, mode, dryRun, run, manifest.data);
+  const server = serverStep(target, mode, dryRun, run);
   say('MCP server: ' + server.line);
+  if (server.stop) {
+    say(`Instructions: left as they are, because the CLI did not answer.`);
+    return { ok: false, lines };
+  }
   let ok = server.ok;
-  const data = { ...manifest.data };
-  delete data.version;
-  if (server.owned === true) data.server = { added: true };
-  if (server.owned === false) delete data.server;
-
-  if (plan.line) {
-    say('Instructions: ' + plan.line);
+  if (plan.note) {
+    say('Instructions: ' + plan.note);
   } else if (dryRun) {
     say(`Instructions: would ${plan.verb} ${shown(plan.path)}.`);
   } else {
     try {
       applyInstructions(plan);
-      say(`Instructions: ${pastTense[plan.verb]} ${shown(plan.path)}.`);
-      if (plan.record) data.instructions = plan.record;
-      else delete data.instructions;
+      say(`Instructions: ${plan.done} ${shown(plan.path)}.`);
     } catch (error) {
       ok = false;
-      const why = error instanceof InstallError ? error.message : `cannot write ${shown(plan.path)} (${shown(error.code ?? 'error')})`;
-      say(`Instructions: ${why}${server.owned !== undefined ? ' The MCP server step above was done.' : ''}`);
-    }
-  }
-  if (!dryRun) {
-    try {
-      saveManifest(target, manifest.file, data);
-    } catch (error) {
-      ok = false;
-      const why = error instanceof InstallError ? error.message : `cannot write ${shown(target.manifest)} (${shown(error.code ?? 'error')})`;
-      say(`Record: ${why}`);
+      const why = error instanceof InstallError ? error.message : `cannot write ${shown(plan.path)} (${shown(error.code ?? 'error')}).`;
+      say(`Instructions: ${why}`);
     }
   }
   return { ok, lines };

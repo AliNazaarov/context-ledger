@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { blockLines, endMarker, findCommand, manifestName, mcpPath, runAgent, startMarker, withBlock, withoutBlock } from '../src/install.mjs';
+import { blockLines, endMarker, findCommand, mcpPath, runAgent, setupAgents, startMarker, withBlock, withoutBlock } from '../src/install.mjs';
 
 // Card G8. Every test uses a fake home folder and stub agent CLIs, so the real Claude
 // Code and Codex configuration is never read or changed.
@@ -16,65 +16,89 @@ const nl = String.fromCodePoint(10);
 const crlf = String.fromCodePoint(13, 10);
 const bom = Buffer.from([0xef, 0xbb, 0xbf]);
 
-// The stubs follow each CLI's argument rules closely enough to catch an argument in the
-// wrong place: Claude's -e takes every value up to the next option, as commander does.
-// Each keeps its registry in a JSON file and logs every call.
+// The stubs follow each CLI closely enough to catch an argument in the wrong place or a
+// misread answer. Claude: options -e (takes every value up to the next option), -s or
+// --scope, -t or --transport; entries per scope, and get shows the local one before the
+// user one; add refuses a name that its scope has. Codex: --env and --json; one global
+// table, and add replaces an entry of the same name. Both print their real "no such
+// server" answers. Every call is logged.
 const stubSource = `
 import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 const [agent, ...args] = process.argv.slice(2);
 const stateFile = process.env.STUB_STATE + '.' + agent + '.json';
-const servers = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, 'utf8')) : {};
+const state = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, 'utf8')) : {};
 appendFileSync(process.env.STUB_STATE + '.log', JSON.stringify([agent, ...args]) + '\\n');
-const save = () => writeFileSync(stateFile, JSON.stringify(servers));
+if (process.env.STUB_BROKEN === agent) { console.error('config file is broken'); process.exit(1); }
+const save = () => writeFileSync(stateFile, JSON.stringify(state));
 const fail = message => { console.error(message); process.exit(1); };
 if (args[0] !== 'mcp') fail('unknown command');
 const [, action, ...rest] = args;
-function parse(list) {
-  const options = { env: [] };
-  const positional = [];
-  for (let i = 0; i < list.length; i += 1) {
-    const arg = list[i];
-    if (arg === '--') { positional.push(...list.slice(i + 1)); break; }
-    if (agent === 'claude' && arg === '-e') {
-      while (list[i + 1] !== undefined && !list[i + 1].startsWith('-')) options.env.push(list[++i]);
-    } else if (arg === '--env') options.env.push(list[++i]);
-    else if (arg === '--scope' || arg === '-s') options.scope = list[++i];
-    else if (arg === '--json') options.json = true;
-    else if (arg.startsWith('-')) fail('unknown option ' + arg);
-    else positional.push(arg);
+const known = agent === 'claude' ? ['-e', '-s', '--scope', '-t', '--transport'] : ['--env', '--json'];
+const options = { env: {} };
+const positional = [];
+for (let i = 0; i < rest.length; i += 1) {
+  const arg = rest[i];
+  if (arg === '--') { positional.push(...rest.slice(i + 1)); break; }
+  if (arg.startsWith('-') && !known.includes(arg)) fail('error: unknown option ' + arg);
+  const pair = value => { const [key, ...v] = value.split('='); if (!/^[A-Z_]+$/.test(key) || !v.length) fail('bad env ' + value); options.env[key] = v.join('='); };
+  if (arg === '-e') { while (rest[i + 1] !== undefined && !rest[i + 1].startsWith('-')) pair(rest[++i]); }
+  else if (arg === '--env') pair(rest[++i]);
+  else if (arg === '-s' || arg === '--scope') options.scope = rest[++i];
+  else if (arg === '-t' || arg === '--transport') options.transport = rest[++i];
+  else if (arg === '--json') options.json = true;
+  else positional.push(arg);
+}
+const [name, command, ...commandArgs] = positional;
+const table = scope => (state[scope] ??= {});
+if (agent === 'claude') {
+  if (action === 'get') {
+    const scope = ['local', 'user'].find(s => table(s)[name]);
+    if (!scope) fail('No MCP server found with name: "' + name + '". Configured servers: other');
+    const e = table(scope)[name];
+    const env = Object.entries(e.env).map(([k, v]) => '    ' + k + '=' + v).join('\\n');
+    console.log(name + ':\\n  Scope: ' + (scope === 'user' ? 'User config (available in all your projects)' : 'Local config (private to you in this project)')
+      + '\\n  Status: ok\\n  Type: stdio\\n  Command: ' + e.command + '\\n  Args: ' + e.args.join(' ') + '\\n  Environment:\\n' + (env ? env + '\\n' : '')
+      + '\\nTo remove this server, run: claude mcp remove "' + name + '" -s ' + scope);
+    process.exit(0);
   }
-  return { options, positional };
-}
-const { options, positional } = parse(rest);
-const name = positional[0];
-if (options.env.some(pair => !/^[A-Z_]+=/.test(pair))) fail('bad env pair ' + options.env.join(','));
-if (action === 'get') {
-  const entry = servers[name];
-  if (!entry) fail(agent === 'claude' ? 'No MCP server found with name: "' + name + '".' : "Error: No MCP server named '" + name + "' found.");
-  if (agent === 'codex') console.log(JSON.stringify({ name, transport: { type: 'stdio', command: entry.command, args: entry.args } }));
-  else console.log(name + ':\\n  Scope: ' + (entry.scope === 'user' ? 'User config (available in all your projects)' : 'Local config') + '\\n  Command: ' + entry.command + '\\n  Args: ' + entry.args.join(' '));
-  process.exit(0);
-}
-if (action === 'add') {
-  if (servers[name]) fail('MCP server ' + name + ' already exists');
-  servers[name] = { scope: options.scope ?? (agent === 'codex' ? 'user' : 'local'), command: positional[1], args: positional.slice(2), env: options.env };
-  save();
-  process.exit(0);
-}
-if (action === 'remove') {
-  if (!servers[name]) fail('No MCP server named ' + name);
-  delete servers[name];
-  save();
-  process.exit(0);
+  if (action === 'add') {
+    if (!name || !command) fail('error: missing required argument');
+    const scope = options.scope ?? 'local';
+    if (table(scope)[name]) fail('MCP server ' + name + ' already exists in ' + scope + ' config');
+    table(scope)[name] = { command, args: commandArgs, env: options.env };
+    save(); process.exit(0);
+  }
+  if (action === 'remove') {
+    const scope = options.scope ?? ['local', 'user'].find(s => table(s)[name]);
+    if (!scope || !table(scope)[name]) fail('No MCP server named ' + name);
+    delete table(scope)[name]; save(); process.exit(0);
+  }
+} else {
+  const servers = table('global');
+  if (action === 'get') {
+    if (!servers[name]) fail("Error: No MCP server named '" + name + "' found.");
+    const e = servers[name];
+    console.log(JSON.stringify({ name, enabled: true, transport: { type: 'stdio', command: e.command, args: e.args, env: Object.keys(e.env).length ? e.env : null } }));
+    process.exit(0);
+  }
+  if (action === 'add') {
+    if (!name || !command) fail('error: missing required argument');
+    servers[name] = { command, args: commandArgs, env: options.env };
+    save(); process.exit(0);
+  }
+  if (action === 'remove') {
+    if (!servers[name]) fail("Error: No MCP server named '" + name + "' found.");
+    delete servers[name]; save(); process.exit(0);
+  }
 }
 fail('unknown action');
 `;
 
 function sandbox(t, { codexHome } = {}) {
-  // A space in every path: the CLIs, the home folder and the instruction files.
+  // A space and a ! in every path: the CLIs, the home folder and the instruction files.
   const root = mkdtempSync(join(tmpdir(), 'ledger g8 '));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const home = join(root, 'home dir');
+  const home = join(root, 'home dir!x');
   const bin = join(root, 'bin dir!x');
   mkdirSync(home, { recursive: true });
   mkdirSync(bin, { recursive: true });
@@ -94,21 +118,21 @@ function sandbox(t, { codexHome } = {}) {
   const state = join(root, 'stub');
   const env = { ...process.env, HOME: home, USERPROFILE: home, STUB_STATE: state,
     CONTEXT_LEDGER_CLAUDE_BIN: wrapper('claude'), CONTEXT_LEDGER_CODEX_BIN: wrapper('codex') };
-  for (const key of ['CODEX_HOME', 'PORT']) delete env[key];
+  for (const key of ['CODEX_HOME', 'PORT', 'STUB_BROKEN']) delete env[key];
   if (codexHome) env.CODEX_HOME = join(root, codexHome);
   const codexDir = env.CODEX_HOME ?? join(home, '.codex');
   const files = { claude: join(home, '.claude', 'CLAUDE.md'), codex: join(codexDir, 'AGENTS.md') };
-  const manifests = { claude: join(home, '.claude', manifestName), codex: join(codexDir, manifestName) };
   const ledger = (...args) => spawnSync(process.execPath, [cli, ...args], { env, encoding: 'utf8' });
   const calls = () => (existsSync(state + '.log') ? readFileSync(state + '.log', 'utf8').trim().split(nl).filter(Boolean).map(line => JSON.parse(line)) : []);
   const writes = () => calls().filter(([, , action]) => action !== 'get');
   const servers = agent => (existsSync(`${state}.${agent}.json`) ? JSON.parse(readFileSync(`${state}.${agent}.json`, 'utf8')) : {});
-  const seed = (agent, entries) => writeFileSync(`${state}.${agent}.json`, JSON.stringify(entries));
+  const seed = (agent, value) => writeFileSync(`${state}.${agent}.json`, JSON.stringify(value));
   const write = (path, content) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, content); };
-  return { root, home, env, files, manifests, ledger, calls, writes, servers, seed, write };
+  return { root, home, env, files, ledger, calls, writes, servers, seed, write };
 }
 
 const block = lineEnd => blockLines.map(line => line + lineEnd).join('');
+const ours = (env = {}) => ({ command: 'node', args: [mcpPath], env });
 
 test('install on an empty home registers both servers at user scope and writes one block each', t => {
   const box = sandbox(t);
@@ -120,54 +144,55 @@ test('install on an empty home registers both servers at user scope and writes o
     ['claude', 'mcp', 'add', '--scope', 'user', 'context-ledger', '--', 'node', mcpPath],
     ['codex', 'mcp', 'add', 'context-ledger', '--', 'node', mcpPath],
   ]);
-  assert.equal(box.servers('claude')['context-ledger'].scope, 'user');
-  assert.deepEqual(JSON.parse(readFileSync(box.manifests.claude, 'utf8')),
-    { version: 1, server: { added: true }, instructions: { created: true, separator: '' } });
+  assert.deepEqual(box.servers('claude').user['context-ledger'], ours());
+  assert.deepEqual(box.servers('codex').global['context-ledger'], ours());
   assert.match(result.stdout, /Claude Code\n {2}MCP server: ran /u);
   assert.match(result.stdout, /Instructions: created /u);
+  assert.deepEqual(readdirSync(dirname(box.files.claude)), ['CLAUDE.md'], 'no temporary or record file is left');
 });
 
 test('install twice changes nothing the second time', t => {
   const box = sandbox(t);
   assert.equal(box.ledger('install').status, 0);
-  const first = [readFileSync(box.files.claude), readFileSync(box.files.codex), readFileSync(box.manifests.claude)];
+  const first = [readFileSync(box.files.claude), readFileSync(box.files.codex)];
   const again = box.ledger('install');
   assert.equal(again.status, 0);
-  assert.deepEqual([readFileSync(box.files.claude), readFileSync(box.files.codex), readFileSync(box.manifests.claude)], first);
+  assert.deepEqual([readFileSync(box.files.claude), readFileSync(box.files.codex)], first);
   assert.equal(box.writes().length, 2, 'no second registration');
-  assert.match(again.stdout, /registered \(by an earlier install\)/u);
+  assert.match(again.stdout, /context-ledger is already registered; left as it is/u);
   assert.match(again.stdout, /already has the block/u);
 });
 
-test('install and uninstall give back the exact bytes of an existing file: CRLF, no final line break, a BOM', t => {
-  const cases = [
-    `# My rules${crlf}${crlf}Be brief.${crlf}`,
-    'Be brief.',
-    `Notes${nl}${nl}`,
-    '',
-  ];
-  for (const before of cases) {
+test('install and uninstall give back the bytes of a file that ended in a line break, with CRLF or a BOM', t => {
+  for (const before of [`# My rules${crlf}${crlf}Be brief.${crlf}`, `Notes${nl}${nl}`, `One line${nl}`]) {
     const box = sandbox(t);
     box.write(box.files.claude, before);
     assert.equal(box.ledger('install', '--agent', 'claude').status, 0);
     assert.ok(readFileSync(box.files.claude, 'utf8').startsWith(before));
     assert.equal(box.ledger('uninstall', '--agent', 'claude').status, 0);
     assert.equal(readFileSync(box.files.claude, 'utf8'), before, JSON.stringify(before));
-    assert.equal(existsSync(box.manifests.claude), false, 'the record goes once nothing is left');
   }
+  // The one byte install cannot give back: a final line break the file did not have.
+  const plain = sandbox(t);
+  plain.write(plain.files.claude, 'Be brief.');
+  plain.ledger('install', '--agent', 'claude');
+  plain.ledger('uninstall', '--agent', 'claude');
+  assert.equal(readFileSync(plain.files.claude, 'utf8'), `Be brief.${nl}`);
+
   const box = sandbox(t);
-  box.write(box.files.claude, Buffer.concat([bom, Buffer.from(`Rules${crlf}`)]));
+  const withBoms = Buffer.concat([bom, bom, Buffer.from(`Rules${crlf}`)]);
+  box.write(box.files.claude, withBoms);
   assert.equal(box.ledger('install', '--agent', 'claude').status, 0);
   const installed = readFileSync(box.files.claude);
-  assert.ok(installed.subarray(0, 3).equals(bom));
-  assert.ok(installed.toString('utf8').includes(startMarker + crlf), 'block uses the file\'s CRLF');
+  assert.ok(installed.subarray(0, 6).equals(Buffer.concat([bom, bom])), 'both BOMs kept');
+  assert.ok(installed.toString('utf8').includes(startMarker + crlf), "the block uses the file's CRLF");
   assert.equal(box.ledger('uninstall', '--agent', 'claude').status, 0);
-  assert.deepEqual(readFileSync(box.files.claude), Buffer.concat([bom, Buffer.from(`Rules${crlf}`)]));
+  assert.deepEqual(readFileSync(box.files.claude), withBoms);
   assert.equal(existsSync(box.files.codex), false, '--agent claude leaves Codex alone');
-  assert.deepEqual(box.calls().map(call => call[0]).filter(agent => agent === 'codex'), []);
+  assert.deepEqual(box.calls().filter(call => call[0] === 'codex'), []);
 });
 
-test('uninstall removes a file that install created, and says when there is nothing to remove', t => {
+test('uninstall removes a file that holds only the block, and says when there is nothing to remove', t => {
   const box = sandbox(t);
   assert.equal(box.ledger('install').status, 0);
   const result = box.ledger('uninstall');
@@ -178,37 +203,61 @@ test('uninstall removes a file that install created, and says when there is noth
     ['claude', 'mcp', 'remove', '--scope', 'user', 'context-ledger'],
     ['codex', 'mcp', 'remove', 'context-ledger'],
   ]);
+  assert.deepEqual(box.servers('claude').user, {});
   const again = box.ledger('uninstall');
   assert.equal(again.status, 0);
-  assert.match(again.stdout, /is not registered/u);
+  assert.match(again.stdout, /context-ledger is not registered/u);
   assert.match(again.stdout, /no block in /u);
 });
 
-test('a server registered before install, or changed since, is never removed', t => {
-  const box = sandbox(t);
-  const theirs = { 'context-ledger': { scope: 'user', command: 'node', args: ['/elsewhere/src/mcp.mjs'] } };
-  box.seed('codex', theirs);
-  const installed = box.ledger('install', '--agent', 'codex');
-  assert.match(installed.stdout, /already registered; left as it is/u);
-  assert.equal(box.ledger('uninstall', '--agent', 'codex').status, 0);
-  assert.deepEqual(box.servers('codex'), theirs);
-
-  // Claude: added by install, then pointed elsewhere by the person.
-  assert.equal(box.ledger('install', '--agent', 'claude').status, 0);
-  box.seed('claude', { 'context-ledger': { scope: 'user', command: 'node', args: ['/other/checkout/src/mcp.mjs'] } });
-  const result = box.ledger('uninstall', '--agent', 'claude');
-  assert.match(result.stdout, /was changed since install; left as it is/u);
-  assert.equal(box.servers('claude')['context-ledger'].args[0], '/other/checkout/src/mcp.mjs');
-  assert.equal(box.writes().filter(call => call[2] === 'remove').length, 0);
+test('uninstall leaves any entry that is not exactly the one install makes', t => {
+  const elsewhere = { command: 'node', args: ['/elsewhere/src/mcp.mjs'], env: {} };
+  const cases = [
+    ['another checkout', elsewhere],
+    ['a backup path', { ...ours(), args: [mcpPath + '.backup'] }],
+    ['another command', { ...ours(), command: 'bun' }],
+    ['an extra argument', { ...ours(), args: [mcpPath, '--debug'] }],
+    ['a PORT', ours({ PORT: '4400' })],
+  ];
+  for (const [what, entry] of cases) {
+    const box = sandbox(t);
+    box.seed('codex', { global: { 'context-ledger': entry } });
+    box.seed('claude', { user: { 'context-ledger': entry } });
+    const installed = box.ledger('install');
+    assert.match(installed.stdout, /already registered with another command or PORT; left as it is/u, what);
+    const result = box.ledger('uninstall');
+    assert.equal(result.status, 0, what);
+    assert.match(result.stdout, /is not the entry install makes/u, what);
+    assert.deepEqual(box.servers('codex').global['context-ledger'], entry, what);
+    assert.deepEqual(box.servers('claude').user['context-ledger'], entry, what);
+    assert.deepEqual(box.writes(), [], what);
+  }
 });
 
-test('a server at another Claude scope is reported and left alone', t => {
+test('a Claude entry at local scope is left alone, and shadows nothing install touches', t => {
   const box = sandbox(t);
-  box.seed('claude', { 'context-ledger': { scope: 'local', command: 'node', args: [mcpPath] } });
+  box.seed('claude', { local: { 'context-ledger': ours() } });
   const result = box.ledger('install', '--agent', 'claude');
   assert.equal(result.status, 0);
   assert.match(result.stdout, /already registered at another scope; left as it is/u);
+  assert.match(box.ledger('uninstall', '--agent', 'claude').stdout, /is not the entry install makes/u);
+  assert.deepEqual(box.servers('claude').local['context-ledger'], ours());
   assert.deepEqual(box.writes(), []);
+});
+
+test('the CLIs run from the home folder, so no project configuration applies', t => {
+  const box = sandbox(t);
+  const seen = [];
+  const run = (bin, args) => {
+    seen.push(args);
+    return runAgent(bin, args, { env: box.env, cwd: box.home });
+  };
+  // runAgent's own default is the home folder; this checks the stub sees it as the cwd.
+  const where = spawnSync(process.execPath, ['-e', 'import("./src/install.mjs").then(m => { const r = m.runAgent(process.execPath, ["-e", "console.log(process.cwd())"]); console.log(r.stdout.trim()); })'],
+    { cwd: repo, env: box.env, encoding: 'utf8' });
+  assert.equal(where.stdout.trim().toLowerCase(), box.home.toLowerCase());
+  assert.equal(setupAgents({ mode: 'install', agents: ['codex'], env: box.env, run }).ok, true);
+  assert.ok(seen.length);
 });
 
 test('--dry-run changes no file and runs no command that writes, for install and uninstall', t => {
@@ -222,24 +271,22 @@ test('--dry-run changes no file and runs no command that writes, for install and
   assert.deepEqual(box.writes(), []);
 
   assert.equal(box.ledger('install').status, 0);
-  const snapshot = [readFileSync(box.files.claude), readFileSync(box.manifests.claude), JSON.stringify(box.servers('claude'))];
+  const snapshot = [readFileSync(box.files.claude), JSON.stringify(box.servers('claude'))];
   const dry = box.ledger('uninstall', '--dry-run');
   assert.equal(dry.status, 0);
   assert.match(dry.stdout, /would run .*mcp remove/u);
   assert.match(dry.stdout, /Instructions: would remove /u);
-  assert.deepEqual([readFileSync(box.files.claude), readFileSync(box.manifests.claude), JSON.stringify(box.servers('claude'))], snapshot);
+  assert.deepEqual([readFileSync(box.files.claude), JSON.stringify(box.servers('claude'))], snapshot);
   assert.equal(box.writes().length, 2);
 });
 
-test('unmatched or edited markers, UTF-16 and invalid UTF-8 are refused before the CLI changes anything', t => {
-  const utf16 = Buffer.from([0xff, 0xfe, 0x41, 0x00, 0x0a, 0x00]);
-  const badUtf8 = Buffer.from([0x41, 0xff, 0x0a]);
-  const edited = block(nl).replace('## Context Ledger', '## My heading');
+test('unmatched or edited markers, UTF-16 with or without a BOM, NUL bytes and invalid UTF-8 are refused before any CLI call', t => {
   const cases = [
-    [`Notes${nl}${startMarker}${nl}half a block${nl}`, /unmatched Context Ledger markers/u],
-    [edited, /was edited by hand/u],
-    [utf16, /is UTF-16 text/u],
-    [badUtf8, /is not valid UTF-8/u],
+    [Buffer.from(`Notes${nl}${startMarker}${nl}half a block${nl}`), /unmatched Context Ledger markers/u],
+    [Buffer.from(block(nl).replace('## Context Ledger', '## My heading')), /was edited by hand/u],
+    [Buffer.from([0xff, 0xfe, 0x41, 0x00, 0x0a, 0x00]), /is not UTF-8 text/u],
+    [Buffer.from([0x41, 0x00, 0x0a, 0x00]), /is not UTF-8 text/u],
+    [Buffer.from([0x41, 0xff, 0x0a]), /is not valid UTF-8/u],
   ];
   for (const [content, message] of cases) {
     const box = sandbox(t);
@@ -248,10 +295,10 @@ test('unmatched or edited markers, UTF-16 and invalid UTF-8 are refused before t
       const result = box.ledger(mode, '--agent', 'codex');
       assert.equal(result.status, 1, mode);
       assert.match(result.stdout, message);
-      assert.match(result.stdout, /Nothing changed: /u);
+      assert.match(result.stdout, /Nothing changed for Codex: /u);
     }
-    assert.deepEqual(readFileSync(box.files.codex), Buffer.from(content));
-    assert.deepEqual(box.writes(), [], 'no registration was added');
+    assert.deepEqual(readFileSync(box.files.codex), content);
+    assert.deepEqual(box.calls(), [], 'the CLI was not even asked');
   }
 });
 
@@ -264,22 +311,26 @@ test('a missing CLI skips its registration, still handles the block and fails th
   assert.equal(readFileSync(box.files.codex, 'utf8'), block(nl));
   const removed = box.ledger('uninstall', '--agent', 'codex');
   assert.equal(removed.status, 1);
-  assert.match(removed.stdout, /not removed/u);
+  assert.match(removed.stdout, /was not removed/u);
   assert.equal(existsSync(box.files.codex), false, 'the block is still removed');
   assert.deepEqual(box.writes().map(call => call[0]), ['claude']);
 });
 
-test('a CLI that fails to answer is not taken as "not registered"', t => {
+test('a CLI that answers with an error is not taken as "not registered", and nothing changes', t => {
   const box = sandbox(t);
-  const fake = (bin, args) => (args[1] === 'get' ? { status: 3, stdout: '', detail: 'config is broken' } : { status: 0, stdout: '' });
-  return import('../src/install.mjs').then(({ setupAgents }) => {
-    const { ok, lines } = setupAgents({ mode: 'install', agents: ['claude'], env: box.env, run: fake });
-    assert.equal(ok, false);
-    assert.match(lines.join(nl), /failed \(config is broken\); nothing was changed/u);
-  });
+  box.write(box.files.claude, `Rules${nl}`);
+  box.env.STUB_BROKEN = 'claude';
+  for (const mode of ['install', 'uninstall']) {
+    const result = box.ledger(mode, '--agent', 'claude');
+    assert.equal(result.status, 1, mode);
+    assert.match(result.stdout, /mcp get context-ledger failed \(config file is broken\)/u);
+    assert.match(result.stdout, /Instructions: left as they are, because the CLI did not answer/u);
+  }
+  assert.equal(readFileSync(box.files.claude, 'utf8'), `Rules${nl}`);
+  assert.deepEqual(box.writes(), []);
 });
 
-test('a PORT other than 4317 is passed to both servers in a place each CLI parses', t => {
+test('a PORT other than 4317 is passed to both servers in a place each CLI parses, and checked on uninstall', t => {
   const box = sandbox(t);
   box.env.PORT = '4400';
   const result = box.ledger('install');
@@ -288,27 +339,35 @@ test('a PORT other than 4317 is passed to both servers in a place each CLI parse
     ['claude', 'mcp', 'add', '-e', 'PORT=4400', '--scope', 'user', 'context-ledger', '--', 'node', mcpPath],
     ['codex', 'mcp', 'add', 'context-ledger', '--env', 'PORT=4400', '--', 'node', mcpPath],
   ]);
-  assert.deepEqual(box.servers('claude')['context-ledger'].env, ['PORT=4400']);
+  assert.deepEqual(box.servers('claude').user['context-ledger'], ours({ PORT: '4400' }));
+  delete box.env.PORT;
+  assert.match(box.ledger('uninstall').stdout, /is not the entry install makes/u, 'without the PORT it is not ours');
+  box.env.PORT = '4400';
+  assert.equal(box.ledger('uninstall').status, 0);
+  assert.deepEqual(box.servers('codex').global, {});
   for (const port of ['4317x', '0', '65536', '99999']) {
     box.env.PORT = port;
     assert.equal(box.ledger('install').status, 1, port);
   }
 });
 
-test('CODEX_HOME moves the Codex instruction file and record', t => {
+test('CODEX_HOME moves the Codex instruction file', t => {
   const box = sandbox(t, { codexHome: 'codex home' });
   assert.equal(box.ledger('install', '--agent', 'codex').status, 0);
   assert.equal(readFileSync(join(box.root, 'codex home', 'AGENTS.md'), 'utf8'), block(nl));
-  assert.ok(existsSync(join(box.root, 'codex home', manifestName)));
 });
 
-test('printed paths are escaped, so a folder name cannot drive the terminal', t => {
+test('printed paths and parser messages are escaped, so they cannot drive the terminal', t => {
   const rlo = String.fromCodePoint(0x202e);
   const box = sandbox(t, { codexHome: `codex${rlo}home` });
   const result = box.ledger('install', '--agent', 'codex', '--dry-run');
   assert.equal(result.status, 0);
   assert.ok(!result.stdout.includes(rlo));
   assert.ok(result.stdout.includes(`codex${String.fromCodePoint(0x5c)}u202ehome`));
+  const option = box.ledger('install', `--x${rlo}y`);
+  assert.equal(option.status, 1);
+  assert.ok(!option.stderr.includes(rlo));
+  assert.match(option.stderr, /Unknown option/u);
 });
 
 test('bad arguments print the usage and change nothing', t => {
@@ -335,7 +394,6 @@ test('a symbolic link stays a link, and a file keeps its mode', t => {
   if (!windows) chmodSync(target, 0o600);
   assert.equal(box.ledger('install', '--agent', 'codex').status, 0);
   assert.ok(readFileSync(target, 'utf8').includes(startMarker), 'written through the link');
-  assert.equal(readFileSync(box.files.codex, 'utf8'), readFileSync(target, 'utf8'));
   if (!windows) assert.equal(statSync(target).mode & 0o777, 0o600);
   assert.equal(box.ledger('uninstall', '--agent', 'codex').status, 0);
   assert.equal(readFileSync(target, 'utf8'), `Shared rules${nl}`);
@@ -343,7 +401,7 @@ test('a symbolic link stays a link, and a file keeps its mode', t => {
 
 test('arguments with spaces, ! and shell characters reach the CLI exactly; quotes and percent signs are refused on Windows', t => {
   const box = sandbox(t);
-  const args = ['mcp', 'add', 'x', '--', 'node', join(box.root, 'a b!PATH!', 'mcp.mjs'), 'a&b|c', '(x)', '^caret'];
+  const args = ['mcp', 'add', '-s', 'user', 'x', '--', 'node', join(box.root, 'a b!PATH!', 'mcp.mjs'), 'a&b|c', '(x)', '^caret'];
   assert.equal(runAgent(box.env.CONTEXT_LEDGER_CLAUDE_BIN, args, { env: box.env }).status, 0);
   assert.deepEqual(box.calls().at(-1), ['claude', ...args]);
   if (windows) {
@@ -371,12 +429,11 @@ test('findCommand looks through PATH and, on Windows, skips the extensionless np
 });
 
 test('withBlock and withoutBlock keep the text around the block', () => {
-  const added = withBlock('A');
-  assert.equal(added.separator, nl + nl);
-  assert.equal(withoutBlock(added.text, added.separator), 'A');
-  assert.equal(withBlock(added.text).separator, null, 'already there');
+  assert.equal(withBlock(''), block(nl));
+  assert.equal(withBlock(block(nl)), null, 'already there');
+  assert.equal(withoutBlock(withBlock(`A${nl}`)), `A${nl}`);
   assert.equal(withoutBlock(`A${nl}${block(nl)}B${nl}`), `A${nl}B${nl}`, 'text after the block is kept');
-  assert.equal(withoutBlock(`A${nl}${nl}${block(nl)}`), `A${nl}${nl}`, 'without a record only the block goes');
+  assert.equal(withoutBlock(`A${nl}`), null);
   assert.throws(() => withBlock(`${endMarker}${nl}`), /unmatched/u);
   assert.throws(() => withBlock(`${block(nl)}${block(nl)}`), /unmatched/u);
 });
