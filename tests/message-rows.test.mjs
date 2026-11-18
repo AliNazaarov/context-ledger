@@ -90,6 +90,10 @@ const notAnArray = 'its stored messages are not a JSON array';
 const notAMessage = 'a stored message is not an object with a user or assistant role, a string text and a line from 1 to 2^53 - 1';
 const sameLine = 'two stored messages have the same line';
 const repeatedField = 'a stored message has the same field twice';
+const nulName = 'a stored message has a field name that holds a NUL character';
+const tooDeep = 'its stored messages are nested more than 1,000 levels deep';
+// A turn whose meta value nests arrays so that the whole stored value is depth levels deep.
+const nested = depth => `[{"role": "user", "text": "Deep", "line": 1, "meta": ${'['.repeat(depth - 2)}${']'.repeat(depth - 2)}}]`;
 const migrationFailed = (session, reason) =>
   `${session} cannot be moved to schema version 3: ${reason}. The migration rolled back, so the file was not changed.`;
 const leftoverFailed = 'This ledger already has a messages table or trigger that schema version 3 did not create. ' +
@@ -408,6 +412,10 @@ test('a session whose stored messages cannot be copied fails the step, names the
     ['line 1e0', '[{"role": "user", "text": "Synthetic turn", "line": 1e0}]', notAMessage],
     ['line 1.00000000000000001', '[{"role": "user", "text": "Synthetic turn", "line": 1.00000000000000001}]', notAMessage],
     ['a byte order mark', `${String.fromCodePoint(0xfeff)}${JSON.stringify([turn])}`, notAnArray],
+    // Codex review of 2f44b8a: SQLite compares names only up to a NUL, so this name would be
+    // its line, and SQLite refuses JSON nested more than 1,000 levels deep.
+    ['a NUL in a field name', '[{"role": "user", "text": "turn", "line\\u0000suffix": 9, "l\\u0069ne": 1}]', nulName],
+    ['1,001 levels', nested(1001), tooDeep],
   ];
   for (const [index, [name, messages, reason]] of variants.entries()) {
     const path = join(directory, `atomic-${index}.sqlite`);
@@ -447,6 +455,19 @@ test('a session whose stored messages cannot be copied fails the step, names the
   const bytes = await readFile(oddId);
   assert.throws(() => openStore(oddId), { message: migrationFailed(`The session in row ${rowid}`, notAMessage) });
   assert.ok((await readFile(oddId)).equals(bytes));
+});
+
+test('a stored value 1,000 levels deep migrates, as SQLite reads it', async t => {
+  // Codex review of 2f44b8a: the other side of the depth limit, checked against SQLite itself.
+  const { directory, keep } = await scratchDirectory(t, 'ledger-p1c-depth-');
+  const fixture = await oldLedger(directory, 2);
+  const setup = new DatabaseSync(fixture.path);
+  assert.deepEqual({ ...setup.prepare('SELECT json_valid(?) AS ok, json_valid(?) AS deeper').get(nested(1000), nested(1001)) }, { ok: 1, deeper: 0 });
+  setup.prepare('UPDATE sessions SET messages = ? WHERE id = ?').run(nested(1000), fixture.ali.id);
+  setup.close();
+  const store = openStore(fixture.path);
+  keep(() => store.close());
+  assert.deepEqual(store.get(fixture.ali.id).messages, [{ role: 'user', text: 'Deep', line: 1, key: 'l:1' }]);
 });
 
 test('repeated names inside a text, nested objects and escaped quotes are not repeated fields', async t => {

@@ -30,6 +30,9 @@ const insertRows = 'INSERT INTO messages (session_id, seq, line, role, text_json
 const notAnArray = 'its stored messages are not a JSON array';
 const notAMessage = 'a stored message is not an object with a user or assistant role, a string text and a line from 1 to 2^53 - 1';
 const repeatedField = 'a stored message has the same field twice';
+const nulName = 'a stored message has a field name that holds a NUL character';
+const tooDeep = 'its stored messages are nested more than 1,000 levels deep';
+const maxDepth = 1000;
 const sameLine = 'two stored messages have the same line';
 const migrationFailed = (id, rowid, reason) => `${id ? `Session ${id}` : `The session in row ${rowid}`} ` +
   `cannot be moved to schema version 3: ${reason}. The migration rolled back, so the file was not changed.`;
@@ -58,10 +61,15 @@ const parseArray = (decoder, bytes) => {
  * reads the first, so a repeat is refused rather than resolved either way. The raw token
  * shows a line such as 1.0 or 1.00000000000000001 that JavaScript would read as 1
  * (Codex review of 5a80f16). Only members of the array's own elements are looked at.
+ * A name that holds a NUL is flagged too: SQLite compares names only up to a NUL, so
+ * "line\u0000x" would be its line. The deepest nesting is returned as well, since SQLite
+ * refuses JSON nested more than 1,000 levels deep and JSON.parse does not (Codex review
+ * of 2f44b8a).
  */
 function scanMembers(source) {
   const elements = [];
   let depth = 0;
+  let deepest = 0;
   let element = null;
   for (let at = 0; at < source.length; at += 1) {
     const code = source.charCodeAt(at);
@@ -79,6 +87,7 @@ function scanMembers(source) {
         const literal = source.slice(at, close + 1);
         const name = literal.includes('\\') ? JSON.parse(literal) : literal.slice(1, -1);
         if (element.names.has(name)) element.repeated = true;
+        if (name.includes(String.fromCodePoint(0))) element.nulName = true;
         element.names.add(name);
         if (name === 'line') {
           let from = next + 1;
@@ -91,15 +100,16 @@ function scanMembers(source) {
       at = close;
     } else if (code === 123 || code === 91) {
       depth += 1;
+      if (depth > deepest) deepest = depth;
       if (depth === 2) {
-        element = code === 123 ? { names: new Set(), repeated: false, line: '' } : null;
+        element = code === 123 ? { names: new Set(), repeated: false, nulName: false, line: '' } : null;
         elements.push(element);
       }
     } else if (code === 125 || code === 93) {
       depth -= 1;
     }
   }
-  return elements;
+  return { elements, deepest };
 }
 
 /**
@@ -134,8 +144,10 @@ function copyStoredMessages(database) {
     if (!parsed) throw new Error(migrationFailed(id, rowid, notAnArray));
     const { source, messages } = parsed;
     if (!messages.every(isMessage)) throw new Error(migrationFailed(id, rowid, notAMessage));
-    const members = scanMembers(source);
+    const { elements: members, deepest } = scanMembers(source);
+    if (deepest > maxDepth) throw new Error(migrationFailed(id, rowid, tooDeep));
     if (members.some(element => element.repeated)) throw new Error(migrationFailed(id, rowid, repeatedField));
+    if (members.some(element => element.nulName)) throw new Error(migrationFailed(id, rowid, nulName));
     if (!members.every(element => lineToken.test(element.line))) throw new Error(migrationFailed(id, rowid, notAMessage));
     const lines = new Set();
     for (let seq = 0; seq < messages.length; seq += 1) {
@@ -187,7 +199,8 @@ export function refuseNewerSchema(database) {
  * opens a migrated file: graphs and rooms get created_at, and a session inserted
  * without a project joins the default one. SQLite cannot add a NOT NULL column with a
  * foreign key, so sessions.project_id stays nullable and the trigger fills it.
- * sessions.messages stays as a copy that this build writes and never reads, so a build
+ * sessions.messages stays as a copy that this build writes; sessions are read from rows,
+ * and only the version 3 step and the sessions_messages trigger read the column. A build
  * from before versions (which never reads user_version) keeps working on the file; the
  * sessions_messages trigger gives a session it inserts its rows. The import writes its
  * rows before the session, which is why messages.session_id is a deferred foreign key.

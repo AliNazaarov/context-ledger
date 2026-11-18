@@ -196,7 +196,8 @@ export function openStore(path) {
   const rooms = mountRooms(database, readGraph);
 
   // Version 2 adds projects and sessions.project_id. Version 3 adds one messages row per
-  // turn; sessions.messages is still written for builds from before versions, never read.
+  // turn; sessions.messages is still written for builds from before versions. Sessions are
+  // read from rows; only the version 3 step and the older-build trigger read the column.
   const insert = database.prepare(`
     INSERT INTO sessions (id, provider, source, title, message_count, messages, search_text, project_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
