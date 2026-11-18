@@ -1386,3 +1386,25 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## D2 — Capy integration guide (defined 2026-11-17)
+
+A guide, `docs/integrations/capy.md`, for adding Context Ledger as an MCP server in a Capy organization. It is written from Capy's public documentation and links the page behind each step.
+
+### What it must say
+
+- The ledger answers on loopback only, and Capy runs a STDIO server on the thread's own machine. The server therefore works only for threads on the computer that runs the ledger (desktop app or Dock CLI), not for cloud threads. The guide says so first, and advises against running the ledger on a cloud machine.
+- The exact form values (STDIO, key `context-ledger`, `node` plus the absolute path to `src/mcp.mjs`, `PORT` only when it differs, owner **Only you**, no sign-in), and why the owner is not Organization.
+- How to check the connection, and how to tell the agent to use the tools through Capy's instructions or `AGENTS.md`.
+- What the agent should not trust (labels are transcript data), and who else can reach the ledger through an "Only you" server.
+- What was not checked: no run in a real Capy organization yet.
+
+### What is tested
+
+`tests/integrations.test.mjs` keeps the guide in step with the code: the key fits Capy's key rule, the path it names exists, the README section it links to exists, the TOML block matches the README's, and every Capy link is an `https://docs.capy.ai/` page.
+
+### Acceptance
+
+- The four suites pass.
+- Codex reviews the guide read-only against Capy's documentation; findings are fixed or recorded here.
+- A person with a Capy organization follows it once and records the result here.
