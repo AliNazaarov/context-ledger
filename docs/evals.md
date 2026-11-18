@@ -1456,7 +1456,7 @@ All fixtures are synthetic. The fake credentials are put together at test time f
 
 ### P4b results (2026-11-17)
 
-- `tests/secrets.test.mjs` has 30 tests. Fake credentials are assembled at run time. Running the scanner over every committed file finds no provider-format credential; its only hits are three generic `Authorization: Bearer` examples in the test text.
+- `tests/secrets.test.mjs` has 30 tests. Fake credentials are assembled at run time. Running the scanner over every committed file finds no provider-format credential; its only hits are generic `Authorization: Bearer` examples in the test text, such as `Bearer abcdefgh12345`.
 - **Codex, round 1** (of 742b071): three high, four medium and three low findings, all fixed with tests:
   - (high) Overlapping matches kept only one span, so part of an enclosing bearer value could stay visible. Overlaps now merge into one span, and the prefix is hidden unless the labelled match begins it.
   - (high) Length caps could leave the tail of a long value: private keys over 16 KiB, long bearer values, quoted passwords with spaces. Values are now extended by a linear scan to their real end.
