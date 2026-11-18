@@ -955,6 +955,19 @@ Source: a review of the project map (floorplan) against CI, the handoff notes an
 - **Suites:** node 151/152 (one skipped) against a baseline of 139/140; the 12 new tests all pass. Python runtime 131 run, 24 skipped, OK. Playwright was not run, because the orchestrator runs it. No browser journey changed.
 - **Orchestrator check (2026-11-16):** Playwright 13/13 on this branch. On a Windows checkout with `core.autocrlf` the files are CR LF, and the hidden-character check in `tests/handoff-bench.test.mjs` counted the carriage return as hostile, so the test failed there (it passed only where the files were written with LF). The check now allows tab, newline and carriage return, as AGENTS.md section 6 does. Checked both ways: it passes with CR LF files and still fails on a vertical tab.
 
+### H7 — Windows deadline flake (`ruslan/windows-deadline-flake`, defined 2026-11-17, before the fix)
+
+On the Windows CI runner (Python 3.13), `DeadlineBeforeNextCallTest.test_only_the_reader_runs_and_the_read_returns_504` (`runtime/tests/test_limits.py`) and `DeadlineTest.test_model_call_timeout_is_capped_by_the_deadline` (`runtime/tests/test_review_fixes.py`) fail at random with `502 {'error': 'Model server timed out.'}` instead of 504. They failed PRs #29–#32, none of which touch `runtime/`. Cause: `_Run.call` passes what is left of the read deadline as the model call's timeout, then turns the timeout's 502 into a 504 only if `remaining()` is at or below 0 after the call. Windows socket timeouts and `time.monotonic()` both tick at about 15.6 ms, so the socket can time out while the clock still shows a little time left.
+
+| Eval | Expected |
+| --- | --- |
+| Timeout capped by the deadline is 504 | A model call whose timeout was set by the read deadline (what was left was at or below the client's own timeout) and that times out returns 504 "The latent read ran out of time.", even when `remaining()` is still above 0 after the call. A synthetic test makes the socket time out at once with a deadline still a few milliseconds away; it fails on `main` (502) and passes with the fix. |
+| Client's own timeout stays 502 | When the client's own timeout is shorter than what is left of the deadline and the call times out, the read still returns 502 "Model server timed out." |
+| Other 502s unchanged | A non-timeout 502 (for example HTTP 500 from the model server) stays 502 when the deadline capped the timeout and time is left, and still becomes 504 when the deadline has passed, as before. |
+| Suites | `python -m unittest discover -s tests -t .` in `runtime/` passes on Windows and in WSL; the node suite and graph checks are unchanged. The PR's `runtime (windows-latest, Python 3.13)` job is green, and rerunning the failed job on PRs #29–#32 passes. |
+
+**Results — H7:** pending.
+
 ## Cycle 11 — Latent runtime performance baseline (defined 2026-11-12, before measuring)
 
 Card C11. Until now the latent runtime had accuracy evals but no performance figures. This cycle measures it on the RTX 4090 Laptop GPU (16 GB), vLLM 0.33.0 in WSL2, with the synthetic fixtures only.
