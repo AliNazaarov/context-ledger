@@ -1412,10 +1412,10 @@ A brand guide for the console (U1), the video (U3) and other pages, built on the
 ### U2 review (2026-11-17)
 
 - **Codex, round 1** (of the first U2 commit): one high finding, five medium, five low. All are fixed in the next commit:
-  - (high) The guide said the console could serve the SVGs as they are. Its policy has no , so the guide now says to inline them, as U1's office module builds its figures, and what image files would need.
+  - (high) The guide said the console could serve the SVGs as they are. Its policy has no `img-src`, so the guide now says to inline them, as U1's office module builds its figures, and what image files would need.
   - (medium) The dark set inherited the light badge fills (1.6:1). It now sets dark fills and every text, fill and button variable itself.
   - (medium) The dark strong violet failed on Charcoal (3.1:1). Links, link hover, button fill, button hover and button text now have their own pairs.
-  - (medium) Inlined Pips shared the title ID . Each file now names itself with  and has no IDs.
+  - (medium) Inlined Pips shared the title ID `t`. Each file now names itself with `aria-label` and has no IDs.
   - (medium) At small sizes the pose is lost. Every state now also shows its word, and the lime spark is marked as decoration.
   - (low) The waiting pose now keeps the tag, and the working pose is described as reading it.
   - (low) The off-palette cheek colour is gone, and the illustration shades are listed and tested.
