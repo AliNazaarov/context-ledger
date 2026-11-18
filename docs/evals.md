@@ -1450,15 +1450,35 @@ Stacked on U1 (`ruslan/console-v0`), because the video shows the console. The ca
 
 ### What this card delivers, and what a person must still do
 
-- **Delivered:** the shot list and voice-over (`docs/video/u3-script.md`), timed to 60 seconds, and `demo/record-console.mjs`. The script records the console part as raw 1280×720 footage: the bundled synthetic Orbit recording played to the end, and the proof of one decision opened. A run on Windows gave 42 seconds, checked frame by frame: the office, the cards popping in with flash lines, and the cited lines L27 and L28 highlighted.
+- **Delivered:** the shot list and voice-over (`docs/video/u3-script.md`), timed to 60 seconds, and `demo/record-console.mjs`. The script records the console part as raw 1280×720 footage: the bundled synthetic Orbit recording played to the end, and the proof of one decision opened. The recorder plays the demo at 1.3× and writes a cue sheet with the measured second of each moment. A run on Windows gave 44 seconds at 1280×720, checked frame by frame: the office, the cards popping in with flash lines, the answer link at 22 s, and the cited lines L27 and L28 highlighted at 30 s.
 - **For a person:** the terminal shots, the voice-over and the cut, which need a microphone and a screen recorder. Also the install shot, which waits for G8 (`ledger install`) or uses the README's two `mcp add` commands until then.
 
 ### What is tested
 
-`tests/video.test.mjs`: the five shots run from 0:00 to 1:00 with no gap or overlap; the voice-over is at most 130 words; the script keeps the "estimate" label and the synthetic-data rule; the decision and question the script shows exist in the demo recording; and the recorder parses.
+`tests/video.test.mjs`:
+
+- the five shots run from 0:00 to 1:00 with no gap or overlap, and no shot needs more than 2.5 words a second;
+- the numbers shot keeps the "estimate" label, and the closing line claims only that the ledger stays on the machine;
+- the demo recording holds Leo's `answers` link to Ali's question and the decision citing lines 27 and 28;
+- the replay fits the growth shot at the recorder's speed, and every cue the script names is one the recorder marks;
+- the recorder lets only console files load, starts the ledger with a small environment, and publishes only its own take without touching other files.
+
+The browser take itself is not run in the suites: it needs about 45 seconds and Chromium. It was run by hand.
 
 ### Acceptance
 
 - The four suites pass.
 - Codex reviews the script and the recorder read-only; findings are fixed or recorded here.
 - A person records and cuts the video, and links it here.
+
+### U3 review (2026-11-17)
+
+- **Codex, round 1** (of 0a68d2b): three high findings and five medium, fixed in the next commit:
+  - (high) The recorder deleted every other `.webm` in its output folder. It now records into a private staging folder and writes `console-demo-<time>.webm` and a cue sheet beside whatever is there, touching nothing else.
+  - (high) The closing line "your transcripts never leave your machine; only the cited summary goes to the agent" promised more than the tool does: `session_read` returns original turns. It now says only that the ledger stays on the machine and that agents get cited context.
+  - (high) The terminal shot had no steps to keep real data off screen. The script now asks for a throwaway account or virtual machine with no other database, demo-only agent settings, an empty history and synthetic paths.
+  - (medium) The growth shot ended before the answer it narrates. The recorder plays at 1.3× and writes a cue sheet, and the shots are cut by cues.
+  - (medium) Startup and shutdown could leave the ledger or temporary files behind. Every resource now has a cleanup that runs even when another fails, the ledger has a start deadline, and a spawn error or early exit is reported.
+  - (medium) The ledger inherited the caller's environment, and the page could load anything. It now gets a small environment, and the take fails if the page loads anything outside the console's files.
+  - (medium) The install line assumed G8, and "the line behind every fact" overstated what citations prove. Before G8 the script has its own line, and the growth shot is described as a replay of agents citing their transcripts.
+  - (medium) The tests are now as listed above.
