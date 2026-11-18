@@ -4,13 +4,14 @@
 //   PORT=4317 node demo/publish-reference.mjs
 // It reads the ledger's access token from the file next to CONTEXT_LEDGER_DB (the
 // repository's .context-ledger/ledger.sqlite by default).
-import { clientTokenFile, readTokenFile } from '../src/token.mjs';
+import { clientToken } from '../src/token.mjs';
 import { aliReference, leoReference } from './reference-graphs.mjs';
 
 const port = Number(process.env.PORT ?? 4317);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT.');
 const origin = `http://127.0.0.1:${port}`;
-const token = await readTokenFile(clientTokenFile());
+// Only for the port the token file names.
+const { token } = await clientToken(port);
 const auth = token === undefined ? {} : { Authorization: `Bearer ${token}` };
 
 async function api(path, body) {

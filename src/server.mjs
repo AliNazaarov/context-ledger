@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { GraphInputError } from './graph.mjs';
 import { LatentError, latentFiles, latentRead, latentTeam, latentTransfer } from './latent.mjs';
 import { InputError, isProvider, openStore } from './store.mjs';
-import { codeLifetimeMs, createAuth, tokenFileFor, writeTokenFile } from './token.mjs';
+import { codeLifetimeMs, createAuth, newToken, tokenFileFor, writeTokenFile } from './token.mjs';
 
 const maxRequestBytes = 8 * 1024 * 1024;
 const staticFiles = new Map([
@@ -84,17 +84,16 @@ const port = Number(process.env.PORT ?? 4317);
 const database = process.env.CONTEXT_LEDGER_DB ?? '.context-ledger/ledger.sqlite';
 const store = openStore(database);
 
-// A fresh API token at each start, in a file next to the database (ADR-10). Only the
-// CLI and the MCP adapter read the file; the browser signs in with a one-time code.
-let token;
-try {
-  if (database === ':memory:') throw new Error('no file');
-  token = writeTokenFile(tokenFileFor(database));
-} catch {
-  console.error('Cannot write the access token file next to the database. Set CONTEXT_LEDGER_DB to a file in a folder you own.');
+// A fresh API token at each start, in a file next to the database (ADR-10), written
+// only once the port is ours: a second server that cannot listen never replaces the
+// first one's token. Only the CLI and the MCP adapter read the file; the browser signs
+// in with a one-time code. Requests before the file is written get 503.
+const tokenFile = database === ':memory:' ? undefined : tokenFileFor(database);
+const tokenFailure = 'Cannot write the access token file next to the database. Set CONTEXT_LEDGER_DB to a file in a folder you own.';
+if (!tokenFile) {
+  console.error(tokenFailure);
   process.exit(1);
 }
-// Set once the port is known, before the first request is read.
 let auth;
 const signInHelp = 'Sign in first: run npm run ledger -- login and open the link it prints.';
 
@@ -267,6 +266,14 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, '127.0.0.1', () => {
   const localPort = server.address().port;
+  // The plain token lives only in this callback and in the file; auth keeps its digest.
+  const token = newToken();
+  try {
+    writeTokenFile(tokenFile, token, localPort);
+  } catch {
+    console.error(tokenFailure);
+    process.exit(1);
+  }
   auth = createAuth({ token, port: localPort });
   console.log(`Context Ledger listening at http://127.0.0.1:${localPort}`);
   console.log(`Sign in to the browser app (one use, within ${codeLifetimeMs / 1000} seconds): http://127.0.0.1:${localPort}${'/login?code=' + auth.mintCode()}`);

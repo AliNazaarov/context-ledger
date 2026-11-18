@@ -1,9 +1,11 @@
 // The loopback API token (ADR-10). The server writes a fresh random token next to its
-// database at each start; the CLI and the MCP adapter read it and send it as a bearer
-// token; the browser signs in with a one-time code and then holds a session cookie.
-// The server keeps only SHA-256 digests and compares them in constant time.
+// database at each start, together with the port it listens on; the CLI and the MCP
+// adapter read it and send it as a bearer token, but only to that port; the browser
+// signs in with a one-time code and then holds a session cookie. The server keeps
+// only SHA-256 digests; the bearer check compares digests in constant time, and codes
+// and sessions are looked up by their digests.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, constants, mkdirSync, openSync, rmSync, writeSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,40 +34,79 @@ const newSecret = () => randomBytes(secretBytes).toString('base64url');
 const digest = text => createHash('sha256').update(text, 'utf8').digest();
 const digestKey = text => digest(text).toString('hex');
 
+/** A fresh random token of 32 bytes, base64url. */
+export const newToken = newSecret;
+
+const validPort = port => Number.isInteger(port) && port >= 1 && port <= 65535;
+
 /**
- * Writes a fresh token file and returns the token. An existing file (or link) at the
- * path is removed first and the new one is created exclusively, so a file or link put
- * there in between makes this fail instead of writing through it. Mode 0600 applies on
- * POSIX; on Windows the file takes its folder's ACL.
+ * Writes a token file for a server listening on this port. An existing file (or link)
+ * at the path is removed first and the new one is created exclusively, so a file or
+ * link put there in between makes this fail instead of writing through it. Mode 0600
+ * applies on POSIX; on Windows the file takes its folder's ACL. The folder is trusted:
+ * a folder other users can write to, or a link in the folder path, is not checked.
  */
-export function writeTokenFile(path) {
-  const token = newSecret();
+export function writeTokenFile(path, token, port) {
+  if (!secretPattern.test(token) || !validPort(port)) throw new Error('Invalid token record.');
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   rmSync(path, { force: true });
   const descriptor = openSync(path, 'wx', 0o600);
   try {
-    writeSync(descriptor, token + '\n');
+    writeSync(descriptor, JSON.stringify({ port, token }) + '\n');
   } finally {
     closeSync(descriptor);
   }
-  return token;
 }
 
-/** Reads a client's token, or returns undefined when the file is missing, unreadable or malformed. */
+/**
+ * Reads a token file: { port, token }, or undefined when the file is missing, is not a
+ * regular file (a FIFO cannot block the read), belongs to another user on POSIX, or is
+ * malformed.
+ */
 export async function readTokenFile(path) {
   let file;
   try {
-    file = await open(path, 'r');
+    file = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+    const info = await file.stat();
+    if (!info.isFile() || info.size > maxTokenFileBytes) return undefined;
+    if (typeof process.getuid === 'function' && info.uid !== process.getuid()) return undefined;
     const buffer = Buffer.alloc(maxTokenFileBytes + 1);
     const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
     if (bytesRead > maxTokenFileBytes) return undefined;
-    const token = buffer.subarray(0, bytesRead).toString('utf8').trim();
-    return secretPattern.test(token) ? token : undefined;
+    const record = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'));
+    if (typeof record?.token !== 'string' || !secretPattern.test(record.token) || !validPort(record.port)) return undefined;
+    return { port: record.port, token: record.token };
   } catch {
     return undefined;
   } finally {
     await file?.close().catch(() => {});
   }
+}
+
+/**
+ * What a client sends to the ledger on this port: { token } when the file names that
+ * port, { otherPort } when it names another (the token is then not sent, so a wrong
+ * PORT never hands it to another listener), or {} when there is no readable file.
+ */
+export async function clientToken(port, env = process.env) {
+  const record = await readTokenFile(clientTokenFile(env));
+  if (!record) return {};
+  return record.port === port ? { token: record.token } : { otherPort: record.port };
+}
+
+/**
+ * The token for a ledger URL, for scripts that take one (LEDGER): only for plain http
+ * to 127.0.0.1 or localhost on the port the token file names, else undefined.
+ */
+export async function tokenForUrl(url, env = process.env) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(parsed.hostname)) return undefined;
+  return (await clientToken(Number(parsed.port || 80), env)).token;
 }
 
 /** The value of one cookie in a Cookie header, or undefined. */

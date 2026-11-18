@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
-import { codeLifetimeMs, createAuth, readTokenFile, sessionLifetimeMs, tokenFileFor } from '../src/token.mjs';
+import { codeLifetimeMs, createAuth, readTokenFile, sessionLifetimeMs, tokenFileFor, tokenForUrl } from '../src/token.mjs';
 import { startMcp } from './mcp-client.mjs';
 
 // P1e: the loopback API token (ADR-10). Synthetic data and temporary databases only.
@@ -18,9 +18,12 @@ const cliNoToken = 'Cannot read the Context Ledger access token. Start the ledge
 const refused = 'Context Ledger refused the access token. Check that PORT and CONTEXT_LEDGER_DB match the running ledger.';
 const mcpNoToken = 'Cannot read the Context Ledger access token. Start the ledger with npm start, and give this MCP server the same CONTEXT_LEDGER_DB as the ledger (an absolute path).';
 
-async function startServer(database) {
+// A token file as the server writes it, for a ledger on this port.
+const tokenRecord = (port, token) => JSON.stringify({ port, token }) + '\n';
+
+async function startServer(database, { port: wanted = 0, env = {} } = {}) {
   const child = spawn(process.execPath, ['src/server.mjs'], {
-    env: { ...process.env, PORT: '0', CONTEXT_LEDGER_DB: database },
+    env: { ...process.env, PORT: String(wanted), CONTEXT_LEDGER_DB: database, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
@@ -40,7 +43,7 @@ async function startServer(database) {
   return {
     port,
     origin: `http://127.0.0.1:${port}`,
-    token: await readTokenFile(tokenFileFor(database)),
+    token: (await readTokenFile(tokenFileFor(database)))?.token,
     output: () => output + errors,
     stop: async () => {
       if (child.exitCode === null && child.signalCode === null) {
@@ -84,8 +87,8 @@ async function temporary(t) {
   return {
     directory,
     database: join(directory, 'ledger.sqlite'),
-    start: async database => {
-      const server = await startServer(database ?? join(directory, 'ledger.sqlite'));
+    start: async (database, options) => {
+      const server = await startServer(database ?? join(directory, 'ledger.sqlite'), options);
       servers.push(server);
       return server;
     },
@@ -118,7 +121,7 @@ test('each start writes a fresh 32-byte token next to the database, owner-only, 
   const first = await place.start(nested);
   assert.match(first.token, secret);
   assert.equal(Buffer.from(first.token, 'base64url').length, 32);
-  assert.equal((await readFile(tokenFileFor(nested), 'utf8')), first.token + '\n');
+  assert.equal((await readFile(tokenFileFor(nested), 'utf8')), tokenRecord(first.port, first.token));
   assert.equal(first.output().includes(first.token), false, 'the token is never printed');
   if (process.platform !== 'win32') {
     assert.equal((await stat(tokenFileFor(nested))).mode & 0o777, 0o600);
@@ -242,12 +245,36 @@ test('the browser signs in once with a short-lived code and then uses an HttpOnl
 
   // A code works once; an unknown, malformed, repeated or missing code gives no cookie.
   const linkFailure = { error: 'This sign-in link was already used, has expired or is not valid. Run npm run ledger -- login for a new one.' };
+  const fresh = async () => (await raw(port, { method: 'POST', path: '/api/login', headers: bearer(token) })).body.path.slice('/login?code='.length);
+  const [first, second] = [await fresh(), await fresh()];
   for (const path of [link[2], startLink[2], `/login?code=${'A'.repeat(43)}`, '/login?code=short', '/login', `/login?code=${token}`,
-    `${link[2]}&code=${link[3]}`]) {
+    `/login?code=${first}&code=${second}`]) {
     const again = await raw(port, { path });
     assert.deepEqual({ status: again.status, body: again.body }, { status: 401, body: linkFailure }, path);
     assert.equal(again.headers['set-cookie'], undefined, path);
   }
+  // Two codes in one link are refused without using up either.
+  for (const code of [first, second]) assert.equal((await raw(port, { path: `/login?code=${code}` })).status, 303);
+
+  // A cookie alone can confirm a room proposal only as a same-origin browser request.
+  const party = async (name, text) => (await raw(port, { method: 'POST', path: '/api/import', headers: { Cookie: session, 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ provider: 'claude', source: `${name}.jsonl`, transcript: JSON.stringify({ type: 'user', message: { role: 'user', content: text } }) }) })).body.session;
+  const post = (path, data, headers = {}) => raw(port, { method: 'POST', path, body: JSON.stringify(data),
+    headers: { Cookie: session, 'Content-Type': 'application/json', Origin: origin, ...headers } });
+  const leo = await party('leo', 'Leo plans the synthetic Vela launch.');
+  const ali = await party('ali', 'Ali reviews the synthetic Vela launch.');
+  const packet = (session, name, extra = {}) => ({ version: 2, sessionId: session.id, party: name, nodes: [{ id: 'goal', kind: 'goal', label: 'Vela launch', evidenceLines: [1] }], edges: [], ...extra });
+  const leoGraph = (await post('/api/graphs', packet(leo, 'leo'))).body.graph;
+  const aliGraph = (await post('/api/graphs', packet(ali, 'ali', { links: [{ from: 'goal', graph: leoGraph.id, to: 'goal', type: 'matches' }] }))).body.graph;
+  const room = (await post('/api/rooms', { graphIds: [leoGraph.id, aliGraph.id] })).body.room;
+  const choice = { proposalId: room.proposals[0].id, party: 'leo', choice: 'confirm' };
+  assert.equal((await post(`/api/rooms/${room.id}/decisions`, choice)).status, 403, 'without Sec-Fetch-Site');
+  const decided = await post(`/api/rooms/${room.id}/decisions`, choice, { 'Sec-Fetch-Site': 'same-origin' });
+  assert.equal(decided.status, 200, JSON.stringify(decided.body));
+  assert.equal(decided.body.room.proposals[0].choices.leo, 'confirm');
+  const noCookie = await raw(port, { method: 'POST', path: `/api/rooms/${room.id}/decisions`, body: JSON.stringify(choice),
+    headers: { 'Content-Type': 'application/json', Origin: origin, 'Sec-Fetch-Site': 'same-origin' } });
+  assert.equal(noCookie.status, 401);
 
   // Codes are minted with the token only: not with a cookie, not without anything.
   const withCookie = await raw(port, { method: 'POST', path: '/api/login', headers: { Cookie: session } });
@@ -315,8 +342,13 @@ test('the CLI sends the token from the file named by CONTEXT_LEDGER_DB, and its 
   const malformed = join(place.directory, 'malformed.sqlite');
   await writeFile(tokenFileFor(malformed), 'not a token\n');
   assert.equal((await cli(['search', 'vela'], { ...env, CONTEXT_LEDGER_DB: malformed })).stderr, cliNoToken + '\n');
+  // A token file in the old one-line format, or naming no port, is not a token.
+  await writeFile(tokenFileFor(malformed), 'A'.repeat(43) + '\n');
+  assert.equal((await cli(['search', 'vela'], { ...env, CONTEXT_LEDGER_DB: malformed })).stderr, cliNoToken + '\n');
+  await writeFile(tokenFileFor(malformed), JSON.stringify({ token: 'A'.repeat(43) }));
+  assert.equal((await cli(['search', 'vela'], { ...env, CONTEXT_LEDGER_DB: malformed })).stderr, cliNoToken + '\n');
   const stale = join(place.directory, 'stale.sqlite');
-  await writeFile(tokenFileFor(stale), 'A'.repeat(43) + '\n');
+  await writeFile(tokenFileFor(stale), tokenRecord(server.port, 'A'.repeat(43)));
   const refusedRun = await cli(['search', 'vela'], { ...env, CONTEXT_LEDGER_DB: stale });
   assert.deepEqual({ code: refusedRun.code, stderr: refusedRun.stderr }, { code: 1, stderr: refused + '\n' });
   assert.equal((await cli(['login'], { ...env, CONTEXT_LEDGER_DB: stale })).stderr, refused + '\n');
@@ -333,19 +365,23 @@ test('the CLI sends the token from the file named by CONTEXT_LEDGER_DB, and its 
     `Cannot reach Context Ledger on port ${server.port}. Start it with npm start.\n`);
 });
 
-test('the CLI and the MCP adapter put the file token in the Authorization header', async t => {
-  const place = await temporary(t);
-  const token = 'Z'.repeat(20) + '_-' + 'y'.repeat(21);
-  await writeFile(tokenFileFor(place.database), token + '\r\n');
+async function fakeLedger(t, status = 200) {
   const seen = [];
   const fake = createServer((request, response) => {
     seen.push({ url: request.url, authorization: request.headers.authorization });
-    response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify({ sessions: [] }));
+    response.writeHead(status, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify(status === 200 ? { sessions: [] } : { error: 'Sign in first.' }));
   });
   await new Promise(resolve => fake.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => fake.close(resolve)));
-  const { port } = fake.address();
+  return { seen, port: fake.address().port };
+}
+
+test('the CLI and the MCP adapter put the file token in the Authorization header', async t => {
+  const place = await temporary(t);
+  const token = 'Z'.repeat(20) + '_-' + 'y'.repeat(21);
+  const { seen, port } = await fakeLedger(t);
+  await writeFile(tokenFileFor(place.database), tokenRecord(port, token));
   const searched = await cli(['search', 'vela'], { PORT: String(port), CONTEXT_LEDGER_DB: place.database });
   assert.equal(searched.code, 0, searched.stderr);
   const client = place.mcp(port, { CONTEXT_LEDGER_DB: place.database });
@@ -353,6 +389,82 @@ test('the CLI and the MCP adapter put the file token in the Authorization header
   const result = await client.call(2, 'session_search', { query: 'vela' });
   assert.equal(result.isError, undefined, JSON.stringify(result));
   assert.deepEqual(seen.map(entry => entry.authorization), [`Bearer ${token}`, `Bearer ${token}`]);
+});
+
+test('the CLI and the MCP adapter never send the token to a port its file does not name', async t => {
+  const place = await temporary(t);
+  const token = 'Q'.repeat(43);
+  const { seen, port } = await fakeLedger(t, 401);
+  const ledgerPort = port === 65535 ? port - 1 : port + 1;
+  await writeFile(tokenFileFor(place.database), tokenRecord(ledgerPort, token));
+  const otherPortCli = `The Context Ledger access token is for the ledger on port ${ledgerPort}, so it was not sent. Set PORT to ${ledgerPort}, or use the CONTEXT_LEDGER_DB of the ledger on this port.\n`;
+  const run = await cli(['search', 'vela'], { PORT: String(port), CONTEXT_LEDGER_DB: place.database });
+  assert.deepEqual({ code: run.code, stdout: run.stdout, stderr: run.stderr }, { code: 1, stdout: '', stderr: otherPortCli });
+  const client = place.mcp(port, { CONTEXT_LEDGER_DB: place.database });
+  await client.request(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {} });
+  const result = await client.call(2, 'session_search', { query: 'vela' });
+  assert.deepEqual(result.content, [{ type: 'text', text: `The Context Ledger access token is for the ledger on port ${ledgerPort}, so it was not sent. Set PORT to ${ledgerPort} for this MCP server, or give it the CONTEXT_LEDGER_DB of the ledger on this port.` }]);
+  assert.deepEqual(seen.map(entry => entry.authorization), [undefined, undefined]);
+});
+
+test('scripts that take a ledger URL get the token only for loopback http on the named port', async t => {
+  const place = await temporary(t);
+  await writeFile(tokenFileFor(place.database), tokenRecord(4999, 'W'.repeat(43)));
+  const env = { CONTEXT_LEDGER_DB: place.database };
+  assert.equal(await tokenForUrl('http://127.0.0.1:4999', env), 'W'.repeat(43));
+  assert.equal(await tokenForUrl('http://localhost:4999/', env), 'W'.repeat(43));
+  for (const url of ['http://127.0.0.1:5000', 'https://127.0.0.1:4999', 'http://example.com:4999', 'http://127.0.0.2:4999',
+    'http://[::1]:4999', 'http://127.0.0.1.example.com:4999', 'not a url']) {
+    assert.equal(await tokenForUrl(url, env), undefined, url);
+  }
+});
+
+test('a token file that is a folder, a FIFO or too large is not read', async t => {
+  const place = await temporary(t);
+  const folder = join(place.directory, 'folder.sqlite');
+  await mkdir(tokenFileFor(folder));
+  assert.equal(await readTokenFile(tokenFileFor(folder)), undefined);
+  const large = join(place.directory, 'large.sqlite');
+  await writeFile(tokenFileFor(large), tokenRecord(4317, 'L'.repeat(43)).padEnd(300, ' '));
+  assert.equal(await readTokenFile(tokenFileFor(large)), undefined);
+  if (process.platform !== 'win32') {
+    const fifo = join(place.directory, 'fifo.sqlite');
+    await execute('mkfifo', [tokenFileFor(fifo)]);
+    // Opened without blocking and refused as not a regular file.
+    assert.equal(await readTokenFile(tokenFileFor(fifo)), undefined);
+  }
+});
+
+test('a second server on the same port fails to start and leaves the first one\'s token in place', async t => {
+  const place = await temporary(t);
+  const first = await place.start();
+  const child = spawn(process.execPath, ['src/server.mjs'], { env: { ...process.env, PORT: String(first.port), CONTEXT_LEDGER_DB: place.database }, stdio: ['ignore', 'pipe', 'pipe'] });
+  child.stdout.resume();
+  child.stderr.resume();
+  const [code] = await once(child, 'exit');
+  assert.notEqual(code, 0);
+  assert.deepEqual(await readTokenFile(tokenFileFor(place.database)), { port: first.port, token: first.token });
+  const searched = await cli(['search', 'vela'], { PORT: String(first.port), CONTEXT_LEDGER_DB: place.database });
+  assert.deepEqual({ code: searched.code, stdout: searched.stdout }, { code: 0, stdout: '[]\n' });
+});
+
+test('the latent file reader refuses the token file, by its name and through a link', async t => {
+  const place = await temporary(t);
+  const server = await place.start(undefined, { env: { LATENT_ROOT: place.directory } });
+  const read = paths => raw(server.port, { method: 'POST', path: '/api/latent/files', body: JSON.stringify({ paths }),
+    headers: { ...bearer(server.token), 'Content-Type': 'application/json', Origin: server.origin } });
+  const secretRefusal = { status: 400, body: { error: 'Paths must not name secret files (.env, .git, keys).' } };
+  const direct = await read(['ledger.sqlite.token']);
+  assert.deepEqual({ status: direct.status, body: direct.body }, secretRefusal);
+  try {
+    await symlink(tokenFileFor(place.database), join(place.directory, 'notes.txt'));
+  } catch {
+    t.diagnostic('Symbolic links are not available here; the alias case is not run.');
+    return;
+  }
+  const alias = await read(['notes.txt']);
+  assert.deepEqual({ status: alias.status, body: alias.body }, secretRefusal);
+  assert.equal(JSON.stringify(alias.body).includes(server.token), false);
 });
 
 test('the MCP adapter reads the token on each call and reports a missing or refused token in fixed words', async t => {
@@ -363,15 +475,16 @@ test('the MCP adapter reads the token on each call and reports a missing or refu
   const ok = await client.call(2, 'session_search', { query: 'vela' });
   assert.equal(ok.isError, undefined, JSON.stringify(ok));
 
-  // The adapter outlives a ledger restart: the next call reads the new token.
+  // The same adapter process outlives a ledger restart on the same port: its next call
+  // reads the new token (caching the first token would fail here).
   await server.stop();
-  const restarted = await place.start();
-  const otherPort = place.mcp(restarted.port, { CONTEXT_LEDGER_DB: place.database });
-  await otherPort.request(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {} });
-  assert.equal((await otherPort.call(2, 'session_search', { query: 'vela' })).isError, undefined);
+  const restarted = await place.start(undefined, { port: server.port });
+  assert.notEqual(restarted.token, server.token);
+  const again = await client.call(3, 'session_search', { query: 'vela' });
+  assert.equal(again.isError, undefined, JSON.stringify(again));
 
   const stale = join(place.directory, 'stale.sqlite');
-  await writeFile(tokenFileFor(stale), 'A'.repeat(43) + '\n');
+  await writeFile(tokenFileFor(stale), tokenRecord(restarted.port, 'A'.repeat(43)));
   for (const [env, message] of [[{ CONTEXT_LEDGER_DB: stale }, refused], [{ CONTEXT_LEDGER_DB: join(place.directory, 'none.sqlite') }, mcpNoToken], [{}, mcpNoToken]]) {
     const other = place.mcp(restarted.port, env);
     await other.request(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {} });
@@ -385,7 +498,6 @@ test('the MCP adapter reads the token on each call and reports a missing or refu
 
 test('the CLI prints only a sign-in link of the expected shape, so nothing else from the server reaches the terminal', async t => {
   const place = await temporary(t);
-  await writeFile(tokenFileFor(place.database), 'F'.repeat(43) + '\n');
   const seen = [];
   let answer;
   const fake = createServer((request, response) => {
@@ -395,7 +507,8 @@ test('the CLI prints only a sign-in link of the expected shape, so nothing else 
   });
   await new Promise(resolve => fake.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => fake.close(resolve)));
-  const env = { PORT: String(fake.address().port), CONTEXT_LEDGER_DB: place.database };
+  await writeFile(tokenFileFor(place.database), tokenRecord(fake.address().port, 'F'.repeat(43)));
+  const env ={ PORT: String(fake.address().port), CONTEXT_LEDGER_DB: place.database };
   for (const path of ['/login?code=' + 'a'.repeat(43) + String.fromCodePoint(0x1b) + '[2J', 'https://evil.example/login?code=' + 'a'.repeat(43), '/login?code=short', 42, undefined]) {
     answer = { path };
     const run = await cli(['login'], env);

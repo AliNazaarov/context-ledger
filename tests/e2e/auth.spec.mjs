@@ -18,8 +18,8 @@ test('a browser without a session is told how to sign in; a one-time link signs 
 
   await page.goto(baseURL + path);
   await expect(page).toHaveURL(baseURL + '/');
-  await expect(page.locator('#search-status')).not.toHaveText(signInHelp);
-  await expect(page.locator('#search-status')).not.toHaveText('Searching the archive…');
+  // A successful search: a count or the empty archive, never an error (specs share one database).
+  await expect(page.locator('#search-status')).toHaveText(/^(\d+ transcripts?|The archive is empty\. Add a transcript to get started\.)$/u);
   const cookies = await visitor.cookies();
   expect(cookies).toHaveLength(1);
   expect(cookies[0]).toMatchObject({ name: 'context_ledger_4318', domain: '127.0.0.1', path: '/', httpOnly: true, sameSite: 'Strict' });

@@ -8,7 +8,7 @@ export { expect };
 
 export async function ledgerToken() {
   const database = process.env.CONTEXT_LEDGER_E2E_DB;
-  const token = database && await readTokenFile(tokenFileFor(database));
+  const token = database && (await readTokenFile(tokenFileFor(database)))?.token;
   if (!token) throw new Error('The e2e ledger wrote no readable token file.');
   return token;
 }

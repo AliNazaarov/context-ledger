@@ -4,7 +4,7 @@ import { readTokenFile, tokenFileFor } from '../src/token.mjs';
 
 /** The token of a server started on this database. */
 export async function ledgerToken(database) {
-  const token = await readTokenFile(tokenFileFor(database));
+  const token = (await readTokenFile(tokenFileFor(database)))?.token;
   if (token === undefined) throw new Error('The test server wrote no readable token file.');
   return token;
 }

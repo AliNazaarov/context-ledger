@@ -97,6 +97,10 @@ async function readFiles(root, paths) {
     if (!inside || inside.startsWith('..' + sep) || inside === '..' || isAbsolute(inside)) {
       throw new InputError('Each path must stay inside the latent root.');
     }
+    // A link with an innocent name can still point at .env, a key or the token file.
+    if (isSecretPath(inside.split(sep))) {
+      throw new InputError('Paths must not name secret files (.env, .git, keys).');
+    }
     // Two spellings of one file (SRC/A.JS and src/a.js on Windows) count as a duplicate.
     const key = process.platform === 'win32' ? real.toLowerCase() : real;
     if (seen.has(key)) throw new InputError('Paths must be unique.');
