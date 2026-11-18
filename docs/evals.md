@@ -1386,3 +1386,10 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## P5a — Node suites on three systems (defined 2026-11-17, before the change)
+
+The product is meant to install on Windows, macOS and Linux, but CI ran the Node suites and browser evals on Linux only (the Python checks already run on Linux and Windows).
+
+- **Expected result:** on every push and pull request, `npm run -s test:graph`, `node --test tests/*.test.mjs` and `npx playwright test` pass on `ubuntu-latest`, `windows-latest` and `macos-latest`, each as its own job, so one system failing does not hide the others.
+- **How it is checked:** the CI run on this card's pull request. `tests/*.test.mjs` is expanded by bash on every system, since PowerShell does not expand it.
