@@ -143,6 +143,10 @@ function looksSecret(value) {
   if (/^[0-9]+$/u.test(value)) return false;
   if (/^[A-Za-z]+$/u.test(value)) return value.length >= 24;
   if (/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/u.test(value) && !/[0-9]/u.test(value)) return false;
+  // A snake_case name without digits, such as single_token_id, is code, not a value.
+  if (/^[A-Za-z_]+$/u.test(value) && value.length < 32) return false;
+  // A model's special token, such as <|im_end|>, is not a secret.
+  if (/^<\|[A-Za-z0-9_]{1,32}\|>$/u.test(value)) return false;
   return mixed(value) || /[^A-Za-z0-9]/u.test(value) || value.length >= 24;
 }
 
@@ -180,7 +184,7 @@ function privateKeys(text) {
     // otherwise prose on the same line is left as it was.
     const markerEnd = match.index + match[0].length;
     const padded = runEnd(text, markerEnd, /[ \t]/u);
-    let end = padded === text.length || text[padded] === '\n' || text[padded] === '\r' ? padded : markerEnd;
+    let end = text[padded] === '\n' || (text[padded] === '\r' && text[padded + 1] === '\n') ? padded : markerEnd;
     let blankAllowed = false;
     while (end < text.length) {
       const lineStart = text[end] === '\r' && text[end + 1] === '\n' ? end + 2 : text[end] === '\n' ? end + 1 : -1;
@@ -248,7 +252,11 @@ function candidates(text) {
         // Escapes count only inside a string: a bearer value after a quoted header such as
         // "Authorization": "Bearer …", or inside a quoted whole header such as curl's
         // -H "Authorization: Bearer …". A bare value ends at its first character outside cls.
-        inString = /["']\s{0,8}Bearer\s{1,8}$/iu.test(match[0]) || /["'`]/u.test(text[match.index - 1] ?? '');
+        // Only the bearer rule reads a whole quoted header, and only when the quote opens the
+        // header itself ("Authorization: Bearer …"), not just the field name
+        // ("Authorization": …, already covered by the quote after the colon).
+        inString = rule.kind === 'bearer-token' && (/["']\s{0,8}Bearer\s{1,8}$/iu.test(match[0])
+          || (/["'`]/u.test(text[match.index - 1] ?? '') && !/^Authorization["']/iu.test(match[0])));
         // Reuse the end of the run this start lies in, so nested names in one long run do
         // not each scan its rest again.
         if (cached && cached.cls === cls && cached.inString === inString && start >= cached.from && start < cached.end) end = cached.end;
@@ -258,7 +266,9 @@ function candidates(text) {
         }
       }
       const value = text.slice(start, end);
-      if (value && rule.accept(inString ? decoded(value) : value)) {
+      // A bare value followed by ( is a function call, such as token = make_token(...).
+      const call = !inString && text[end] === '(';
+      if (value && !call && rule.accept(inString ? decoded(value) : value)) {
         all.push({ kind: rule.kind, start, end, rank: 2 + simpleRules.length + index, prefix: 0 });
         pattern.lastIndex = Math.max(pattern.lastIndex, end);
       }

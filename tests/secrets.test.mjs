@@ -633,3 +633,37 @@ test('P4b review 5: padding after a BEGIN marker is kept when prose follows on i
   const lineBreak = `-----BEGIN ${pemType}-----  \n${body('q1W2', 16)}\n-----END ${pemType}-----`;
   assert.equal(redactText(`${lineBreak}\nafter`), '[REDACTED private-key]\nafter');
 });
+
+// Review round 6 regressions.
+
+test('P4b review 6: a quoted field name does not make a bare value a string', () => {
+  const backslash = String.fromCodePoint(92);
+  const escapedComma = `${backslash}u002c`;
+  const first = `"password": abcd1234${escapedComma}TAIL987`;
+  assert.equal(redactText(first), '"password": [REDACTED assigned-secret]');
+  const value = `ab${backslash}c1234`;
+  const second = `"password": ${value} ok`;
+  const [finding] = findSecrets(second);
+  assert.equal(second.slice(finding.start, finding.end), value);
+  assert.equal(redactText(second), '"password": [REDACTED assigned-secret] ok');
+  // A quoted header still reads its value as a string.
+  const header = `"Authorization: Bearer abc${backslash}/def12345xyz"`;
+  assert.equal(redactText(header), '"Authorization: Bearer [REDACTED bearer-token]"');
+});
+
+test('P4b review 6: padding after a BEGIN marker at the end of the text is kept', () => {
+  for (const padding of ['  ', '\t']) {
+    const text = `-----BEGIN ${pemType}-----${padding}`;
+    assert.equal(redactText(text), `[REDACTED private-key]${padding}`);
+  }
+  const crlf = `-----BEGIN ${pemType}-----  \r\n${body('q1W2', 16)}\r\n-----END ${pemType}-----`;
+  assert.equal(redactText(crlf), '[REDACTED private-key]');
+});
+
+test('P4b review 6: code under a secret-like name is not flagged', () => {
+  assert.deepEqual(kinds('token = single_token_id(tokenizer, close)'), []);
+  assert.deepEqual(kinds('token = build_token_from_parts'), []);
+  assert.deepEqual(kinds('{"eos_token": "<|im_end|>", "pad_token": "<|endoftext|>"}'), []);
+  assert.deepEqual(kinds('token = make9token(x)'), [], 'a call is code even with digits');
+  assert.deepEqual(kinds('password = s3cret_Value9'), ['assigned-secret'], 'a value with digits is still flagged');
+});
