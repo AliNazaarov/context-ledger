@@ -235,3 +235,13 @@ Next steps:
 2. G10: a person checks the 82 labels in `evals/handoff/labelled.json`, then live runs (`node evals/handoff/run.mjs --agent claude --model M --runs 10`, the same for codex, then `--summary`). Check token and cost parsing on the first live Claude run.
 3. Still owed from earlier: Ali's review of the runtime changes from cycle 9, the human review of PR #8's schema migration, and Ali's decision on `VLLM_NGRAM=1` (cycle 11).
 4. PR #3 (Ali's draft M0 benchmark, based on `feature/semantic-graph`) was left open: it is Ali's and conflicts with its base.
+
+## Current checkpoint — U2 brand and mascot (2026-11-17)
+
+Branch `ruslan/u2-brand-mascot`. [docs/brand/brand.md](brand/brand.md) is the brand guide: the CTM site's colours (Deep Charcoal, Electric Violet, Acid Lime, Paper), with light (console) and dark (site, video) sets in [tokens.css](brand/tokens.css), each pair checked for WCAG AA contrast. It also sets the quoted and inferred mark colours, the type stacks, and Pip, an original mascot in three poses for the console's idle, working and waiting agents. `tests/brand.test.mjs` checks the colours, the contrast and the SVG rules.
+
+Next steps:
+
+1. Someone on the team signs off on Pip's look.
+2. Once U1 (PR #22) is merged, swap the office module's placeholder figure for the three Pip SVGs by state, and use the tokens in the console's CSS.
+3. U3 (the demo video) can use Pip and the dark set.
