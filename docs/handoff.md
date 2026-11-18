@@ -246,3 +246,12 @@ Branch `codex/g6-product-review`. Codex, the card's owner, reviewed the product 
 - **Board.** P1's design part is done. Its implementation should go back to Ready with a named owner and a first storage test.
 
 The board changes it recommends are left to the card owners; this PR only adds the review.
+
+## Current checkpoint — H7 Windows deadline flake (2026-11-17)
+
+The runtime job on the Windows runner failed at random on PRs that do not touch `runtime/` (#29–#32). Three deadline tests got 502 "Model server timed out." instead of 504. `_Run.call` (`runtime/latent_pool/pool.py`) now decides before each model call whether the read deadline is the shorter limit. If that call then times out, the read returns 504, whatever the clock reads afterwards. The client raises `ModelTimeout` (`runtime/latent_pool/__init__.py`), which is still a 502 with the same message, so the client's own timeout and every other 502 behave as before. Regression tests are in `runtime/tests/test_deadline_clock.py`. Eval and results: H7 in `docs/evals.md`.
+
+Next steps:
+
+1. After this merges, rerun the failed `runtime (windows-latest, Python 3.13)` job on any open PR still red from this flake.
+2. H8 (Backlog): keep each model call inside the read deadline as a whole, not per socket read, and map a deadline-capped connect timeout to 504 instead of 503.
