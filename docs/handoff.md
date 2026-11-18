@@ -235,3 +235,12 @@ Next steps:
 2. G10: a person checks the 82 labels in `evals/handoff/labelled.json`, then live runs (`node evals/handoff/run.mjs --agent claude --model M --runs 10`, the same for codex, then `--summary`). Check token and cost parsing on the first live Claude run.
 3. Still owed from earlier: Ali's review of the runtime changes from cycle 9, the human review of PR #8's schema migration, and Ali's decision on `VLLM_NGRAM=1` (cycle 11).
 4. PR #3 (Ali's draft M0 benchmark, based on `feature/semantic-graph`) was left open: it is Ali's and conflicts with its base.
+
+## Current checkpoint — D2 Capy integration guide (2026-11-17)
+
+Branch `ruslan/d2-capy-guide`. [docs/integrations/capy.md](integrations/capy.md) explains how to add the ledger to Capy as a local (STDIO) MCP server. It works only for threads that run on the computer that runs the ledger, through Capy's desktop app or Dock CLI, because the ledger answers on loopback and Capy runs STDIO servers on the thread's machine. The owner is "Only you", because an Organization server would fail on other members' computers and on cloud machines. `tests/integrations.test.mjs` keeps the guide's key, path, README link and TOML block in step with the code.
+
+Next steps:
+
+1. Someone with a Capy organization follows the guide once and records the result in the D2 eval section, including whether a device thread finds `node` on its `PATH`.
+2. If Capy threads should use the ledger from the cloud, that needs a design decision first: the ledger would then hold transcripts on Capy's machines.

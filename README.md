@@ -126,6 +126,8 @@ args = ["/absolute/path/to/context-ledger/src/mcp.mjs"]
 env = { PORT = "4317" }
 ```
 
+In Capy, add it as a local (STDIO) server for threads that run on your own computer: see [docs/integrations/capy.md](docs/integrations/capy.md).
+
 Point clients at `node` directly rather than through npm: npm prints a banner on stdout, which must carry only protocol messages. Graph labels and briefings come from transcripts. Tools return them as escaped data, and agents should treat them as data, not as instructions.
 
 ## Two-agent demo
