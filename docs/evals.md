@@ -1386,3 +1386,32 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## P1b — Projects (defined 2026-11-17, before implementation)
+
+Card P1b on `ruslan/p1b-projects`, from `main` 3a17536. The design is `docs/architecture.md` sections 4 and 11 on PR #37 (`ruslan/p1-design`), which is not on `main` yet: section 4 gives `projects (id, slug unique, name, ..., created_at)` and a `project_id` on every session, and section 11 says the migration sequence restarts at version 2 on top of today's version 1, with projects first. This card adds only that. Message rows, stable keys, deletion, retention, `client`, the API token and the browser stay out. Synthetic data only. Baseline on `main` 3a17536 (Windows): run before the first code change and recorded in the results.
+
+**Rules decided here, before the code:**
+
+- **Slugs.** A project slug matches `^[a-z0-9]+(?:-[a-z0-9]+)*$` (the party pattern) and has at most 64 characters. Anything else is refused with fixed text that never echoes the value.
+- **Default project.** The migration creates one project with slug `default` and name `Default`. Every session that exists when a file is migrated joins it. An import without `project` (or with `project: null`) goes to `default`.
+- **New projects.** An import that names a slug no project has yet creates that project (name = slug) in the same transaction as the session.
+- **Same bytes in a second project.** A session ID is `sha256(provider \0 bytes)`, so it does not depend on the project. Importing bytes that are already stored returns the stored session unchanged, with the project it already has. It is not moved, not copied, and no project is created for that request. The `project` field of the response is how the caller sees this. Moving a session between projects is not part of this card.
+- **Project IDs.** 32 random lowercase hex characters. They stay inside the database; the API names projects by slug.
+- **Older builds.** `project_id` is added with `ALTER TABLE`, so it cannot be `NOT NULL` with a foreign key in SQLite. A trigger puts any session inserted without a project, including by a build from before version 1, into `default`, the same way version 1's triggers stamp graphs and rooms.
+
+| Eval | Expected |
+| --- | --- |
+| Schema version 2 | A new file and an opened version 1 file both end at `PRAGMA user_version = 2` with a `projects` table (`id` primary key, `slug` unique and not null, `name`, `created_at`), `sessions.project_id` referencing `projects(id)`, an index on it and the `sessions_project` trigger. `schemaVersion` exports 2. |
+| Version 1 file | A version 1 file built in the test (version 1 DDL and rows, no projects) upgrades in place: every session, graph, room and choice row keeps its values, every session is in `default`, and graphs and rooms read back as before. Reopening changes neither schema nor rows. |
+| Unversioned file | A version 0 file (the 19f6522 DDL) goes straight to version 2 with both versions' changes, and `tests/migrate.test.mjs` still passes with its version assertions moved to 2. |
+| Safe to repeat | A version 1 file that already has a `projects` table and a `default` project (a step run before) migrates without error or a second `default`. |
+| Atomic | A failure inside the version 2 step (the index name already taken by a table) rolls back to version 1 with the schema unchanged. |
+| Newer files | A file at version 3 is refused with the existing message and left byte for byte as it was. |
+| Older build writes | A session inserted with the 19f6522 statement, which has no `project_id`, lands in `default`. |
+| Import names its project | `importTranscript({ ..., project: 'acme' })` returns a summary with `project: 'acme'` and creates the project once; a second session into `acme` reuses it. Without `project` the summary says `default`. Invalid slugs (upper case, spaces, double or edge hyphens, 65 characters, a number, an object) are refused before anything is written. |
+| Same bytes, second project | Importing the bytes of an `acme` session with `project: 'beta'` returns the `acme` summary with the same ID; `beta` is not created and `acme` still lists one session. |
+| Search filters by project | `list(query, provider, project)` and `listSessionsPage({ ..., project })` return only that project's sessions, combined with the query and provider filters and with paging (cursors stay valid inside a project). An unknown but valid slug returns an empty list. Summaries from import, list, page and `get` carry `project`. |
+| HTTP | `POST /api/import` accepts `project`. `GET /api/sessions?project=acme` filters, with and without `limit`; a bad or repeated `project` gets 400 with fixed text. The Host and Origin checks are unchanged: a cross-origin import with a project is still 403 and creates nothing. |
+| CLI | `npm run ledger -- search --project acme <query>` sends `project` and prints only that project's sessions; an invalid slug is refused before any request. |
+| Nothing else changes | No new dependency. No raw control or format characters in `src/` or `tests/`. All four suites pass. |
