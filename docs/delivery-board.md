@@ -11,7 +11,7 @@ Claim a card before working on it (AGENTS.md section 2). States: Backlog, Ready,
 | P3 Reviewer UI (wave 3) | Unassigned | — | Node and evidence side by side; approve, edit or reject | Backlog (after P2) |
 | P4 Redaction and signed export (wave 4) | Unassigned | — | Secret scanner, redaction diff, Ed25519 signing, `ledger verify` | Backlog (after P2) |
 | P5 Packaging and launch (wave 5) | Unassigned | — | npx install, cross-OS CI, license key, docs | Backlog |
-| I1 Large-file streaming import | Claude Code (for Ruslan) | `ruslan/i1-file-import` | Real data: 16% of Claude Code sessions exceed the 8 MiB HTTP limit; import from a file path with streaming. A CLI import into today's store, so it does not wait for P1 (G6 review); stacked on I2 because both change the parser | In review |
+| I1 Large-file streaming import | Claude Code (for Ruslan) | PR #35, `ruslan/i1-file-import` | Real data: 16% of Claude Code sessions exceed the 8 MiB HTTP limit; import from a file path with streaming. A CLI import into today's store, so it does not wait for P1 (G6 review); stacked on I2 because both change the parser | In review |
 | I2 Tolerant JSONL parsing | Claude Code (for Ruslan) | PR #33, `ruslan/i2-tolerant-jsonl` | Real data: one corrupt line rejects a whole session; skip and count bad lines instead. Parser only, so it does not wait for P1 (G6 review) | In review |
 | I3 Codex agent-to-agent messages | Unassigned | — | Real data: `response_item/agent_message` records (author/recipient) are dropped | Ready (after P1) |
 | G6 Product review for cycle 4 | Codex | — | Read-only product and eval review | Ready |
