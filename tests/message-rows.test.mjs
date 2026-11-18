@@ -86,6 +86,8 @@ const oldInsertSession = `INSERT INTO sessions (id, provider, source, title, mes
   VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`;
 const sessionColumns = 'id, provider, source, title, message_count, messages, search_text';
 const migrationFailed = 'A stored session has messages that cannot be moved to schema version 3. The file was not changed.';
+const leftoverFailed = 'This ledger already has a messages table or trigger that schema version 3 did not create. ' +
+  'The file was not changed.';
 
 const uuids = ['0b6e7d1a-1111-4222-8333-444455556666', '0b6e7d1a-1111-4222-8333-777788889999', '0b6e7d1a-1111-4222-8333-aaaabbbbcccc'];
 const claudeRecord = (role, text, extra = {}) => JSON.stringify({ type: role, ...extra, message: { role, content: text } });
@@ -284,66 +286,13 @@ test('version 1 and unversioned files go straight to version 3 with the same row
   }
 });
 
-test('the version 3 step is safe to repeat: sessions that already have rows keep them', async t => {
-  const { directory, keep } = await scratchDirectory(t, 'ledger-p1c-repeat-');
-  const fixture = await oldLedger(directory, 2);
-  const partial = new DatabaseSync(fixture.path);
-  partial.exec(`
-    CREATE TABLE messages (
-      id INTEGER PRIMARY KEY,
-      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
-      seq INTEGER NOT NULL, line INTEGER NOT NULL,
-      role TEXT NOT NULL CHECK (role IN ('user', 'assistant')), text_json TEXT NOT NULL, key TEXT NOT NULL,
-      UNIQUE (session_id, key), UNIQUE (session_id, seq)
-    ) STRICT;`);
-  // Rows a step run before wrote for the Codex session, with keys of their own.
-  const insert = partial.prepare('INSERT INTO messages (session_id, seq, line, role, text_json, key) VALUES (?, ?, ?, ?, ?, ?)');
-  insert.run(fixture.ali.id, 0, 1, 'user', JSON.stringify('Ali reviews the Orion outline.'), 'h:kept-one');
-  insert.run(fixture.ali.id, 1, 2, 'assistant', JSON.stringify('Outline approved.'), 'h:kept-two');
-  const json = rows(partial, 'SELECT id, messages FROM sessions ORDER BY rowid');
-  partial.close();
-  // A session with fewer rows than stored messages is not trusted: the step fails.
-  const short = join(directory, 'short.sqlite');
-  await copyFile(fixture.path, short);
-  const cut = new DatabaseSync(short);
-  cut.prepare('DELETE FROM messages WHERE key = ?').run('h:kept-two');
-  cut.close();
-  const shortBytes = await readFile(short);
-  assert.throws(() => openStore(short), { message: migrationFailed });
-  assert.ok((await readFile(short)).equals(shortBytes), 'the short file is unchanged');
-  // Review round 1: the right number of rows with different contents is not trusted either.
-  const changes = [
-    ['another line', "UPDATE messages SET line = 99 WHERE key = 'h:kept-two'"],
-    ['another role', "UPDATE messages SET role = 'user' WHERE key = 'h:kept-two'"],
-    ['another text', `UPDATE messages SET text_json = '${JSON.stringify('Outline rejected.')}' WHERE key = 'h:kept-two'`],
-    ['swapped order', "UPDATE messages SET seq = 1 - seq + 10 WHERE session_id IS NOT NULL; UPDATE messages SET seq = seq - 10"],
-  ];
-  for (const [name, sql] of changes) {
-    const changed = join(directory, `changed-${changes.findIndex(change => change[0] === name)}.sqlite`);
-    await copyFile(fixture.path, changed);
-    const edit = new DatabaseSync(changed);
-    edit.exec(sql);
-    assert.equal(edit.prepare('SELECT count(*) AS n FROM messages').get().n, 2, name);
-    edit.close();
-    const changedBytes = await readFile(changed);
-    assert.throws(() => openStore(changed), { message: migrationFailed }, name);
-    assert.ok((await readFile(changed)).equals(changedBytes), `${name}: the file is unchanged`);
-  }
-
-  const store = openStore(fixture.path);
-  keep(() => store.close());
-  const check = new DatabaseSync(fixture.path);
-  keep(() => check.close());
-  assert.equal(userVersion(check), 3);
-  assert.deepEqual(messageRows(check, fixture.ali.id).map(row => row.key), ['h:kept-one', 'h:kept-two']);
-  assert.deepEqual(messageRows(check, fixture.leo.id), legacyRowsOf(json.find(row => row.id === fixture.leo.id).messages));
-  assert.equal(check.prepare('SELECT count(*) AS n FROM messages').get().n, 5);
-});
-
-test('the step reuses only a messages table of its own shape, replaces only its own trigger and refuses orphan rows', async t => {
-  // Review round 2. A version 2 file may already hold a sessions_messages trigger that
-  // writes nothing, or message rows written with foreign keys off for a missing session.
-  const { directory, keep } = await scratchDirectory(t, 'ledger-p1c-leftovers-');
+test('a file that already has a messages table or a sessions_messages trigger is refused untouched', async t => {
+  // Review rounds 1 to 4. The version 3 step is one transaction, so a file below version 3
+  // never holds a messages table or trigger of its own. Earlier drafts reused such leftovers
+  // when they looked right; each review found a shape that passed and broke something
+  // (wrong rows, no foreign key, a partial unique index, a clause in a comment, a trigger
+  // in another case or on another table). Now any leftover fails the step.
+  const { directory } = await scratchDirectory(t, 'ledger-p1c-leftovers-');
   const fixture = await oldLedger(directory, 2);
   const messagesTable = `
     CREATE TABLE messages (
@@ -353,58 +302,42 @@ test('the step reuses only a messages table of its own shape, replaces only its 
       role TEXT NOT NULL CHECK (role IN ('user', 'assistant')), text_json TEXT NOT NULL, key TEXT NOT NULL,
       UNIQUE (session_id, key), UNIQUE (session_id, seq)
     ) STRICT;`;
-
-  const stale = join(directory, 'stale.sqlite');
-  await copyFile(fixture.path, stale);
-  const setup = new DatabaseSync(stale);
-  setup.exec(`${messagesTable}
-    CREATE TRIGGER sessions_messages AFTER INSERT ON sessions BEGIN SELECT 1; END;`);
-  setup.close();
-  openStore(stale).close();
-  const older = new DatabaseSync(stale);
-  keep(() => older.close());
-  const id = '8'.repeat(64);
-  older.prepare(oldInsertSession).run(id, 'claude', 'old.jsonl', 'Old', 1, JSON.stringify([{ role: 'user', text: 'After the upgrade', line: 1 }]), 'old');
-  assert.deepEqual(messageRows(older, id), [{ seq: 0, line: 1, role: 'user', text: 'After the upgrade', key: 'l:1' }]);
-  const store = openStore(stale);
-  keep(() => store.close());
-  assert.deepEqual(store.get(id).messages.map(message => message.text), ['After the upgrade']);
-
-  const orphaned = join(directory, 'orphaned.sqlite');
-  await copyFile(fixture.path, orphaned);
-  const loose = new DatabaseSync(orphaned, { enableForeignKeyConstraints: false });
-  loose.exec(messagesTable);
-  loose.prepare('INSERT INTO messages (session_id, seq, line, role, text_json, key) VALUES (?, 0, 1, ?, ?, ?)')
-    .run('9'.repeat(64), 'user', JSON.stringify('Nobody'), 'l:1');
-  loose.close();
-  const bytes = await readFile(orphaned);
-  assert.throws(() => openStore(orphaned), { message: migrationFailed });
-  assert.ok((await readFile(orphaned)).equals(bytes), 'the orphaned file is unchanged');
-
-  // Review round 3: a messages table of another shape is not reused, and a trigger of that
-  // name on another table is not dropped. Either fails the step and leaves the file as it was.
-  const key = 'REFERENCES sessions(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED';
+  const rowsFor = (id, texts) => texts.map((text, seq) =>
+    `INSERT INTO messages (session_id, seq, line, role, text_json, key) VALUES ('${id}', ${seq}, ${seq + 1}, '${seq % 2 ? 'assistant' : 'user'}', '${JSON.stringify(text)}', 'h:kept-${seq}');`).join('\n');
+  const aliRows = rowsFor(fixture.ali.id, ['Ali reviews the Orion outline.', 'Outline approved.']);
   const leftovers = [
-    ['no foreign key', messagesTable.replace(key, '')],
-    ['an immediate key', messagesTable.replace(key, 'REFERENCES sessions(id) ON DELETE CASCADE')],
-    ['no cascade', messagesTable.replace(key, 'REFERENCES sessions(id) DEFERRABLE INITIALLY DEFERRED')],
-    ['one unique constraint', messagesTable.replace(', UNIQUE (session_id, seq)', '')],
-    ['no role check', messagesTable.replace(" CHECK (role IN ('user', 'assistant'))", '')],
-    ['not STRICT', messagesTable.replace(') STRICT;', ');')],
-    ['an extra column', messagesTable.replace('key TEXT NOT NULL,', 'key TEXT NOT NULL, extra TEXT,')],
-    ['a trigger on projects', `CREATE TABLE audit (note TEXT);
+    ['the version 3 table, empty', messagesTable],
+    ['the version 3 table with matching rows', `${messagesTable} ${aliRows}`],
+    ['the version 3 table with too few rows', `${messagesTable} ${rowsFor(fixture.ali.id, ['Ali reviews the Orion outline.'])}`],
+    ['rows for a missing session', `PRAGMA foreign_keys = OFF; ${messagesTable} ${rowsFor('9'.repeat(64), ['Nobody'])}`],
+    ['no foreign key', messagesTable.replace('REFERENCES sessions(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED', '')],
+    ['the deferred clause only in a comment', messagesTable.replace('DEFERRABLE INITIALLY DEFERRED,', ', -- DEFERRABLE INITIALLY DEFERRED,\n')],
+    ['partial unique indexes', `CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, seq INTEGER NOT NULL, key TEXT NOT NULL) STRICT;
+      CREATE UNIQUE INDEX messages_key ON messages(session_id, key) WHERE seq < 0;`],
+    ['a trigger on messages', `${messagesTable}
+      CREATE TRIGGER messages_drop AFTER INSERT ON messages BEGIN DELETE FROM messages WHERE id = NEW.id; END;`],
+    ['a view named messages', 'CREATE VIEW messages AS SELECT id AS session_id FROM sessions;'],
+    ['a table named Messages', 'CREATE TABLE Messages (x TEXT);'],
+    ['a no-op sessions_messages trigger', 'CREATE TRIGGER sessions_messages AFTER INSERT ON sessions BEGIN SELECT 1; END;'],
+    ['a sessions_messages trigger on projects', `CREATE TABLE audit (note TEXT);
       CREATE TRIGGER sessions_messages AFTER INSERT ON projects BEGIN INSERT INTO audit VALUES ('project'); END;`],
+    ['SESSIONS_MESSAGES on projects', `CREATE TABLE audit (note TEXT);
+      CREATE TRIGGER SESSIONS_MESSAGES AFTER INSERT ON projects BEGIN INSERT INTO audit VALUES ('project'); END;`],
   ];
   for (const [index, [name, ddl]] of leftovers.entries()) {
-    assert.notEqual(ddl, messagesTable, name);
     const path = join(directory, `leftover-${index}.sqlite`);
     await copyFile(fixture.path, path);
-    const leftover = new DatabaseSync(path);
-    leftover.exec(ddl);
-    leftover.close();
-    const before = await readFile(path);
-    assert.throws(() => openStore(path), { message: migrationFailed }, name);
-    assert.ok((await readFile(path)).equals(before), `${name}: the file is unchanged`);
+    const setup = new DatabaseSync(path);
+    setup.exec(ddl);
+    const shape = schema(setup);
+    setup.close();
+    const bytes = await readFile(path);
+    assert.throws(() => openStore(path), { message: leftoverFailed }, name);
+    assert.ok((await readFile(path)).equals(bytes), `${name}: the file is unchanged`);
+    const after = new DatabaseSync(path);
+    assert.equal(userVersion(after), 2, name);
+    assert.deepEqual(schema(after), shape, name);
+    after.close();
   }
 });
 

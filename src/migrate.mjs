@@ -37,8 +37,7 @@ const unreadableMessages = `
       OR (m.value ->> '$.line') NOT BETWEEN 1 AND 9007199254740991
   ) ELSE 1 END`;
 // Sessions whose rows are not exactly their stored messages: a row missing, extra or
-// different in position, line, role or text. Rows a step run before wrote are kept only
-// when they match; their keys are kept as they are.
+// different in position, line, role or text. The step checks its own copy with it.
 const unmatchedSessions = `
   SELECT count(*) AS n FROM sessions s
   WHERE json_array_length(s.messages) <> (SELECT count(*) FROM messages r WHERE r.session_id = s.id)
@@ -46,30 +45,14 @@ const unmatchedSessions = `
       SELECT 1 FROM messages r WHERE r.session_id = s.id AND r.seq = m.key AND r.line = (m.value ->> '$.line')
         AND r.role = (m.value ->> '$.role') AND r.text_json = (m.value -> '$.text')))`;
 const migrationFailed = 'A stored session has messages that cannot be moved to schema version 3. The file was not changed.';
-
-/**
- * Whether the messages table is the one version 3 defines: its columns, the deferred,
- * cascading key to sessions, the role check, STRICT, and both unique constraints. A
- * table of that name left by another branch is reused only when it is (review round 3).
- */
-function isMessagesTable(database) {
-  const sql = database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages'").get()?.sql ?? '';
-  const shape = {
-    columns: database.prepare('PRAGMA table_info(messages)').all().map(({ name, type, notnull, pk }) => [name, type, notnull, pk]),
-    keys: database.prepare('PRAGMA foreign_key_list(messages)').all().map(row => [row.table, row.from, row.to, row.on_delete]),
-    unique: database.prepare('PRAGMA index_list(messages)').all().filter(index => index.unique === 1)
-      .map(index => database.prepare(`PRAGMA index_info(${JSON.stringify(index.name)})`).all().map(column => column.name).join(','))
-      .sort(),
-  };
-  return JSON.stringify(shape) === JSON.stringify({
-    columns: [['id', 'INTEGER', 0, 1], ['session_id', 'TEXT', 1, 0], ['seq', 'INTEGER', 1, 0], ['line', 'INTEGER', 1, 0],
-      ['role', 'TEXT', 1, 0], ['text_json', 'TEXT', 1, 0], ['key', 'TEXT', 1, 0]],
-    keys: [['sessions', 'session_id', 'id', 'CASCADE']],
-    unique: ['session_id,key', 'session_id,seq'],
-  }) && /REFERENCES\s+sessions\s*\(\s*id\s*\)\s+ON\s+DELETE\s+CASCADE\s+DEFERRABLE\s+INITIALLY\s+DEFERRED\s*,/iu.test(sql)
-    && /CHECK\s*\(\s*role\s+IN\s*\(\s*'user'\s*,\s*'assistant'\s*\)\s*\)/iu.test(sql)
-    && /\)\s*STRICT\s*$/iu.test(sql);
-}
+const leftoverFailed = 'This ledger already has a messages table or trigger that schema version 3 did not create. ' +
+  'The file was not changed.';
+// Objects version 3 creates, or that would act on what it creates, already in the file.
+// The step is one transaction, so a file below version 3 never holds its own: these come
+// from elsewhere, and none of them is reused, replaced or dropped (review rounds 3 and 4).
+const leftovers = `
+  SELECT count(*) AS n FROM sqlite_master
+  WHERE lower(name) IN ('messages', 'sessions_messages') OR lower(tbl_name) = 'messages'`;
 
 const refuseNewer = version => {
   if (version > schemaVersion) {
@@ -89,6 +72,7 @@ export function refuseNewerSchema(database) {
  * sessions go to the default project, which the step creates. Version 3 adds one
  * messages row per turn: each session's JSON messages are copied in order with l:<line>
  * keys, and the step fails unless every session's rows are exactly its stored messages.
+ * A file that already has a messages table or a sessions_messages trigger is refused.
  * A turn's text is kept as a JSON string literal (text_json), which is lossless.
  * Every step checks the schema itself, so it is safe to repeat and does not depend on
  * the order in which other branches add their own steps.
@@ -165,8 +149,9 @@ export function migrate(database, bootstrap = () => {}) {
       `);
     }
     if (version < 3) {
+      if (database.prepare(leftovers).get().n > 0) throw new Error(leftoverFailed);
       database.exec(`
-        CREATE TABLE IF NOT EXISTS messages (
+        CREATE TABLE messages (
           id INTEGER PRIMARY KEY,
           session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
           seq INTEGER NOT NULL,
@@ -178,23 +163,13 @@ export function migrate(database, bootstrap = () => {}) {
           UNIQUE (session_id, seq)
         ) STRICT;
       `);
-      if (!isMessagesTable(database)) throw new Error(migrationFailed);
       if (database.prepare(unreadableMessages).get().n > 0) throw new Error(migrationFailed);
-      // A session that already has rows (a step run before) keeps them.
       // No ORDER BY: seq carries the order, and a sort of every message would hold the
-      // write lock longer on a large ledger (review round 2).
-      database.exec(`${insertRows} ${legacyRows('s.id', 's.messages', 'sessions s, ')}
-        WHERE NOT EXISTS (SELECT 1 FROM messages r WHERE r.session_id = s.id)`);
+      // write lock longer on a large ledger (review round 2). Every row is new, so the
+      // deferred key checks all of them at commit.
+      database.exec(`${insertRows} ${legacyRows('s.id', 's.messages', 'sessions s, ')}`);
       if (database.prepare(unmatchedSessions).get().n > 0) throw new Error(migrationFailed);
-      // Rows left by an earlier run with foreign keys off may name no session; a deferred
-      // key only checks rows written in this transaction.
-      if (database.prepare('PRAGMA foreign_key_check(messages)').all().length > 0) throw new Error(migrationFailed);
-      // Replaced, not kept: a trigger of this name from elsewhere might not write the rows.
-      // One on another table is someone else's, so the step refuses rather than drop it.
-      const trigger = database.prepare("SELECT tbl_name FROM sqlite_master WHERE type = 'trigger' AND name = 'sessions_messages'").get();
-      if (trigger && trigger.tbl_name.toLowerCase() !== 'sessions') throw new Error(migrationFailed);
       database.exec(`
-        DROP TRIGGER IF EXISTS sessions_messages;
         CREATE TRIGGER sessions_messages AFTER INSERT ON sessions
         WHEN NOT EXISTS (SELECT 1 FROM messages WHERE session_id = NEW.id) BEGIN
           ${insertRows} ${legacyRows('NEW.id', 'NEW.messages')} ORDER BY m.key;
