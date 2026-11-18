@@ -22,6 +22,10 @@ test('deleting the open transcript asks first, and cancel keeps it', async ({ pa
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Delete transcript' })).toBeHidden();
   await openFromSearch(page, 'pelican', title);
+  const deletes = [];
+  page.on('request', sent => {
+    if (sent.method() === 'DELETE') deletes.push(sent.url());
+  });
 
   const dialogs = [];
   page.once('dialog', dialog => {
@@ -32,6 +36,7 @@ test('deleting the open transcript asks first, and cancel keeps it', async ({ pa
   expect(dialogs).toEqual(['Delete this transcript from the ledger? This cannot be undone.']);
   await expect(page.getByRole('heading', { name: title })).toBeVisible();
   expect((await request.get(`/api/sessions/${session.id}`)).status()).toBe(200);
+  expect(deletes).toEqual([]);
 
   page.once('dialog', dialog => void dialog.accept());
   await page.getByRole('button', { name: 'Delete transcript' }).click();
@@ -40,6 +45,22 @@ test('deleting the open transcript asks first, and cancel keeps it', async ({ pa
   await expect(page.getByRole('button', { name: 'Delete transcript' })).toBeHidden();
   await expect(page.getByText('No matching transcripts.')).toBeVisible();
   expect((await request.get(`/api/sessions/${session.id}`)).status()).toBe(404);
+  expect(deletes).toEqual([`${baseURL}/api/sessions/${session.id}`]);
+});
+
+test('a refusal message is shown as text, never as markup', async ({ page, request, baseURL }) => {
+  const title = 'Ibis synthetic markup check';
+  const session = await importSession(request, baseURL, 'ibis.jsonl', title);
+  await page.route(`**/api/sessions/${session.id}`, route => (route.request().method() === 'DELETE'
+    ? route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: '<img src=x id=injected><b>bold</b>', graphs: 1 }) })
+    : route.continue()));
+  await page.goto('/');
+  await openFromSearch(page, 'ibis', title);
+  page.once('dialog', dialog => void dialog.accept());
+  await page.getByRole('button', { name: 'Delete transcript' }).click();
+  await expect(page.locator('#reader-status')).toHaveText('Delete failed. <img src=x id=injected><b>bold</b>');
+  await expect(page.locator('#injected, #reader-status b, #reader-status img')).toHaveCount(0);
+  expect((await request.get(`/api/sessions/${session.id}`)).status()).toBe(200);
 });
 
 test('a transcript a graph cites is not deleted, and the reader says why', async ({ page, request, baseURL }) => {

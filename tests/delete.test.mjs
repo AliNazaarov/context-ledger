@@ -6,11 +6,11 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, StatementSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { ConflictError, openStore } from '../src/store.mjs';
+import { ConflictError, InputError, openStore } from '../src/store.mjs';
 
 // P1d, first part: delete one imported session. Synthetic transcripts only, and only
 // temporary or :memory: databases: never .context-ledger/ledger.sqlite.
@@ -118,14 +118,18 @@ test('a deleted session is really gone: search, raw file bytes, journal, and sec
   const title = `${marker} titles the synthetic Corvid file`;
   const bulk = `${marker} bulk evidence line. `.repeat(400);
 
-  // Spy on exec to see the pragma and transaction statements the delete runs.
+  // Spy on exec to see the pragma and transaction statements the delete runs, and to
+  // reach the store's own connection (its first exec is the schema).
   const statements = [];
+  let connection;
   const exec = DatabaseSync.prototype.exec;
   DatabaseSync.prototype.exec = function (sql) {
+    connection ??= this;
     statements.push(sql.trim());
     return exec.call(this, sql);
   };
   t.after(() => { DatabaseSync.prototype.exec = exec; });
+  const pragma = name => Object.values(connection.prepare(`PRAGMA ${name}`).get())[0];
 
   const store = openStore(path);
   const keep = importOne(store, 'keep-corvid.jsonl', 'A kept synthetic Corvid note.');
@@ -134,24 +138,112 @@ test('a deleted session is really gone: search, raw file bytes, journal, and sec
   store.publishGraph(v1(cited, 'Corvid goal'));
   assert.deepEqual(store.list(marker, '').map(row => row.id), [gone.id]);
 
+  // A mode other than the default is put back as it was, after success and refusal.
+  for (const [mode, value] of [['OFF', 0], ['FAST', 2]]) {
+    connection.exec(`PRAGMA secure_delete = ${mode}`);
+    statements.length = 0;
+    assert.throws(() => store.deleteSession(cited.id), ConflictError);
+    assert.deepEqual(statements, ['PRAGMA secure_delete = ON', 'BEGIN IMMEDIATE', 'ROLLBACK', `PRAGMA secure_delete = ${mode}`]);
+    assert.equal(pragma('secure_delete'), value);
+  }
   statements.length = 0;
   assert.equal(store.deleteSession(gone.id), true);
-  assert.deepEqual(statements, ['PRAGMA secure_delete = ON', 'BEGIN IMMEDIATE', 'COMMIT', 'PRAGMA secure_delete = OFF']);
-  statements.length = 0;
-  assert.throws(() => store.deleteSession(cited.id), ConflictError);
-  assert.deepEqual(statements, ['PRAGMA secure_delete = ON', 'BEGIN IMMEDIATE', 'ROLLBACK', 'PRAGMA secure_delete = OFF']);
+  assert.deepEqual(statements, ['PRAGMA secure_delete = ON', 'BEGIN IMMEDIATE', 'COMMIT', 'PRAGMA secure_delete = FAST']);
+  assert.equal(pragma('secure_delete'), 2);
+  connection.exec('PRAGMA secure_delete = OFF');
+
+  // Foreign keys stay on, so the schema itself also refuses a cited delete.
+  assert.equal(pragma('foreign_keys'), 1);
+  assert.throws(() => connection.prepare('DELETE FROM sessions WHERE id = ?').run(cited.id), /FOREIGN KEY constraint failed/u);
 
   assert.deepEqual(store.list(marker, '').map(row => row.id), []);
   assert.deepEqual(store.list('zephyrine bulk', '').map(row => row.id), []);
   assert.deepEqual(store.list('corvid', '').map(row => row.id).sort(), [keep.id, cited.id].sort());
-  store.close();
 
-  const bytes = (await readFile(path)).toString('latin1');
-  for (const text of [marker, 'Xanthorrhoea', 'titles the synthetic', 'bulk evidence line', 'closing line']) {
-    assert.equal(bytes.includes(text), false, `${text} is still in the file`);
+  // Checked while the store is still open, as a running server holds it, and after close.
+  const checkFile = async () => {
+    const bytes = (await readFile(path)).toString('latin1');
+    for (const text of [marker, 'Xanthorrhoea', 'titles the synthetic', 'bulk evidence line', 'closing line']) {
+      assert.equal(bytes.includes(text), false, `${text} is still in the file`);
+    }
+    assert.ok(bytes.includes('A kept synthetic Corvid note.'));
+    assert.deepEqual((await readdir(directory)).sort(), ['ledger.sqlite']);
+  };
+  await checkFile();
+  store.close();
+  await checkFile();
+});
+
+// WAL is the one journal mode stored in the file, so another tool can leave a ledger
+// in it. (PERSIST is per connection, and the ledger never sets it.)
+test('a delete is refused when the database keeps old pages in a WAL', async t => {
+  const directory = await temporaryDirectory(t, 'ledger-delete-journal-');
+  for (const mode of ['wal']) {
+    const path = join(directory, `${mode}.sqlite`);
+    openStore(path).close();
+    const setup = new DatabaseSync(path);
+    assert.equal(setup.prepare(`PRAGMA journal_mode = ${mode}`).get().journal_mode, mode);
+    setup.close();
+
+    const store = openStore(path);
+    const session = importOne(store, `${mode}.jsonl`, `A synthetic ${mode} journal note.`);
+    assert.throws(() => store.deleteSession(session.id), error => {
+      assert.ok(error instanceof ConflictError);
+      assert.equal(error.message, `This ledger database uses journal mode ${mode}, so a delete could leave copies of the transcript in the file. Deleting needs the default rollback journal.`);
+      assert.deepEqual(error.details, { journalMode: mode });
+      return true;
+    });
+    assert.equal(store.get(session.id).id, session.id);
+    // Unknown IDs are still not found, and the refusal left no transaction open.
+    assert.equal(store.deleteSession('e'.repeat(64)), false);
+    store.close();
   }
-  assert.ok(bytes.includes('A kept synthetic Corvid note.'));
-  assert.deepEqual((await readdir(directory)).sort(), ['ledger.sqlite']);
+});
+
+test('a graph published while another connection deletes its session is a 400, not a 500', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'ledger-delete-race-'));
+  const path = join(directory, 'ledger.sqlite');
+  const publisher = openStore(path);
+  const deleter = openStore(path);
+  // One after hook, so both connections close before the file is removed.
+  t.after(async () => {
+    publisher.close();
+    deleter.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const session = importOne(publisher, 'race.jsonl', 'A synthetic race note.');
+
+  // Delete the session from the other connection just before the graph insert runs,
+  // after publishGraph has read and validated the session.
+  const run = StatementSync.prototype.run;
+  StatementSync.prototype.run = function (...args) {
+    if (args[1] === session.id && typeof args[2] === 'string' && args[2].includes('"packet"')) {
+      StatementSync.prototype.run = run;
+      assert.equal(deleter.deleteSession(session.id), true);
+    }
+    return run.apply(this, args);
+  };
+  t.after(() => { StatementSync.prototype.run = run; });
+  assert.throws(() => publisher.publishGraph(v1(session, 'Race goal')), error => {
+    assert.ok(error instanceof InputError);
+    assert.equal(error.message, 'Graph transcript session not found.');
+    return true;
+  });
+  assert.equal(StatementSync.prototype.run, run);
+  assert.deepEqual(publisher.listGraphs({ limit: 10 }).graphs, []);
+});
+
+test('a list cursor on a deleted session is refused, and a restarted listing finds the rest', () => {
+  const store = openStore(':memory:');
+  const sessions = ['one', 'two', 'three'].map(word => importOne(store, `${word}.jsonl`, `Synthetic cursor note ${word}.`));
+  const first = store.listSessionsPage({ query: '', provider: '', limit: 1 });
+  assert.deepEqual(first.sessions.map(row => row.id), [sessions[2].id]);
+  assert.equal(first.next, sessions[2].id);
+  assert.equal(store.deleteSession(first.next), true);
+  assert.throws(() => store.listSessionsPage({ query: '', provider: '', limit: 1, after: first.next }), { message: 'Unknown cursor.' });
+  const restarted = store.listSessionsPage({ query: '', provider: '', limit: 10 });
+  assert.deepEqual(restarted, { sessions: [sessions[1], sessions[0]].map(({ id }) => store.list('', '').find(row => row.id === id)), next: null });
+  store.close();
 });
 
 test('without secure_delete SQLite keeps deleted text in the file, which is why the delete turns it on', async t => {
@@ -237,7 +329,7 @@ test('ledger delete sends one DELETE with the local Origin, and prints only fixe
     for await (const chunk of request) chunks.push(chunk);
     requests.push({ method: request.method, url: request.url, origin: request.headers.origin, body: Buffer.concat(chunks).length });
     response.writeHead(reply.status, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify(reply.body));
+    response.end(reply.raw ?? JSON.stringify(reply.body));
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -264,13 +356,22 @@ test('ledger delete sends one DELETE with the local Origin, and prints only fixe
   await cliFails(port, ['delete', id], 'Context Ledger returned HTTP 403.');
   reply = { status: 404, body: { error: hostile } };
   await cliFails(port, ['delete', id], 'Session not found.');
+  reply = { status: 409, body: { error: hostile, journalMode: hostile } };
+  await cliFails(port, ['delete', id], 'The ledger database does not use the default rollback journal, so the session was not deleted.');
   reply = { status: 200, body: { deleted: 'd'.repeat(64) } };
   await cliFails(port, ['delete', id], 'Context Ledger returned an unexpected response.');
+  // A body that is not JSON: the parse error would quote it, so it is not printed.
+  for (const status of [200, 409]) {
+    reply = { status, raw: hostile };
+    await cliFails(port, ['delete', id], status === 200 ? 'Context Ledger returned an unexpected response.' : 'Context Ledger returned HTTP 409.');
+  }
 });
 
 test('the MCP adapter has no way to delete', async () => {
   const { toolList } = await import('../src/mcp/tools.mjs');
-  assert.equal(toolList.length, 13);
+  // The same thirteen tools as before this card.
+  assert.deepEqual(toolList.map(tool => tool.name), ['session_search', 'session_read', 'graph_schema', 'graph_publish', 'graph_read',
+    'context_for', 'room_open', 'room_read', 'latent_read', 'latent_transfer', 'latent_team', 'graph_list', 'room_list']);
   for (const tool of toolList) {
     assert.doesNotMatch(JSON.stringify(tool), /delet|remov|purg|eras/iu, tool.name);
   }
@@ -283,7 +384,8 @@ test('the MCP adapter has no way to delete', async () => {
 });
 
 test('the files this card changes hold no raw control or format characters', async () => {
-  const files = ['src/errors.mjs', 'src/store.mjs', 'src/server.mjs', 'src/cli.mjs', 'tests/delete.test.mjs', 'tests/routes.test.mjs'];
+  const files = ['src/errors.mjs', 'src/store.mjs', 'src/server.mjs', 'src/cli.mjs', 'tests/delete.test.mjs', 'tests/routes.test.mjs',
+    'tests/e2e/delete.spec.mjs', 'public/app.js', 'public/index.html'];
   for (const file of files) {
     assert.ok(existsSync(join(root, file)), file);
     const text = await readFile(join(root, file), 'utf8');

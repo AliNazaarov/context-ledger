@@ -101,14 +101,24 @@ async function main() {
     }
     if (action === 'delete' && response.status === 409) {
       // Built from the count alone, so no text from the server reaches the terminal.
-      const graphs = (await response.json().catch(() => null))?.graphs;
+      const problem = await response.json().catch(() => null);
+      const graphs = problem?.graphs;
       if (Number.isSafeInteger(graphs) && graphs > 0) {
         throw new Error(`Session is cited by ${graphs} ${graphs === 1 ? 'graph' : 'graphs'}, so it was not deleted.`);
+      }
+      if (problem?.journalMode !== undefined) {
+        throw new Error('The ledger database does not use the default rollback journal, so the session was not deleted.');
       }
     }
     throw new Error(`Context Ledger returned HTTP ${response.status}.`);
   }
-  const data = await response.json();
+  // A JSON parse error quotes the body, which is the server's text: never print it.
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error('Context Ledger returned an unexpected response.');
+  }
   if (action === 'delete') {
     if (data?.deleted !== sessionId) throw new Error('Context Ledger returned an unexpected response.');
     console.log(`Deleted session ${sessionId}.`);

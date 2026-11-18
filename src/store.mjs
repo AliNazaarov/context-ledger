@@ -11,6 +11,10 @@ import { mountRooms } from './rooms.mjs';
 export { ConflictError, InputError };
 
 const secureDeleteModes = ['OFF', 'ON', 'FAST'];
+// Journal modes in which a committed delete leaves no copy of the old pages behind.
+// WAL keeps them in the main file until a checkpoint and in older frames, and PERSIST
+// keeps the journal file, so a delete is refused there. The ledger never sets either.
+const deleteJournalModes = new Set(['delete', 'truncate', 'memory', 'off']);
 
 const summaryColumns = 'id, provider, source, title, message_count AS messageCount';
 const codexContextKinds = new Set([
@@ -268,6 +272,10 @@ export function openStore(path) {
             if (graphs > 0) {
               throw new ConflictError(`This session is cited by ${graphs} ${graphs === 1 ? 'graph' : 'graphs'}, so it cannot be deleted.`, { graphs });
             }
+            const { journal_mode: journalMode } = database.prepare('PRAGMA journal_mode').get();
+            if (!deleteJournalModes.has(journalMode)) {
+              throw new ConflictError(`This ledger database uses journal mode ${journalMode}, so a delete could leave copies of the transcript in the file. Deleting needs the default rollback journal.`, { journalMode });
+            }
             deleted = deleteSessionRow.run(id).changes === 1;
           }
           database.exec('COMMIT');
@@ -298,7 +306,13 @@ export function openStore(path) {
       const canonical = serializeGraphPacket(ordered);
       const id = createHash('sha256').update(canonical).digest('hex');
       const payload = { packet: JSON.parse(canonical), ...derived };
-      insertGraph.run(id, sessionId, JSON.stringify(payload));
+      try {
+        insertGraph.run(id, sessionId, JSON.stringify(payload));
+      } catch (error) {
+        // Another connection deleted the session after it was read above.
+        if (/FOREIGN KEY constraint failed/u.test(error?.message)) throw new InputError('Graph transcript session not found.');
+        throw error;
+      }
       return { id, ...JSON.parse(getGraph.get(id).payload) };
     },
 
