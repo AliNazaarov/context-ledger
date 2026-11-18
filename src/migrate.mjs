@@ -156,12 +156,18 @@ export function migrate(database, bootstrap = () => {}) {
       `);
       if (database.prepare(unreadableMessages).get().n > 0) throw new Error(migrationFailed);
       // A session that already has rows (a step run before) keeps them.
+      // No ORDER BY: seq carries the order, and a sort of every message would hold the
+      // write lock longer on a large ledger (review round 2).
       database.exec(`${insertRows} ${legacyRows('s.id', 's.messages', 'sessions s, ')}
-        WHERE NOT EXISTS (SELECT 1 FROM messages r WHERE r.session_id = s.id)
-        ORDER BY s.rowid, m.key`);
+        WHERE NOT EXISTS (SELECT 1 FROM messages r WHERE r.session_id = s.id)`);
       if (database.prepare(unmatchedSessions).get().n > 0) throw new Error(migrationFailed);
+      // Rows left by an earlier run with foreign keys off may name no session; a deferred
+      // key only checks rows written in this transaction.
+      if (database.prepare('PRAGMA foreign_key_check(messages)').all().length > 0) throw new Error(migrationFailed);
+      // Replaced, not kept: a trigger of this name from elsewhere might not write the rows.
       database.exec(`
-        CREATE TRIGGER IF NOT EXISTS sessions_messages AFTER INSERT ON sessions
+        DROP TRIGGER IF EXISTS sessions_messages;
+        CREATE TRIGGER sessions_messages AFTER INSERT ON sessions
         WHEN NOT EXISTS (SELECT 1 FROM messages WHERE session_id = NEW.id) BEGIN
           ${insertRows} ${legacyRows('NEW.id', 'NEW.messages')} ORDER BY m.key;
         END;

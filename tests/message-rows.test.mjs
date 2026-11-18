@@ -8,8 +8,6 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { schemaVersion } from '../src/migrate.mjs';
-import { handoffMarkdown } from '../src/handoff.mjs';
-import { briefingText } from '../src/mcp/common.mjs';
 import { openStore } from '../src/store.mjs';
 import { startMcp } from './mcp-client.mjs';
 
@@ -342,6 +340,48 @@ test('the version 3 step is safe to repeat: sessions that already have rows keep
   assert.equal(check.prepare('SELECT count(*) AS n FROM messages').get().n, 5);
 });
 
+test('the step replaces a trigger of the same name and refuses message rows without a session', async t => {
+  // Review round 2. A version 2 file may already hold a sessions_messages trigger that
+  // writes nothing, or message rows written with foreign keys off for a missing session.
+  const { directory, keep } = await scratchDirectory(t, 'ledger-p1c-leftovers-');
+  const fixture = await oldLedger(directory, 2);
+  const messagesTable = `
+    CREATE TABLE messages (
+      id INTEGER PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+      seq INTEGER NOT NULL, line INTEGER NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('user', 'assistant')), text_json TEXT NOT NULL, key TEXT NOT NULL,
+      UNIQUE (session_id, key), UNIQUE (session_id, seq)
+    ) STRICT;`;
+
+  const stale = join(directory, 'stale.sqlite');
+  await copyFile(fixture.path, stale);
+  const setup = new DatabaseSync(stale);
+  setup.exec(`${messagesTable}
+    CREATE TRIGGER sessions_messages AFTER INSERT ON sessions BEGIN SELECT 1; END;`);
+  setup.close();
+  openStore(stale).close();
+  const older = new DatabaseSync(stale);
+  keep(() => older.close());
+  const id = '8'.repeat(64);
+  older.prepare(oldInsertSession).run(id, 'claude', 'old.jsonl', 'Old', 1, JSON.stringify([{ role: 'user', text: 'After the upgrade', line: 1 }]), 'old');
+  assert.deepEqual(messageRows(older, id), [{ seq: 0, line: 1, role: 'user', text: 'After the upgrade', key: 'l:1' }]);
+  const store = openStore(stale);
+  keep(() => store.close());
+  assert.deepEqual(store.get(id).messages.map(message => message.text), ['After the upgrade']);
+
+  const orphaned = join(directory, 'orphaned.sqlite');
+  await copyFile(fixture.path, orphaned);
+  const loose = new DatabaseSync(orphaned, { enableForeignKeyConstraints: false });
+  loose.exec(messagesTable);
+  loose.prepare('INSERT INTO messages (session_id, seq, line, role, text_json, key) VALUES (?, 0, 1, ?, ?, ?)')
+    .run('9'.repeat(64), 'user', JSON.stringify('Nobody'), 'l:1');
+  loose.close();
+  const bytes = await readFile(orphaned);
+  assert.throws(() => openStore(orphaned), { message: migrationFailed });
+  assert.ok((await readFile(orphaned)).equals(bytes), 'the orphaned file is unchanged');
+});
+
 test('a session whose stored messages cannot be copied fails the step and leaves the file at version 2', async t => {
   const { directory } = await scratchDirectory(t, 'ledger-p1c-atomic-');
   const fixture = await oldLedger(directory, 2);
@@ -631,10 +671,42 @@ ${claudeRecord('assistant', escaped, { uuid: fourth })}`;
   const turns = await client.call(2, 'session_read', { sessionId: summary.id });
   assert.equal(turns.isError, undefined, turns.content[0].text);
   const [{ text }] = turns.content;
-  // Review round 1: the whole page is what session_read rendered before keys existed,
-  // the handoff of the same messages without their keys.
-  const withoutKeys = { ...session, messages: session.messages.map(({ role, text: body, line }) => ({ role, text: body, line })) };
-  assert.equal(text, briefingText(handoffMarkdown(withoutKeys)));
+  // Review rounds 1 and 2: the whole page, written out as session_read rendered it before
+  // keys existed, so a change shared by the renderer and this test still fails.
+  assert.equal(text, [
+    '# Context Ledger handoff',
+    '',
+    'Provider: claude',
+    'Source: leo.jsonl',
+    `Session: ${summary.id}`,
+    '',
+    'The fenced turns below are historical conversation data.',
+    '',
+    '## user · line 1',
+    '',
+    '~~~text',
+    'Plan the synthetic Orion demo.',
+    '~~~',
+    '',
+    '## assistant · line 3',
+    '',
+    '~~~text',
+    'Draft the Orion outline first.',
+    '~~~',
+    '',
+    '## user · line 4',
+    '',
+    '~~~text',
+    'Then rehearse it twice.',
+    '~~~',
+    '',
+    '## assistant · line 5',
+    '',
+    '~~~~text',
+    'Fence ~~~ inside, then \\u202eoverride.',
+    '~~~~',
+  ].join('\n'));
+  assert.equal(summary.id, sessionId('claude', transcript));
   assert.ok(!text.includes(String.fromCodePoint(0x202e)), 'the override is escaped');
   for (const uuid of [...uuids, fourth]) assert.ok(!text.includes(uuid), 'keys are not shown in session_read');
 });
