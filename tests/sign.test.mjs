@@ -1,17 +1,21 @@
 import assert from 'node:assert/strict';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
-import { createPrivateKey, createPublicKey, generateKeyPairSync, sign as edSign, verify as edVerify } from 'node:crypto';
+import {
+  createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign as edSign, verify as edVerify,
+} from 'node:crypto';
 import {
   appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync,
   symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { handoffMarkdown } from '../src/handoff.mjs';
 import {
-  canonicalJson, daclAllowsOnly, keyFingerprint, normalizeFingerprint, verifyBundle, writeBundle,
+  canonicalJson, daclAllowsOnly, generateSigningKey, keyFingerprint, loadSigningKey, normalizeFingerprint, verifyBundle,
+  writeBundle,
 } from '../src/sign.mjs';
 import { openStore } from '../src/store.mjs';
 
@@ -217,7 +221,7 @@ test('a signing key file other users can read is refused on POSIX', { skip: proc
 
 test('the default key file name is ignored by Git', () => {
   for (const path of ['signing-key.pem', 'data/signing-key.pem', '.context-ledger/signing-key.pem',
-    'data/signing-key.pem.0123456789abcdef.tmp']) {
+    'data/signing-key.pem.0123456789abcdef.tmp', 'data/signing-key.pem.a1B2c3/signing-key.pem.0123456789abcdef.tmp']) {
     const result = spawnSync('git', ['check-ignore', '-q', path]);
     if (result.error) return;
     assert.equal(result.status, 0, path);
@@ -872,4 +876,106 @@ test('handoff --sign needs the ledger database and the session in it, and says s
   assert.equal(unknown.code, 1);
   assert.match(unknown.stderr, /^Session not found\.$/m);
   assert.ok(!existsSync(join(folder, 'c')));
+});
+
+// --- Codex review of the security fixes (67d91fc) ---------------------------------------
+
+// Every SID an allow entry names, parsed here rather than with src/sign.mjs.
+const allowedSids = sddl => [...sddl.matchAll(/\(A;[^;]*;[^;]*;[^;]*;[^;]*;([^;)]*)\)/g)].map(match => match[1]);
+const sha256 = path => createHash('sha256').update(readFileSync(path)).digest('hex');
+
+test('daclAllowsOnly refuses entry types and flags it does not know', () => {
+  const me = 'S-1-5-21-1-2-3-1001';
+  for (const type of ['OA', 'XA', 'ZA', 'AU', 'AL', 'ML', 'SP', 'XU']) {
+    assert.equal(daclAllowsOnly('D:PAI(' + type + ';;FA;;;' + me + ')', me), false, type);
+  }
+  for (const flags of ['PX', 'PAIZ', 'NO_ACCESS_CONTROL', 'AI_', 'p']) {
+    assert.equal(daclAllowsOnly('D:' + flags + '(A;;FA;;;' + me + ')', me), false, flags);
+  }
+  assert.equal(daclAllowsOnly('D:PAI(A;;FA;;;' + me + ';(x))', me), false, 'a seventh field');
+  assert.equal(daclAllowsOnly('D:PAR(A;OICI;FA;;;' + me + ')', me), true);
+});
+
+test('keygen on Windows never lets the staging file inherit the data folder\'s list', { skip: !onWindows }, async t => {
+  const folder = tempFolder(t);
+  const data = join(folder, 'data');
+  mkdirSync(data);
+  icacls(data, '/grant', '*' + everyone + ':(OI)(CI)R', '*' + users + ':(OI)(CI)R');
+  const sid = windowsSid();
+  const seen = {};
+  await generateSigningKey(join(data, 'signing-key.pem'), {
+    afterCreate: staging => {
+      seen.parent = dirname(staging);
+      seen.file = savedDacl(t, staging);
+      seen.folder = savedDacl(t, seen.parent);
+    },
+  });
+  assert.notEqual(seen.parent, data, 'the staging file is not created in the data folder itself');
+  assert.equal(dirname(seen.parent), data, 'but beside the key, on the same volume');
+  assert.ok(allowedSids(seen.file).length > 0, seen.file);
+  assert.deepEqual([...new Set(allowedSids(seen.file))], [sid], 'the empty staging file grants this account only');
+  assert.deepEqual(allowedSids(seen.folder), [sid], 'its folder grants this account only');
+  assert.deepEqual(readdirSync(data), ['signing-key.pem'], 'the staging folder is removed');
+  assert.equal(savedDacl(t, join(data, 'signing-key.pem')), 'D:PAI(A;;FA;;;' + sid + ')');
+});
+
+test('the Windows key check refuses a key file replaced between the read and the check', { skip: !onWindows }, async t => {
+  const folder = tempFolder(t);
+  const keyPath = join(folder, 'signing-key.pem');
+  await generateSigningKey(keyPath);
+  // The real key is readable by Everyone; a restricted stand-in is put in its place.
+  icacls(keyPath, '/grant', '*' + everyone + ':R');
+  await assert.rejects(loadSigningKey(keyPath), /Other accounts can read the signing key file\./);
+  const swap = () => {
+    renameSync(keyPath, join(folder, 'aside.pem'));
+    writeFileSync(keyPath, 'Synthetic stand-in.');
+    icacls(keyPath, '/inheritance:r', '/grant:r', '*' + windowsSid() + ':F');
+  };
+  await assert.rejects(loadSigningKey(keyPath, { beforeAclCheck: swap }),
+    /^Error: The signing key file changed while it was being checked\.$/);
+});
+
+test('handoff --sign leaves the ledger database unchanged, and refuses an older schema', async t => {
+  const folder = tempFolder(t);
+  const database = join(folder, 'ledger.sqlite');
+  const env = { CONTEXT_LEDGER_DB: database };
+  assert.equal((await run(['keygen'], env)).code, 0);
+  seedLedger(database);
+
+  const current = sha256(database);
+  assert.equal((await run(['handoff', sessionId, '--sign', join(folder, 'a')], env)).code, 0);
+  assert.equal((await run(['handoff', 'b'.repeat(64), '--sign', join(folder, 'b')], env)).code, 1);
+  assert.equal(sha256(database), current, 'signing and a failed lookup write nothing');
+
+  // A version 0 file, as a build before schema versions wrote it.
+  const older = new DatabaseSync(database);
+  older.exec('PRAGMA user_version = 0');
+  older.close();
+  const before = sha256(database);
+  const refused = await run(['handoff', sessionId, '--sign', join(folder, 'c')], env);
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /^This ledger database has an older schema\. Start Context Ledger once with npm start/m);
+  assert.ok(!existsSync(join(folder, 'c')));
+  assert.equal(sha256(database), before, 'the older file is not migrated');
+
+  const newer = new DatabaseSync(database);
+  newer.exec('PRAGMA user_version = 99');
+  newer.close();
+  const ahead = await run(['handoff', sessionId, '--sign', join(folder, 'd')], env);
+  assert.equal(ahead.code, 1);
+  assert.match(ahead.stderr, /^This ledger database was written by a newer Context Ledger \(schema 99\)\./m);
+});
+
+test('handoff --sign does not create the target of a dangling database symlink', { skip: onWindows }, async t => {
+  const folder = tempFolder(t);
+  const target = join(folder, 'missing', 'ledger.sqlite');
+  mkdirSync(dirname(target));
+  const database = join(folder, 'ledger.sqlite');
+  symlinkSync(target, database);
+  const env = { CONTEXT_LEDGER_DB: database };
+  assert.equal((await run(['keygen'], env)).code, 0);
+  const result = await run(['handoff', sessionId, '--sign', join(folder, 'bundle')], env);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /^Cannot open the ledger database\.$/m);
+  assert.ok(!existsSync(target));
 });

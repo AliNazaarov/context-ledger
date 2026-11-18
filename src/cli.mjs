@@ -112,13 +112,36 @@ async function readLedgerSession(databasePath, sessionId) {
     throw new Error('Cannot open the ledger database.');
   }
   // Loaded only here: node:sqlite prints an experimental warning when it loads.
+  const { DatabaseSync } = await import('node:sqlite');
+  const { schemaVersion } = await import('./migrate.mjs');
+  // openStore creates missing tables and migrates an older file. Signing must not change
+  // the ledger, so read the schema version first with a connection that cannot write or
+  // create a file (a dangling symlink stays dangling), and open the store only when the
+  // file is already at the current version.
+  let version;
+  try {
+    const probe = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      version = probe.prepare('PRAGMA user_version').get().user_version;
+    } finally {
+      probe.close();
+    }
+  } catch {
+    throw new Error('Cannot open the ledger database.');
+  }
+  if (version > schemaVersion) {
+    throw new Error(`This ledger database was written by a newer Context Ledger (schema ${version}). ` +
+      'Use that version or another CONTEXT_LEDGER_DB.');
+  }
+  if (version < schemaVersion) {
+    throw new Error('This ledger database has an older schema. Start Context Ledger once with npm start ' +
+      'to upgrade it, then sign again.');
+  }
   const { openStore } = await import('./store.mjs');
   let store;
   try {
     store = openStore(databasePath);
-  } catch (error) {
-    // The newer-schema refusal is a fixed sentence with a schema number; keep it.
-    if (/^This ledger database was written by a newer Context Ledger \(schema \d+\)\./.test(error?.message)) throw error;
+  } catch {
     throw new Error('Cannot open the ledger database.');
   }
   try {

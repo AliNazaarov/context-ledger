@@ -97,8 +97,11 @@ export function signingKeyPath(env = process.env) {
   return join(dirname(database), 'signing-key.pem');
 }
 
-/** Create an Ed25519 key pair; never replace an existing key. Returns the fingerprint. */
-export async function generateSigningKey(path) {
+/**
+ * Create an Ed25519 key pair; never replace an existing key. Returns the fingerprint.
+ * `hooks.afterCreate` exists only so tests can look at the staging file while it is empty.
+ */
+export async function generateSigningKey(path, hooks = {}) {
   try {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   } catch {
@@ -106,23 +109,43 @@ export async function generateSigningKey(path) {
   }
   if (await exists(path)) throw new Error('A signing key already exists. It was not replaced.');
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-  // Write a temporary file in the same folder, then hard-link it into place: link()
-  // never replaces an existing file, and an interrupted run leaves only the temporary
-  // file, never a partial key under the real name. 0600 where the OS has POSIX modes;
-  // on Windows the access list is restricted to this account (below).
-  const staging = join(dirname(path), basename(path) + '.' + randomBytes(8).toString('hex') + '.tmp');
+  // A new Windows file inherits its folder's access list, and an account that may read
+  // the data folder could open the staging file while it is still empty and keep the
+  // handle. So on Windows the staging file is created inside a new folder, beside the
+  // key on the same volume, that is restricted to this account first: the file inherits
+  // only this account's entry from the moment it exists.
+  let stagingDir;
+  if (process.platform === 'win32') {
+    try {
+      stagingDir = await mkdtemp(join(dirname(path), basename(path) + '.'));
+    } catch {
+      throw new Error('Cannot write the signing key file.');
+    }
+    try {
+      await restrictToCurrentAccount(stagingDir, '(OI)(CI)F');
+    } catch (error) {
+      await rmdir(stagingDir).catch(() => {});
+      throw error;
+    }
+  }
+  // Write a temporary file, then hard-link it into place: link() never replaces an
+  // existing file, and an interrupted run leaves only the temporary file, never a partial
+  // key under the real name. 0600 where the OS has POSIX modes.
+  const staging = join(stagingDir ?? dirname(path), basename(path) + '.' + randomBytes(8).toString('hex') + '.tmp');
   let file;
   try {
     file = await open(staging, 'wx', 0o600);
   } catch {
+    if (stagingDir) await rmdir(stagingDir).catch(() => {});
     throw new Error('Cannot write the signing key file.');
   }
-  // Only a staging file this call created is ever removed.
+  // Only a staging file and folder this call created are ever removed.
   try {
-    // A new Windows file inherits its folder's access list, which can let other accounts
-    // read it. Restrict the still-empty file before any key byte is written. A hard link
-    // shares the file's access list, so the real name never has a wider one.
-    if (process.platform === 'win32') await restrictToCurrentAccount(staging);
+    await hooks.afterCreate?.(staging);
+    // Protect the file's own list too (no inherited entries), so a later change to the
+    // data folder's list cannot reach it. A hard link shares the file's access list, so
+    // the real name never has a wider one.
+    if (process.platform === 'win32') await restrictToCurrentAccount(staging, 'F');
     try {
       await file.writeFile(privateKey.export({ type: 'pkcs8', format: 'pem' }));
       await file.sync();
@@ -143,6 +166,7 @@ export async function generateSigningKey(path) {
   } finally {
     await file?.close().catch(() => {});
     await unlink(staging).catch(() => {});
+    if (stagingDir) await rmdir(stagingDir).catch(() => {});
   }
   return keyFingerprint(publicKey);
 }
@@ -174,14 +198,17 @@ async function readCapped(path, limit, opened) {
       if (bytesRead === 0) break;
       size += bytesRead;
     }
-    return { bytes: buffer.subarray(0, size), tooLarge: size > limit, mode: Number(stat.mode) };
+    return { bytes: buffer.subarray(0, size), tooLarge: size > limit, mode: Number(stat.mode), ino: stat.ino };
   } finally {
     await file.close();
   }
 }
 
-/** Load the Ed25519 private key; refuse a key file other users can read. */
-export async function loadSigningKey(path) {
+/**
+ * Load the Ed25519 private key; refuse a key file other users can read. `hooks.beforeAclCheck`
+ * exists only so tests can change the file between the read and the Windows check.
+ */
+export async function loadSigningKey(path, hooks = {}) {
   let read;
   try {
     read = await readCapped(path, maxPemBytes);
@@ -192,7 +219,7 @@ export async function loadSigningKey(path) {
   if (process.platform !== 'win32' && (read.mode & 0o077) !== 0) {
     throw new Error('Other users can read the signing key file. Restrict it with chmod 600.');
   }
-  if (process.platform === 'win32') await checkCurrentAccountOnly(path);
+  if (process.platform === 'win32') await checkCurrentAccountOnly(path, read.ino, hooks);
   let key;
   try {
     if (read.tooLarge) throw new Error('too large');
@@ -209,26 +236,25 @@ export async function loadSigningKey(path) {
 // SYSTEM and the Administrators group can take any file on Windows, as root can on POSIX,
 // so they do not count as other accounts. SDDL writes them as SY and BA.
 const rootLike = ['SY', 'S-1-5-18', 'BA', 'S-1-5-32-544'];
-const denyAceTypes = new Set(['D', 'OD', 'XD']);
 const sidPattern = /^S-1-\d+(?:-\d+)+$/;
 const keyAccessHelp = 'Other accounts can read the signing key file. Restrict it to your account with ' +
   'icacls <key file> /inheritance:r /grant:r "%USERNAME%:F" (see docs/signed-handoff.md).';
 
 /**
  * True when a DACL in SDDL form, as `icacls /save` writes it, allows access to no account
- * but `sid`, SYSTEM and Administrators. Deny entries are skipped. A null DACL, a form this
- * parser does not know, or an allow entry for any other account (Everyone, Users, another
- * user) gives false, so the check fails closed.
+ * but `sid`, SYSTEM and Administrators. Only the forms a file's list takes are known: the
+ * flags P, AI and AR, and plain allow (A) and deny (D) entries of six fields. Deny entries
+ * are skipped. A null DACL, any other flag or entry type, or an allow entry for any other
+ * account (Everyone, Users, another user) gives false, so the check fails closed.
  */
 export function daclAllowsOnly(sddl, sid) {
-  const match = /^D:([A-Z_]*)((?:\([^()]*\))*)$/.exec(sddl);
-  if (!match || match[1].includes('NO_ACCESS_CONTROL')) return false;
+  const match = /^D:((?:P|AI|AR)*)((?:\([^()]*\))*)$/.exec(sddl);
+  if (!match) return false;
   const allowed = new Set([sid, ...rootLike]);
   for (const [, ace] of match[2].matchAll(/\(([^()]*)\)/g)) {
     const fields = ace.split(';');
-    if (fields.length < 6) return false;
-    if (denyAceTypes.has(fields[0])) continue;
-    if (!allowed.has(fields[5])) return false;
+    if (fields.length !== 6 || (fields[0] !== 'A' && fields[0] !== 'D')) return false;
+    if (fields[0] === 'A' && !allowed.has(fields[5])) return false;
   }
   return true;
 }
@@ -272,11 +298,12 @@ async function readDacl(path, sid) {
   }
 }
 
-// Remove the inherited entries and grant this account alone full control, then check it.
-async function restrictToCurrentAccount(path) {
+// Remove the inherited entries and grant this account alone `grant` (F for a file,
+// (OI)(CI)F for a folder, so new files in it inherit only that), then check the result.
+async function restrictToCurrentAccount(path, grant) {
   try {
     const sid = await currentAccountSid();
-    await runWindowsTool('icacls.exe', [resolve(path), '/inheritance:r', '/grant:r', '*' + sid + ':F']);
+    await runWindowsTool('icacls.exe', [resolve(path), '/inheritance:r', '/grant:r', '*' + sid + ':' + grant]);
     if (daclAllowsOnly(await readDacl(path, sid), sid)) return;
   } catch {
     // Reported below with one fixed message.
@@ -284,14 +311,25 @@ async function restrictToCurrentAccount(path) {
   throw new Error('Cannot restrict the signing key file to your account.');
 }
 
-async function checkCurrentAccountOnly(path) {
+// icacls reads the list by path, after the key was read through its own handle, so the
+// path must name that same file (same file ID) before and after the check. An account
+// that can rename entries in the key's folder could still swap files back and forth in
+// between; such an account can replace the key anyway, so keep that folder private.
+async function checkCurrentAccountOnly(path, ino, hooks) {
   let allowsOnly;
+  let entry;
   try {
     const sid = await currentAccountSid();
+    await hooks.beforeAclCheck?.(path);
+    const before = await lstat(path, { bigint: true });
     allowsOnly = daclAllowsOnly(await readDacl(path, sid), sid);
+    const after = await lstat(path, { bigint: true });
+    entry = { file: before.isFile() && after.isFile(), same: before.ino === ino && after.ino === ino };
   } catch {
     throw new Error('Cannot check which accounts can read the signing key file.');
   }
+  if (!entry.file) throw new Error('The signing key file is not a regular file.');
+  if (!entry.same) throw new Error('The signing key file changed while it was being checked.');
   if (!allowsOnly) throw new Error(keyAccessHelp);
 }
 
