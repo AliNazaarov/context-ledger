@@ -1386,3 +1386,60 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## D3 — T3 Code thread importer (defined 2026-11-17, before code)
+
+D3 imports T3 Code threads into the ledger from a copy of T3's database that the person makes. It reads the copy read-only and never looks for T3's own files. No T3 Code install was used: the layout below comes from T3's public source only, and the test database is built from that source's table definitions with synthetic threads.
+
+### Pinned release and source read
+
+- **Release:** T3 Code `v0.1.10`, commit `7d32075e3757ded707914e2450c3e392a9665765` (2026-11-16), repository `pingdotgg/t3code`. Its database schema head is migration 96, `RepairStaleTitleRegeneration`. For comparison, `v0.1.9` ends at migration 81 and `main` at `c48825322df347d266ab7465332ad490b3bf2aaf` (2026-11-18) at 98; the importer refuses both.
+- **Files read at that commit:**
+  - `apps/server/src/config.ts` (`deriveServerPaths`: the database is `<base-dir>/userdata/statev2.sqlite`)
+  - `apps/server/src/persistence/Migrations.ts` (the migration manifest, 1 to 96) and `apps/server/src/persistence/databaseMigrationHead.ts` (the schema version is the highest `migration_id` in `effect_sql_migrations`)
+  - `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts`, `Migrations/OrchestrationV2/Foundation.ts` and `Migrations/081_ProjectionMessageSearchText.ts` (the tables read and every column added later); migrations 056 to 096 were searched for other changes to those tables, and there are none
+  - `apps/server/src/orchestration-v2/ProjectionStore.ts` (how events write the thread, run, provider-thread and message rows, and that a thread's messages are read `ORDER BY created_at ASC, message_id ASC`)
+  - `apps/server/src/orchestration-v2/messageSearchIndex.ts` and `Migrations/069_ThreadMessageSearch.test.ts` (which messages T3 itself counts as conversation)
+  - `packages/contracts/src/orchestrationV2.ts` (`OrchestrationV2AppThread`, `OrchestrationV2Run`, `OrchestrationV2ProviderThread`, `OrchestrationV2ConversationMessage`), `packages/contracts/src/providerInstance.ts`, `packages/contracts/src/model.ts` (driver names) and `packages/contracts/src/baseSchemas.ts` (IDs)
+  - `docs/user/thread-migration.md` and `.agents/skills/test-t3-app/references/sqlite-fixtures.md`
+
+### The layout at schema 96 (what the importer reads)
+
+- `effect_sql_migrations(migration_id, name, …)`: the schema version.
+- `orchestration_v2_projection_threads`: one row per thread; `thread_id`, `title`, `created_at`, `deleted_at`. `provider_instance_id` names a provider *instance* (a slug the person can choose), not the agent, so it is not used to pick the agent.
+- `orchestration_v2_projection_runs`: one row per run (a user turn and the agent's reply); `thread_id`, `provider_thread_id`, and in `payload_json` the `modelSelection.model` that ran it. `orchestration_v2_projection_run_attempts` also names a `provider_thread_id` per attempt.
+- `orchestration_v2_projection_provider_threads`: the agent's own conversation; `driver` is the agent kind. `claudeAgent` is Claude Code and `codex` is Codex; T3 also has `cursor`, `grok`, `kiro`, `opencode`, `pi`, `acpRegistry` and others.
+- `orchestration_v2_projection_messages`: `message_id`, `thread_id`, `run_id`, `role` (`user`, `assistant` or `system`), `streaming` (0 or 1), `created_at`, and `payload_json` with `text` and `createdBy` (`user`, `agent` or `system`; absent on older rows, which were the user's).
+
+### What the importer does
+
+- `npm run ledger -- import-t3 <copy> [--thread <id>] [--list]`. The path is always given; there is no default and no search for T3's files. A path named `statev2.sqlite` inside a folder named `userdata` is refused as T3's live database. The file is opened with SQLite's read-only flag and `query_only`.
+- **Fail closed on the layout.** The copy must hold `effect_sql_migrations` with highest ID 96, rows 55 `OrchestrationV2` and 96 `RepairStaleTitleRegeneration`, and every table and column above. Anything else is refused with one fixed sentence that names the supported release.
+- **One agent per thread.** The agent is the `driver` of the provider threads named by the thread's runs and run attempts. One `claudeAgent` driver maps to provider `claude`, one `codex` to `codex`. A thread run by another agent, by more than one agent, with a run whose provider thread or driver is missing, or with no run at all (for example a thread copied from T3 V1 without run records) is refused. The ledger's provider list stays Claude Code and Codex, so no schema change.
+- **Messages and line numbers.** A thread's messages are taken in T3's own order (`created_at`, then `message_id`). Message *n* in that order is line *n*, counting every message, so a cited line stays the same message even though system messages, generated notices (`createdBy` other than `user`), unfinished (`streaming = 1`) and empty messages are not imported. A final line carries the T3 thread ID, so two threads with the same text stay two sessions. The lines are written in the mapped provider's JSONL form and sent to the running ledger's `POST /api/import`, so the existing parser and store do the import. The source name is `t3-<thread-id>.jsonl`.
+- **Deleted threads** (`deleted_at` set) are not imported. Thread IDs must be 1 to 128 letters, digits, hyphens or underscores; another form is refused without being shown.
+- **Errors are fixed sentences.** No error echoes a path, an ID from the file, or message text. `--list` prints each thread's ID, agent, model names, importable message count and title through `terminalJson`, which escapes control, format and bidi characters.
+
+### Acceptance
+
+`tests/import-t3.test.mjs` builds a schema-96 database at test time in a temporary folder with `node:sqlite` (no `.sqlite` file is committed), from the `CREATE TABLE` statements of the pinned migrations, filled with synthetic threads:
+
+1. A Claude Code thread imports as provider `claude`, with the user and assistant messages in T3's order, each at the line of its position among all the thread's messages, and source `t3-<id>.jsonl`.
+2. A Codex thread imports as provider `codex` the same way.
+3. System messages, generated notices, streaming and empty messages are left out, and the lines of the messages after them do not move.
+4. Messages inserted out of `created_at` order come back in T3's order, and ties break on `message_id`.
+5. A thread run by Cursor, one run by both Claude Code and Codex, one whose run points at a missing provider thread, and one with no run are each refused with their fixed sentence.
+6. A copy at schema 81 or 98, one with the wrong name at 96, one missing a required column, an empty SQLite file and a file that is not SQLite are each refused, and the message does not contain the path.
+7. A path `…/userdata/statev2.sqlite` is refused before it is opened. The copy's bytes are unchanged after an import.
+8. Two threads with the same messages give two sessions. Importing the same copy twice gives the same session IDs.
+9. A deleted thread is not imported; `--thread` with an unknown or malformed ID is refused with a fixed sentence.
+10. The CLI posts each thread to `/api/import` on its loopback origin, prints escaped JSON, never prints text from a refused thread, and exits 1 when a thread is refused. `--list` needs no server.
+11. Message text with bidi and control characters is stored as written and printed escaped.
+
+The four suites pass. Codex reviews the change read-only against the pinned source; each finding gets a fix with a regression test, and a second round checks the fixes.
+
+### Not checked
+
+- The test database is made from T3's table definitions, not written by T3. A person with T3 Code v0.1.10 installed should make a few synthetic threads with Claude Code and Codex, quit T3, copy `statev2.sqlite`, and run the importer on the copy.
+- Opening a copy in WAL mode read-only can leave `-shm` and `-wal` files beside it. The copy itself is not changed.
+- A copy made while T3 runs may miss what is still in T3's `-wal` file. Quit T3 Code before copying.
