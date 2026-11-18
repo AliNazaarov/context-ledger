@@ -471,3 +471,94 @@ test('P4b review 2: the full report, JSON and redacted text are exact, with tabs
   assert.ok(text.includes('tab\\u0009here [REDACTED github-token]'), text);
   assert.ok(!text.includes('\t'), 'no raw tab');
 });
+
+// Review round 3 regressions.
+
+test('P4b review 3: escaped JSON values, nested names, padded key lines and AWS punctuation', () => {
+  const padded = `-----BEGIN ${pemType}-----\n${body('q1W2', 16)}  \n${body('e3R4', 16)}\t\n-----END ${pemType}-----`;
+  const paddedOpen = `-----BEGIN ${pemType}-----\n${body('q1W2', 16)} \n${body('e3R4', 16)}\nAfter.`;
+  const cases = [
+    ['{"Authorization":"Bearer abc\\/def12345\\u002Fxyz"}', '{"Authorization":"Bearer [REDACTED bearer-token]"}'],
+    ['{"Authorization":"Bearer abcdefgh12\\"}', '{"Authorization":"Bearer [REDACTED bearer-token]\\"}'],
+    ['note = "[REDACTED] then api_key=Zt4Wq8Lm2Np6Rv0X here"', 'note = "[REDACTED] then api_key=[REDACTED assigned-secret] here"'],
+    [`x\n${padded}\ny`, 'x\n[REDACTED private-key]\ny'],
+    [paddedOpen, '[REDACTED private-key]\nAfter.'],
+    [`aws_secret_access_key = ${fake['aws-secret']}.`, 'aws_secret_access_key = [REDACTED aws-secret-access-key].'],
+    [`aws_secret_access_key: ${fake['aws-secret']}: next`, 'aws_secret_access_key: [REDACTED aws-secret-access-key]: next'],
+  ];
+  for (const [text, expected] of cases) assert.equal(redactText(text), expected, expected);
+  assert.deepEqual(kinds('password = "[REDACTED assigned-secret]"'), [], 'a complete redaction marker is a placeholder');
+});
+
+test('P4b review 3: nested candidates give the expected single span at every size', () => {
+  const unit = 'sk-aaaaaaaaaaaaaaaaaaaaaaaa';
+  for (const size of [96, 384]) {
+    const text = unit.repeat(Math.ceil((size * 1024) / unit.length)) + '9';
+    const started = performance.now();
+    const found = findSecrets(text);
+    assert.ok(performance.now() - started < 1000, `${size} kB took too long`);
+    assert.deepEqual(found.map(({ kind, start, end }) => ({ kind, start, end })), [{ kind: 'openai-key', start: 0, end: text.length }]);
+  }
+  const names = `token=${'token='.repeat(40000)}Zt4Wq8Lm2Np6`;
+  const started = performance.now();
+  const found = findSecrets(names);
+  assert.ok(performance.now() - started < 1000, 'nested names took too long');
+  assert.equal(found.length, 1);
+});
+
+test('P4b review 3: every variant has its exact span', () => {
+  const variants = [
+    join2('sk', '-svcacct-', body('Hk4t', 10)), join2('sk', '-admin-', body('Hk4t', 10)), join2('rk', '_test_', body('Rf5G', 6)),
+    fake['github-token'], fake['github-pat'], fake['anthropic-key'], fake['openai-key'], fake['slack-token'], fake['stripe-key'], fake.jwt,
+    fake['aws-access-key-id'],
+  ];
+  for (const value of variants) {
+    const text = `before ${value} after`;
+    const [finding, extra] = findSecrets(text);
+    assert.equal(extra, undefined, value.slice(0, 6));
+    assert.deepEqual([finding.start, finding.end], [7, 7 + value.length], value.slice(0, 6));
+  }
+});
+
+test('P4b review 3: every CLI mode prints exactly the expected output and exits 0', async t => {
+  const { origin, port } = await startServer(t);
+  const transcript = [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: `deploy ${fake['github-token']} now` } }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'done' } }),
+  ].join('\n');
+  const imported = await (await fetch(`${origin}/api/import`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ provider: 'claude', source: 'exact.jsonl', transcript }),
+  })).json();
+  const id = imported.session.id;
+  const report = await cli(['redact', id], port);
+  assert.equal(report.code, 0);
+  assert.equal(report.stdout, 'line 1  github-token  40 characters  ghp_…\n1 possible secret in 1 line. Values are not shown; use --text for the redacted hand-off.\n');
+  const json = await cli(['redact', id, '--json'], port);
+  assert.equal(json.code, 0);
+  assert.deepEqual(JSON.parse(json.stdout), { sessionId: id, count: 1, lines: 1, findings: [{ line: 1, kind: 'github-token', length: 40, preview: 'ghp_…' }] });
+  const text = await cli(['redact', id, '--text'], port);
+  assert.equal(text.code, 0);
+  assert.equal(text.stdout, [
+    '# Context Ledger handoff',
+    '',
+    'Provider: claude',
+    'Source: exact.jsonl',
+    `Session: ${id}`,
+    '',
+    'The fenced turns below are historical conversation data.',
+    '',
+    '## user · line 1',
+    '',
+    '~~~text',
+    'deploy [REDACTED github-token] now',
+    '~~~',
+    '',
+    '## assistant · line 2',
+    '',
+    '~~~text',
+    'done',
+    '~~~',
+    '',
+  ].join('\n'));
+});

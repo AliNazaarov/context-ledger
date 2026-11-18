@@ -1456,7 +1456,7 @@ All fixtures are synthetic. The fake credentials are put together at test time f
 
 ### P4b results (2026-11-17)
 
-- `tests/secrets.test.mjs` has 23 tests. Fake credentials are assembled at run time. Running the scanner over every committed file finds no provider-format credential; its only hits are three generic `Authorization: Bearer` examples in the test text.
+- `tests/secrets.test.mjs` has 27 tests. Fake credentials are assembled at run time. Running the scanner over every committed file finds no provider-format credential; its only hits are three generic `Authorization: Bearer` examples in the test text.
 - **Codex, round 1** (of 742b071): three high, four medium and three low findings, all fixed with tests:
   - (high) Overlapping matches kept only one span, so part of an enclosing bearer value could stay visible. Overlaps now merge into one span, and the prefix is hidden unless the labelled match begins it.
   - (high) Length caps could leave the tail of a long value: private keys over 16 KiB, long bearer values, quoted passwords with spaces. Values are now extended by a linear scan to their real end.
@@ -1481,3 +1481,10 @@ All fixtures are synthetic. The fake credentials are put together at test time f
   - (medium) A quoted value ending in a backslash could cross a line break. A backslash no longer escapes a line break, for both LF and CRLF.
   - (low) `--text` kept raw tabs. Tabs are now escaped.
   - (low) The tests now require one exact finding and preview for every variant, and compare the full JSON and redacted text.
+- **Codex, round 3** (of bb04ac8): four high and two low findings, fixed with tests:
+  - (high) A JSON `Authorization` value with an escaped slash was redacted only up to the backslash. Values that can sit in a JSON or quoted string are now read with backslash escapes, stopping at an escaped quote or a line break.
+  - (high) A rejected quoted value hid a real key nested inside it, after its own name. A rejected value is no longer skipped; a cached run end keeps nested names in one run from rescanning it. Only a complete `[REDACTED <kind>]` marker counts as a placeholder.
+  - (high) Trailing spaces or tabs on a private key's lines stopped the scan before its body. Lines are judged without trailing horizontal white space.
+  - (high) An AWS secret followed by a full stop or colon failed its length check. The AWS rule now has its own character class.
+  - (low) The scaling test only checked time. It now checks the exact span at each size and a run of 40,000 nested names.
+  - (low) The exact-finding tests now check spans, and every CLI mode is compared in full, with its exit status.

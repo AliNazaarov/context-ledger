@@ -26,6 +26,22 @@ function runEnd(text, from, cls) {
 }
 
 /**
+ * The end of a run that may contain backslash escapes (a value inside a JSON or quoted
+ * string, such as \/ or \u002F): a backslash and the character after it belong to the
+ * value, unless that character is a line break or a quote.
+ */
+function escapedRunEnd(text, from, cls) {
+  let end = from;
+  while (end < text.length) {
+    // A backslash before a line break or a quote ends the value: the quote closes the string.
+    if (text[end] === '\\' && end + 1 < text.length && !/[\n\r"'`]/u.test(text[end + 1])) end += 2;
+    else if (cls.test(text[end])) end += 1;
+    else break;
+  }
+  return end;
+}
+
+/**
  * The end of a quoted value that starts at from (just inside the quote): the matching
  * unescaped quote, or the end of the line, whichever comes first. A backslash never
  * escapes a line break.
@@ -58,7 +74,7 @@ const simpleRules = [
  * value is then read whole, quoted or not.
  */
 const valueRules = [
-  { kind: 'aws-secret-access-key', lead: /\baws_secret_access_key\b["']?\s{0,8}[:=]\s{0,8}/giu, accept: value => /^[A-Za-z0-9/+=]{40}$/u.test(value) },
+  { kind: 'aws-secret-access-key', lead: /\baws_secret_access_key\b["']?\s{0,8}[:=]\s{0,8}/giu, cls: /[A-Za-z0-9/+=]/u, plain: true, accept: value => /^[A-Za-z0-9/+=]{40}$/u.test(value) },
   // Bearer values of eight characters or more, as a bare header or inside JSON or a
   // quoted string; shorter ones are too likely to be examples.
   { kind: 'bearer-token', lead: /\bAuthorization["']?\s{0,8}:\s{0,8}["']?\s{0,8}Bearer\s{1,8}/giu, cls: /[A-Za-z0-9._~+/=-]/u, accept: value => value.length >= 8 },
@@ -77,7 +93,7 @@ function isPlaceholder(value) {
     || /^%[A-Za-z_][A-Za-z0-9_]*%$/u.test(value)
     // A complete reference to an environment variable, not a value.
     || /^(?:process\.env|import\.meta\.env|os\.environ)(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/u.test(value)
-    || /^\[REDACTED\b/u.test(value)
+    || /^\[REDACTED [a-z-]{1,32}\]$/u.test(value)
     // Identifiers that are not secrets: a UUID, and a 40-character git commit hash.
     || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)
     || /^[0-9a-f]{40}$/iu.test(value);
@@ -132,7 +148,8 @@ function privateKeys(text) {
       if (lineStart === -1) break;
       const newline = text.indexOf('\n', lineStart);
       const lineEnd = newline === -1 ? text.length : text[newline - 1] === '\r' ? newline - 1 : newline;
-      const line = text.slice(lineStart, lineEnd);
+      // Trailing spaces or tabs do not change what a line is; offsets stay the original ones.
+      const line = text.slice(lineStart, lineEnd).replace(/[ \t]+$/u, '');
       if (line === endLine) {
         end = lineEnd;
         break;
@@ -172,6 +189,7 @@ function candidates(text) {
   });
   valueRules.forEach((rule, index) => {
     const pattern = new RegExp(rule.lead.source, rule.lead.flags);
+    let cached = null;
     for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
       let start = match.index + match[0].length;
       let end;
@@ -180,11 +198,21 @@ function candidates(text) {
         start += 1;
         end = quotedEnd(text, start, quote);
       } else {
-        end = runEnd(text, start, rule.cls ?? unquoted);
+        const cls = rule.cls ?? unquoted;
+        // Reuse the end of the run this start lies in, so nested names in one long run do
+        // not each scan its rest again.
+        if (cached && cached.cls === cls && start >= cached.from && start < cached.end) end = cached.end;
+        else {
+          end = rule.plain ? runEnd(text, start, cls) : escapedRunEnd(text, start, cls);
+          cached = { cls, from: start, end };
+        }
       }
       const value = text.slice(start, end);
-      if (value && rule.accept(value)) all.push({ kind: rule.kind, start, end, rank: 2 + simpleRules.length + index, prefix: 0 });
-      pattern.lastIndex = Math.max(pattern.lastIndex, end);
+      if (value && rule.accept(value)) {
+        all.push({ kind: rule.kind, start, end, rank: 2 + simpleRules.length + index, prefix: 0 });
+        pattern.lastIndex = Math.max(pattern.lastIndex, end);
+      }
+      // A rejected value is not skipped: a real secret may sit inside it, after its own name.
     }
   });
   return all;
