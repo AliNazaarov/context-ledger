@@ -301,6 +301,15 @@ test('the version 3 step is safe to repeat: sessions that already have rows keep
   insert.run(fixture.ali.id, 1, 2, 'assistant', 'Outline approved.', 'h:kept-two');
   const json = rows(partial, 'SELECT id, messages FROM sessions ORDER BY rowid');
   partial.close();
+  // A session with fewer rows than stored messages is not trusted: the step fails.
+  const short = join(directory, 'short.sqlite');
+  await copyFile(fixture.path, short);
+  const cut = new DatabaseSync(short);
+  cut.prepare('DELETE FROM messages WHERE key = ?').run('h:kept-two');
+  cut.close();
+  const shortBytes = await readFile(short);
+  assert.throws(() => openStore(short), { message: migrationFailed });
+  assert.ok((await readFile(short)).equals(shortBytes), 'the short file is unchanged');
 
   const store = openStore(fixture.path);
   keep(() => store.close());
