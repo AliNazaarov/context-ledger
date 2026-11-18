@@ -235,3 +235,14 @@ Next steps:
 2. G10: a person checks the 82 labels in `evals/handoff/labelled.json`, then live runs (`node evals/handoff/run.mjs --agent claude --model M --runs 10`, the same for codex, then `--summary`). Check token and cost parsing on the first live Claude run.
 3. Still owed from earlier: Ali's review of the runtime changes from cycle 9, the human review of PR #8's schema migration, and Ali's decision on `VLLM_NGRAM=1` (cycle 11).
 4. PR #3 (Ali's draft M0 benchmark, based on `feature/semantic-graph`) was left open: it is Ali's and conflicts with its base.
+
+## Current checkpoint — D1 T3 Code integration (2026-11-17)
+
+Branch `ruslan/d1-t3code-guide`. [docs/integrations/t3code.md](integrations/t3code.md) explains how T3 Code's Claude and Codex threads get the ledger: T3 runs those CLIs with their own configuration, so the server is registered for them on the environment's machine. Instances with their own `CLAUDE_CONFIG_DIR` or `CODEX_HOME` need it there too. `tests/integrations-t3.test.mjs` keeps the guide's commands and links in step with the code.
+
+The importer half of the card was not built. T3's store is undocumented, and its layout differs between versions (see the D1 eval). It is the new Backlog card D3, blocked on a sample database of a known T3 version.
+
+Next steps:
+
+1. Someone who runs T3 follows the guide and records the result in the D1 eval section, including whether T3's runs write Claude Code and Codex session files that can be imported.
+2. D3, once a sample T3 database exists.
