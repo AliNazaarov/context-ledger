@@ -4,7 +4,7 @@ import { handoffMarkdown } from './handoff.mjs';
 import {
   buildBundle, generateSigningKey, loadSigningKey, normalizeFingerprint, signingKeyPath, verifyBundle, writeBundle,
 } from './sign.mjs';
-import { inlineText, terminalJson } from './text.mjs';
+import { terminalJson, terminalLabel } from './text.mjs';
 
 const usage = 'Usage: npm run ledger -- search [--provider claude|codex] [query]\n' +
   '       npm run ledger -- handoff <session-id> [--sign <new-folder>]\n' +
@@ -34,11 +34,7 @@ function command(argv) {
     }
   }
   if (action === 'search') {
-    const { values, positionals } = parseArgs({
-      args,
-      options: { provider: { type: 'string' } },
-      allowPositionals: true,
-    });
+    const { values, positionals } = options(args, { provider: { type: 'string' } });
     if (values.provider && !['claude', 'codex'].includes(values.provider)) {
       throw new Error('Provider must be claude or codex.');
     }
@@ -143,7 +139,13 @@ async function main() {
     }
     throw new Error(`Context Ledger returned HTTP ${response.status}.`);
   }
-  const data = await response.json();
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    // V8's JSON errors quote the response text, so they are never shown.
+    throw new Error('Context Ledger returned a response that is not JSON.');
+  }
   if (action === 'graph') {
     console.log(terminalJson(data));
     return;
@@ -152,13 +154,14 @@ async function main() {
     if (data.session?.id !== sessionId) throw new Error('Context Ledger returned a different session.');
     const bundle = buildBundle({ sessionId, markdown: handoffMarkdown(data.session) + '\n', privateKey });
     await writeBundle(signDir, bundle);
-    console.log('Signed hand-off written to ' + inlineText(signDir) + '\nKey fingerprint: ' + bundle.fingerprint);
+    console.log('Signed hand-off written to ' + terminalLabel(signDir) + '\nKey fingerprint: ' + bundle.fingerprint);
     return;
   }
   console.log(action === 'search' ? terminalJson(data.sessions) : handoffMarkdown(data.session));
 }
 
 main().catch(error => {
-  console.error(error.message);
+  // Every message is escaped line by line, in case one ever carries outside text.
+  console.error(String(error?.message).split('\n').map(terminalLabel).join('\n'));
   process.exitCode = 1;
 });

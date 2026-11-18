@@ -1,10 +1,13 @@
 // Signed hand-off bundles (card P4a, design ADR-9): raw Ed25519 over an RFC 8785
 // (JCS) manifest of file names, sizes and SHA-256 hashes. The key fingerprint is
 // SHA-256 of the public key's SubjectPublicKeyInfo DER bytes, checked out of band.
-import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto';
-import { mkdir, open, readdir, unlink } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { inlineText } from './text.mjs';
+import {
+  createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign, verify,
+} from 'node:crypto';
+import { constants } from 'node:fs';
+import { link, lstat, mkdir, open, readdir, rmdir, unlink } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
+import { terminalLabel } from './text.mjs';
 
 export const bundleFormat = 'context-ledger-signed-handoff';
 export const handoffFile = 'handoff.md';
@@ -94,35 +97,51 @@ export async function generateSigningKey(path) {
   } catch {
     throw new Error('Cannot create the ledger data folder.');
   }
+  if (await exists(path)) throw new Error('A signing key already exists. It was not replaced.');
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  // Write a temporary file in the same folder, then hard-link it into place: link()
+  // never replaces an existing file, and an interrupted run leaves only the temporary
+  // file, never a partial key under the real name. 0600 where the OS has POSIX modes;
+  // on Windows the file takes the folder's access list instead.
+  const staging = join(dirname(path), basename(path) + '.' + randomBytes(8).toString('hex') + '.tmp');
   let file;
   try {
-    // wx: fail if the file exists. 0600 where the OS has POSIX modes; on Windows the
-    // file takes the folder's access list instead.
-    file = await open(path, 'wx', 0o600);
-  } catch (error) {
-    if (error.code === 'EEXIST') throw new Error('A signing key already exists. It was not replaced.');
-    throw new Error('Cannot create the signing key file.');
-  }
-  try {
+    file = await open(staging, 'wx', 0o600);
     await file.writeFile(privateKey.export({ type: 'pkcs8', format: 'pem' }));
     await file.sync();
-  } catch {
-    await file.close().catch(() => {});
+    await file.close();
     file = undefined;
-    await unlink(path).catch(() => {});
+    await link(staging, path);
+  } catch (error) {
+    if (error.code === 'EEXIST') throw new Error('A signing key already exists. It was not replaced.');
     throw new Error('Cannot write the signing key file.');
   } finally {
-    await file?.close();
+    await file?.close().catch(() => {});
+    await unlink(staging).catch(() => {});
   }
   return keyFingerprint(publicKey);
 }
 
-async function readCapped(path, limit) {
-  const file = await open(path, 'r');
+async function exists(path) {
   try {
-    const stat = await file.stat();
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw new Error('Cannot check the signing key file.');
+  }
+}
+
+// O_NOFOLLOW refuses a symlink swapped in after the folder was listed (POSIX only), and
+// O_NONBLOCK keeps a FIFO swapped in from blocking the open.
+const readFlags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+
+async function readCapped(path, limit, opened) {
+  const file = await open(path, readFlags);
+  try {
+    const stat = await file.stat({ bigint: true });
     if (!stat.isFile()) throw Object.assign(new Error('not a file'), { code: 'ENOTFILE' });
+    opened?.set(basename(path), stat);
     const buffer = Buffer.alloc(limit + 1);
     let size = 0;
     while (size < buffer.length) {
@@ -130,7 +149,7 @@ async function readCapped(path, limit) {
       if (bytesRead === 0) break;
       size += bytesRead;
     }
-    return { bytes: buffer.subarray(0, size), tooLarge: size > limit, mode: stat.mode };
+    return { bytes: buffer.subarray(0, size), tooLarge: size > limit, mode: Number(stat.mode) };
   } finally {
     await file.close();
   }
@@ -198,17 +217,25 @@ export async function writeBundle(outDir, bundle) {
     if (error.code === 'ENOENT') throw new Error('The parent of the output folder does not exist.');
     throw new Error('Cannot create the output folder.');
   }
-  for (const { name, data } of bundle.files) {
-    let file;
-    try {
-      file = await open(join(outDir, name), 'wx', 0o644);
-      await file.writeFile(data);
-      await file.sync();
-    } catch {
-      throw new Error('Cannot write the bundle files.');
-    } finally {
-      await file?.close();
+  const written = [];
+  try {
+    for (const { name, data } of bundle.files) {
+      const path = join(outDir, name);
+      const file = await open(path, 'wx', 0o644);
+      written.push(path);
+      try {
+        await file.writeFile(data);
+        await file.sync();
+      } finally {
+        await file.close();
+      }
     }
+  } catch {
+    // Remove only what this call created. A run killed midway can still leave a partial
+    // folder; verify refuses it, and the sender deletes it and signs again.
+    for (const path of written) await unlink(path).catch(() => {});
+    await rmdir(outDir).catch(() => {});
+    throw new Error('Cannot write the bundle files.');
   }
 }
 
@@ -231,15 +258,14 @@ function checkManifest(manifest) {
   if (typeof manifest.created_at !== 'string' || !createdAtPattern.test(manifest.created_at)) return;
   const created = new Date(manifest.created_at);
   if (Number.isNaN(created.getTime()) || created.toISOString() !== manifest.created_at) return;
-  if (!Array.isArray(manifest.files) || manifest.files.length === 0) return;
-  const names = new Set();
+  // Version 1 has exactly one content file, handoff.md. A later version that adds files
+  // (P4b's redaction report, say) changes the version number.
+  if (!Array.isArray(manifest.files) || manifest.files.length !== 1) return;
   for (const entry of manifest.files) {
     if (!isPlainObject(entry) || !sameKeys(entry, ['bytes', 'name', 'sha256'])) return;
-    if (typeof entry.name !== 'string' || !fileNamePattern.test(entry.name)) return;
-    if (envelopeFiles.includes(entry.name) || names.has(entry.name)) return;
+    if (entry.name !== handoffFile || !fileNamePattern.test(entry.name)) return;
     if (!Number.isSafeInteger(entry.bytes) || entry.bytes < 0) return;
     if (typeof entry.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(entry.sha256)) return;
-    names.add(entry.name);
   }
   if (typeof manifest.public_key !== 'string') return;
   const der = Buffer.from(manifest.public_key, 'base64');
@@ -254,10 +280,12 @@ function checkManifest(manifest) {
   }
 }
 
-async function hashFile(path) {
-  const file = await open(path, 'r');
+async function hashFile(path, opened) {
+  const file = await open(path, readFlags);
   try {
-    if (!(await file.stat()).isFile()) return;
+    const stat = await file.stat({ bigint: true });
+    if (!stat.isFile()) return;
+    opened.set(basename(path), stat);
     const hash = createHash('sha256');
     let bytes = 0;
     for await (const chunk of file.createReadStream({ autoClose: false })) {
@@ -288,8 +316,10 @@ export async function verifyBundle(dir, { fingerprint } = {}) {
     return result;
   }
   const present = new Map(entries.map(entry => [entry.name, entry]));
+  // Identity of every file as it was opened, to check the folder did not change meanwhile.
+  const opened = new Map();
   for (const entry of entries) {
-    if (!entry.isFile()) problems.push('Not a regular file: ' + inlineText(entry.name));
+    if (!entry.isFile()) problems.push('Not a regular file: ' + terminalLabel(entry.name));
   }
   for (const name of envelopeFiles) {
     if (!present.has(name)) problems.push('Missing file: ' + name);
@@ -300,9 +330,9 @@ export async function verifyBundle(dir, { fingerprint } = {}) {
   let signature;
   let pem;
   try {
-    const manifestRead = await readCapped(join(dir, manifestFile), maxManifestBytes);
-    const signatureRead = await readCapped(join(dir, signatureFile), signatureBytes);
-    const pemRead = await readCapped(join(dir, publicKeyFile), maxPemBytes);
+    const manifestRead = await readCapped(join(dir, manifestFile), maxManifestBytes, opened);
+    const signatureRead = await readCapped(join(dir, signatureFile), signatureBytes, opened);
+    const pemRead = await readCapped(join(dir, publicKeyFile), maxPemBytes, opened);
     if (manifestRead.tooLarge) {
       problems.push('The manifest is too large.');
       return result;
@@ -356,7 +386,7 @@ export async function verifyBundle(dir, { fingerprint } = {}) {
   const listed = new Set(manifest.files.map(entry => entry.name));
   for (const entry of entries) {
     if (entry.isFile() && !listed.has(entry.name) && !envelopeFiles.includes(entry.name)) {
-      problems.push('Unexpected file: ' + inlineText(entry.name));
+      problems.push('Unexpected file: ' + terminalLabel(entry.name));
     }
   }
   for (const entry of manifest.files) {
@@ -367,7 +397,7 @@ export async function verifyBundle(dir, { fingerprint } = {}) {
     if (!present.get(entry.name).isFile()) continue;
     let actual;
     try {
-      actual = await hashFile(join(dir, entry.name));
+      actual = await hashFile(join(dir, entry.name), opened);
     } catch {
       actual = undefined;
     }
@@ -375,5 +405,30 @@ export async function verifyBundle(dir, { fingerprint } = {}) {
       problems.push('File changed: ' + entry.name);
     }
   }
+  if (problems.length === 0 && !(await unchangedSince(dir, entries, opened))) {
+    problems.push('The bundle folder changed while it was being verified.');
+  }
   return result;
+}
+
+// List the folder again: the same names, each still the file that was opened. This
+// narrows, but cannot close, the window for a concurrent writer; verify a copy that no
+// one else can write for a strong guarantee.
+async function unchangedSince(dir, entries, opened) {
+  try {
+    const again = await readdir(dir);
+    if (again.length !== entries.length || again.some(name => !opened.has(name))) return false;
+    for (const [name, before] of opened) {
+      // Big integers keep 64-bit file IDs exact. On Windows lstat reports dev 0 while
+      // fstat reports the volume serial, so dev is compared only elsewhere.
+      const now = await lstat(join(dir, name), { bigint: true });
+      if (!now.isFile() || now.ino !== before.ino || now.size !== before.size || now.mtimeNs !== before.mtimeNs) {
+        return false;
+      }
+      if (process.platform !== 'win32' && now.dev !== before.dev) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
