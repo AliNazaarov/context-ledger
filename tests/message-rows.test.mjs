@@ -85,7 +85,12 @@ const versionTwoTrigger = `
 const oldInsertSession = `INSERT INTO sessions (id, provider, source, title, message_count, messages, search_text)
   VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`;
 const sessionColumns = 'id, provider, source, title, message_count, messages, search_text';
-const migrationFailed = 'A stored session has messages that cannot be moved to schema version 3. The file was not changed.';
+// Review of PR #45: the error names the session and says what is wrong, in fixed words.
+const notAnArray = 'its stored messages are not a JSON array';
+const notAMessage = 'a stored message is not an object with a user or assistant role, a string text and a line from 1 to 2^53 - 1';
+const sameLine = 'two stored messages have the same line';
+const migrationFailed = (session, reason) =>
+  `${session} cannot be moved to schema version 3: ${reason}. The migration rolled back, so the file was not changed.`;
 const leftoverFailed = 'This ledger already has a messages table or trigger that schema version 3 did not create. ' +
   'The file was not changed.';
 
@@ -365,26 +370,35 @@ test('a file that already has a messages table or a sessions_messages trigger is
   }
 });
 
-test('a session whose stored messages cannot be copied fails the step and leaves the file at version 2', async t => {
+test('a session whose stored messages cannot be copied fails the step, names the session and leaves the file at version 2', async t => {
+  // Review of PR #45: one bad session used to fail the open with text that named no
+  // session, and two messages on one line surfaced a raw SQLite error. The bad session is
+  // the second one, so the first session's rows were already written when the step failed.
   const { directory } = await scratchDirectory(t, 'ledger-p1c-atomic-');
   const fixture = await oldLedger(directory, 2);
   const turn = { role: 'user', text: 'Synthetic turn', line: 1 };
   const variants = [
-    ['malformed JSON', '[{"role": "user"'],
-    ['an object', JSON.stringify({ messages: [turn] })],
-    ['a number in the array', JSON.stringify([turn, 7])],
-    ['a system role', JSON.stringify([{ ...turn, role: 'system' }])],
-    ['a missing text', JSON.stringify([{ role: 'user', line: 1 }])],
-    ['a numeric text', JSON.stringify([{ ...turn, text: 5 }])],
-    ['line 0', JSON.stringify([{ ...turn, line: 0 }])],
-    ['a string line', JSON.stringify([{ ...turn, line: '1' }])],
-    ['a fractional line', JSON.stringify([{ ...turn, line: 1.5 }])],
-    // Review round 1: lines JavaScript cannot read exactly, including one SQLite reads as REAL.
-    ['line 2^53', JSON.stringify([{ ...turn, line: Number.MAX_SAFE_INTEGER + 1 }])],
-    ['line 2^63', '[{"role": "user", "text": "Synthetic turn", "line": 9223372036854775808}]'],
+    ['malformed JSON', '[{"role": "user"', notAnArray],
+    ['an object', JSON.stringify({ messages: [turn] }), notAnArray],
+    ['an empty value', '', notAnArray],
+    ['a NUL after the array', `${JSON.stringify([turn])}${nul}[]`, notAnArray],
+    ['a number in the array', JSON.stringify([turn, 7]), notAMessage],
+    ['null in the array', JSON.stringify([turn, null]), notAMessage],
+    ['an array in the array', JSON.stringify([turn, [turn]]), notAMessage],
+    ['a system role', JSON.stringify([{ ...turn, role: 'system' }]), notAMessage],
+    ['a missing text', JSON.stringify([{ role: 'user', line: 1 }]), notAMessage],
+    ['a numeric text', JSON.stringify([{ ...turn, text: 5 }]), notAMessage],
+    ['line 0', JSON.stringify([{ ...turn, line: 0 }]), notAMessage],
+    ['a string line', JSON.stringify([{ ...turn, line: '1' }]), notAMessage],
+    ['a fractional line', JSON.stringify([{ ...turn, line: 1.5 }]), notAMessage],
+    // Review round 1: lines JavaScript cannot read exactly.
+    ['line 2^53', JSON.stringify([{ ...turn, line: Number.MAX_SAFE_INTEGER + 1 }]), notAMessage],
+    ['line 2^63', '[{"role": "user", "text": "Synthetic turn", "line": 9223372036854775808}]', notAMessage],
+    // Two stored messages on one line would share a key.
+    ['two messages on one line', JSON.stringify([turn, { ...turn, role: 'assistant' }]), sameLine],
   ];
-  for (const [name, messages] of variants) {
-    const path = join(directory, `atomic-${variants.findIndex(variant => variant[0] === name)}.sqlite`);
+  for (const [index, [name, messages, reason]] of variants.entries()) {
+    const path = join(directory, `atomic-${index}.sqlite`);
     await copyFile(fixture.path, path);
     const setup = new DatabaseSync(path);
     setup.prepare('UPDATE sessions SET messages = ? WHERE id = ?').run(messages, fixture.ali.id);
@@ -392,7 +406,7 @@ test('a session whose stored messages cannot be copied fails the step and leaves
     const sessions = rows(setup, 'SELECT * FROM sessions ORDER BY rowid');
     setup.close();
     const bytes = await readFile(path);
-    assert.throws(() => openStore(path), { message: migrationFailed }, name);
+    assert.throws(() => openStore(path), { message: migrationFailed(`Session ${fixture.ali.id}`, reason) }, name);
     assert.ok((await readFile(path)).equals(bytes), `${name}: the file is unchanged`);
     const after = new DatabaseSync(path);
     assert.equal(userVersion(after), 2, name);
@@ -401,17 +415,82 @@ test('a session whose stored messages cannot be copied fails the step and leaves
     after.close();
   }
 
-  // Two stored messages on one line would share a key: SQLite refuses it, and the step rolls back.
-  const path = join(directory, 'atomic-duplicate.sqlite');
-  await copyFile(fixture.path, path);
-  const setup = new DatabaseSync(path);
-  setup.prepare('UPDATE sessions SET messages = ? WHERE id = ?').run(JSON.stringify([turn, turn]), fixture.ali.id);
+  // Bytes that are not UTF-8 are refused too: the step reads each array as its exact bytes.
+  const notUtf8 = join(directory, 'atomic-not-utf8.sqlite');
+  await copyFile(fixture.path, notUtf8);
+  const setup = new DatabaseSync(notUtf8);
+  setup.prepare("UPDATE sessions SET messages = CAST(x'5b22ff225d' AS TEXT) WHERE id = ?").run(fixture.ali.id);
   setup.close();
-  assert.throws(() => openStore(path), /UNIQUE constraint failed: messages\.session_id, messages\.key/u);
-  const after = new DatabaseSync(path);
-  assert.equal(userVersion(after), 2);
-  assert.deepEqual(rows(after, "SELECT name FROM sqlite_master WHERE name IN ('messages', 'sessions_messages')"), []);
-  after.close();
+  assert.throws(() => openStore(notUtf8), { message: migrationFailed(`Session ${fixture.ali.id}`, notAnArray) });
+
+  // A session whose ID is not 64 hex characters is named by its row, so no stored text is
+  // printed. The ID here holds a newline and a NUL.
+  const oddId = join(directory, 'atomic-odd-id.sqlite');
+  await copyFile(fixture.path, oddId);
+  const odd = new DatabaseSync(oddId);
+  odd.prepare("INSERT INTO sessions (id, provider, source, title, message_count, messages, search_text) VALUES ('odd' || char(10) || 'id' || char(0) || '!', 'claude', 'odd.jsonl', 'Odd', 1, ?, 'odd')")
+    .run(JSON.stringify([{ ...turn, role: 'system' }]));
+  const rowid = odd.prepare("SELECT rowid FROM sessions WHERE id NOT GLOB '[0-9a-f]*'").get().rowid;
+  odd.close();
+  const bytes = await readFile(oddId);
+  assert.throws(() => openStore(oddId), { message: migrationFailed(`The session in row ${rowid}`, notAMessage) });
+  assert.ok((await readFile(oddId)).equals(bytes));
+});
+
+test('a session whose ID is not 64 hex characters migrates with its exact ID', async t => {
+  // Review of PR #45: the copy binds a usual ID from JavaScript and copies any other one
+  // by rowid in SQL, because node:sqlite cuts text at a NUL when it reads it.
+  const { directory, keep } = await scratchDirectory(t, 'ledger-p1c-odd-id-');
+  const fixture = await oldLedger(directory, 2);
+  const setup = new DatabaseSync(fixture.path);
+  const stored = [{ role: 'user', text: 'Odd ID turn', line: 1 }, { role: 'assistant', text: 'Odd ID reply', line: 2 }];
+  setup.prepare("INSERT INTO sessions (id, provider, source, title, message_count, messages, search_text) VALUES ('odd' || char(0) || 'id', 'claude', 'odd.jsonl', 'Odd', 2, ?, 'odd')")
+    .run(JSON.stringify(stored));
+  setup.close();
+  const store = openStore(fixture.path);
+  keep(() => store.close());
+  const check = new DatabaseSync(fixture.path);
+  keep(() => check.close());
+  assert.equal(userVersion(check), 3);
+  assert.deepEqual(rows(check, `SELECT r.seq, r.line, r.role, r.text_json, r.key FROM messages r JOIN sessions s ON s.id = r.session_id
+    WHERE s.id = 'odd' || char(0) || 'id' ORDER BY r.seq`), stored.map(({ role, text, line }, seq) =>
+    ({ seq, line, role, text_json: JSON.stringify(text), key: `l:${line}` })));
+  assert.equal(check.prepare("SELECT count(*) AS n FROM messages WHERE session_id = 'odd'").get().n, 0, 'the ID is not cut at the NUL');
+  for (const session of [fixture.leo, fixture.ali]) {
+    assert.deepEqual(store.get(session.id).messages.map(message => message.key), session.id === fixture.leo.id ? ['l:1', 'l:3', 'l:4'] : ['l:1', 'l:2']);
+  }
+});
+
+test('a migrated session keeps l: keys, while a fresh import of the same bytes gets u: keys', async t => {
+  // Review of PR #45, finding 5, kept as designed (docs/architecture.md section 4): the
+  // stored JSON has no raw lines or UUIDs, so a migrated session's keys are l:<line>, and
+  // they never change. The same bytes in a fresh ledger give the same session ID, lines and
+  // texts with u: keys. Matching sessions across ledgers by key is left to the
+  // provider:uuid card, which links a legacy session to its UUID session.
+  const { directory, keep } = await scratchDirectory(t, 'ledger-p1c-legacy-keys-');
+  const fixture = await oldLedger(directory, 2);
+  const migrated = openStore(fixture.path);
+  keep(() => migrated.close());
+  const fresh = openStore(join(directory, 'fresh.sqlite'));
+  keep(() => fresh.close());
+  const imported = fresh.importTranscript({ provider: 'claude', source: 'leo.jsonl', transcript: leoTranscript });
+  assert.equal(imported.id, fixture.leo.id);
+
+  const legacy = migrated.get(fixture.leo.id).messages;
+  const current = fresh.get(imported.id).messages;
+  assert.deepEqual(legacy.map(message => message.key), ['l:1', 'l:3', 'l:4']);
+  assert.deepEqual(current.map(message => message.key), uuids.map(uuid => `u:${uuid}`));
+  const withoutKey = messages => messages.map(({ role, text, line }) => ({ role, text, line }));
+  assert.deepEqual(withoutKey(legacy), withoutKey(current));
+
+  // Importing the same bytes into the migrated ledger returns the stored session; its keys stay l:.
+  assert.equal(migrated.importTranscript({ provider: 'claude', source: 'leo.jsonl', transcript: leoTranscript }).id, fixture.leo.id);
+  assert.deepEqual(migrated.get(fixture.leo.id).messages, legacy);
+  // A Codex session has no UUIDs: migrated it keeps l: keys, fresh it gets h: keys.
+  const freshAli = fresh.importTranscript({ provider: 'codex', source: 'ali.jsonl', transcript: aliTranscript });
+  assert.deepEqual(migrated.get(fixture.ali.id).messages.map(message => message.key), ['l:1', 'l:2']);
+  assert.deepEqual(fresh.get(freshAli.id).messages.map(message => message.key),
+    aliTranscript.split('\n').map((line, index) => hashKey(freshAli.id, index + 1, line)));
 });
 
 test('a newer file is refused untouched', async t => {

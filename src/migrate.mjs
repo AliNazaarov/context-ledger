@@ -15,36 +15,72 @@ export const defaultProject = 'default';
 
 // Rows for one session's stored JSON messages, keyed by line: the JSON keeps neither raw
 // lines nor record UUIDs, so u: and h: keys cannot be derived from it (docs/evals.md, P1c).
+// The sessions_messages trigger uses it for a session that an older build inserts.
 // text_json is the turn's JSON string literal as stored (->, not ->>), because a round trip
 // through SQLite text loses a NUL and everything after it, and lone surrogates.
-const legacyRows = (sessionId, messages, from = '') => `
+const legacyRows = (sessionId, messages) => `
   SELECT ${sessionId}, m.key, m.value ->> '$.line', m.value ->> '$.role', m.value -> '$.text',
     'l:' || (m.value ->> '$.line')
-  FROM ${from}json_each(${messages}) m`;
+  FROM json_each(${messages}) m`;
 const insertRows = 'INSERT INTO messages (session_id, seq, line, role, text_json, key)';
-// The stored messages of a session that version 3 cannot copy: not a JSON array of
-// { role, text, line } objects with a user or assistant role and a line from 1 to the
-// largest integer JavaScript reads exactly (Number.MAX_SAFE_INTEGER). json_type calls 2^63
-// an integer, but SQLite reads it as REAL 9.2e18, which the bound refuses.
-const unreadableMessages = `
-  SELECT count(*) AS n FROM sessions s
-  WHERE CASE WHEN json_valid(s.messages) THEN json_type(s.messages) <> 'array' OR EXISTS (
-    SELECT 1 FROM json_each(s.messages) m
-    WHERE m.type <> 'object'
-      OR coalesce(json_type(m.value, '$.role'), '') <> 'text' OR (m.value ->> '$.role') NOT IN ('user', 'assistant')
-      OR coalesce(json_type(m.value, '$.text'), '') <> 'text'
-      OR coalesce(json_type(m.value, '$.line'), '') <> 'integer'
-      OR (m.value ->> '$.line') NOT BETWEEN 1 AND 9007199254740991
-  ) ELSE 1 END`;
-// Sessions whose rows are not exactly their stored messages: a row missing, extra or
-// different in position, line, role or text. The step checks its own copy with it.
-const unmatchedSessions = `
-  SELECT count(*) AS n FROM sessions s
-  WHERE json_array_length(s.messages) <> (SELECT count(*) FROM messages r WHERE r.session_id = s.id)
-    OR EXISTS (SELECT 1 FROM json_each(s.messages) m WHERE NOT EXISTS (
-      SELECT 1 FROM messages r WHERE r.session_id = s.id AND r.seq = m.key AND r.line = (m.value ->> '$.line')
-        AND r.role = (m.value ->> '$.role') AND r.text_json = (m.value -> '$.text')))`;
-const migrationFailed = 'A stored session has messages that cannot be moved to schema version 3. The file was not changed.';
+
+// What is wrong with a stored session that version 3 cannot copy, in fixed words that
+// quote none of its content. A line must be from 1 to the largest integer JavaScript
+// reads exactly (Number.MAX_SAFE_INTEGER).
+const notAnArray = 'its stored messages are not a JSON array';
+const notAMessage = 'a stored message is not an object with a user or assistant role, a string text and a line from 1 to 2^53 - 1';
+const sameLine = 'two stored messages have the same line';
+const migrationFailed = (id, rowid, reason) => `${id ? `Session ${id}` : `The session in row ${rowid}`} ` +
+  `cannot be moved to schema version 3: ${reason}. The migration rolled back, so the file was not changed.`;
+const isMessage = message => message !== null && typeof message === 'object' && !Array.isArray(message)
+  && (message.role === 'user' || message.role === 'assistant') && typeof message.text === 'string'
+  && Number.isSafeInteger(message.line) && message.line >= 1;
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
+const parseArray = bytes => {
+  try {
+    const value = JSON.parse(strictUtf8.decode(bytes));
+    return Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Copies every stored session's JSON messages into rows, in array order with l:<line>
+ * keys, in one pass: each array is read once as its exact bytes (node:sqlite cuts text at
+ * a NUL when it reads it), parsed once and checked, and each text is written as a JSON
+ * string literal. The first session that cannot be copied throws, naming the session; the
+ * caller rolls the step back. (Review of PR #45: the SQL copy parsed every turn several
+ * times and checked its own copy again, and its error named no session.)
+ */
+function copyStoredMessages(database) {
+  const insert = database.prepare(`${insertRows} VALUES (?, ?, ?, ?, ?, ?)`);
+  // For an ID that is not 64 hex characters (none that this project writes), SQL copies
+  // the ID by rowid, so one that JavaScript would read inexactly is still copied exactly.
+  // It is slower, so the usual IDs are bound directly.
+  const insertByRow = database.prepare(`${insertRows} SELECT id, ?, ?, ?, ?, ? FROM sessions WHERE rowid = ?`);
+  const select = database.prepare(`SELECT rowid, CASE WHEN length(CAST(id AS BLOB)) = 64 THEN id END AS id,
+    CAST(messages AS BLOB) AS messages FROM sessions ORDER BY rowid`);
+  for (const { rowid, id: stored, messages: bytes } of select.iterate()) {
+    // An error names a session by its ID when that is 64 lowercase hex characters, and
+    // otherwise by its row, so it prints no stored text.
+    const id = /^[0-9a-f]{64}$/u.test(stored) ? stored : null;
+    const messages = bytes instanceof Uint8Array ? parseArray(bytes) : null;
+    if (!messages) throw new Error(migrationFailed(id, rowid, notAnArray));
+    const lines = new Set();
+    for (let seq = 0; seq < messages.length; seq += 1) {
+      const message = messages[seq];
+      if (!isMessage(message)) throw new Error(migrationFailed(id, rowid, notAMessage));
+      if (lines.has(message.line)) throw new Error(migrationFailed(id, rowid, sameLine));
+      lines.add(message.line);
+      const textJson = JSON.stringify(message.text);
+      const key = `l:${message.line}`;
+      if (id) insert.run(id, seq, message.line, message.role, textJson, key);
+      else insertByRow.run(seq, message.line, message.role, textJson, key, rowid);
+    }
+  }
+}
+
 const leftoverFailed = 'This ledger already has a messages table or trigger that schema version 3 did not create. ' +
   'The file was not changed.';
 // Objects version 3 creates, or that would act on what it creates, already in the file.
@@ -71,9 +107,10 @@ export function refuseNewerSchema(database) {
  * for listing. Version 2 adds projects and puts every session in one: existing
  * sessions go to the default project, which the step creates. Version 3 adds one
  * messages row per turn: each session's JSON messages are copied in order with l:<line>
- * keys, and the step fails unless every session's rows are exactly its stored messages.
- * A file that already has a messages table or a sessions_messages trigger is refused.
- * A turn's text is kept as a JSON string literal (text_json), which is lossless.
+ * keys (copyStoredMessages), and one session that cannot be copied fails the whole step,
+ * with an error that names it. A file that already has a messages table or a
+ * sessions_messages trigger is refused. A turn's text is kept as a JSON string literal
+ * (text_json), which is lossless.
  * Every step checks the schema itself, so it is safe to repeat and does not depend on
  * the order in which other branches add their own steps.
  *
@@ -163,12 +200,8 @@ export function migrate(database, bootstrap = () => {}) {
           UNIQUE (session_id, seq)
         ) STRICT;
       `);
-      if (database.prepare(unreadableMessages).get().n > 0) throw new Error(migrationFailed);
-      // No ORDER BY: seq carries the order, and a sort of every message would hold the
-      // write lock longer on a large ledger (review round 2). Every row is new, so the
-      // deferred key checks all of them at commit.
-      database.exec(`${insertRows} ${legacyRows('s.id', 's.messages', 'sessions s, ')}`);
-      if (database.prepare(unmatchedSessions).get().n > 0) throw new Error(migrationFailed);
+      // Every row is new, so the deferred key checks all of them at commit.
+      copyStoredMessages(database);
       database.exec(`
         CREATE TRIGGER sessions_messages AFTER INSERT ON sessions
         WHEN NOT EXISTS (SELECT 1 FROM messages WHERE session_id = NEW.id) BEGIN
