@@ -52,20 +52,34 @@ test('every pair in the guide passes WCAG AA in both sets, and the dark set inhe
   assert.ok(contrast('#ffffff', light['ctm-lime']) < 3, 'the guide says never put white text on lime');
 });
 
-test('the ratios printed in the guide are the computed ones', () => {
-  const guide = read('docs/brand/brand.md');
+test('each ratio in the guide\'s table is the computed one for its row and column', () => {
+  const guide = read('docs/brand/brand.md').replace(/\r\n/gu, '\n');
   const { light, dark } = sets();
-  const printed = [
-    [light['ctm-text'], light['ctm-bg'], '16.0'], [light['ctm-text-2'], light['ctm-bg'], '6.8'], [dark['ctm-text-2'], dark['ctm-bg'], '8.7'],
-    [light['ctm-link'], light['ctm-bg'], '5.1'], [dark['ctm-link'], dark['ctm-bg'], '5.7'], [light['ctm-link-hover'], light['ctm-bg'], '6.9'],
-    [dark['ctm-link-hover'], dark['ctm-bg'], '8.2'], ['#ffffff', light['ctm-button-fill'], '5.6'], ['#ffffff', light['ctm-button-fill-hover'], '7.7'],
-    [light['ctm-quoted'], light['ctm-quoted-fill'], '5.5'], [dark['ctm-quoted'], dark['ctm-quoted-fill'], '6.6'],
-    [light['ctm-inferred'], light['ctm-inferred-fill'], '5.7'], [dark['ctm-inferred'], dark['ctm-inferred-fill'], '7.1'],
-  ];
-  for (const [fore, back, shown] of printed) {
-    assert.equal(contrast(fore, back).toFixed(1), shown, `${fore} on ${back}`);
-    assert.ok(guide.includes(`${shown}:1`), `the guide prints ${shown}:1`);
+  // Review round 2: each table cell is checked against its own pair, not found anywhere.
+  const rows = {
+    'Text on background': ['ctm-text', 'ctm-bg'],
+    'Secondary text on background': ['ctm-text-2', 'ctm-bg'],
+    'Link on background': ['ctm-link', 'ctm-bg'],
+    'Link hover on background': ['ctm-link-hover', 'ctm-bg'],
+    'Button text on button fill': ['ctm-button-text', 'ctm-button-fill'],
+    'Button text on hover fill': ['ctm-button-text', 'ctm-button-fill-hover'],
+    'Quoted mark on its fill': ['ctm-quoted', 'ctm-quoted-fill'],
+    'Inferred mark on its fill': ['ctm-inferred', 'ctm-inferred-fill'],
+  };
+  for (const [label, [fore, back]] of Object.entries(rows)) {
+    const row = guide.split('\n').find(line => line.startsWith(`| ${label} |`));
+    assert.ok(row, label);
+    const [lightCell, darkCell] = row.split('|').slice(2, 4);
+    for (const [cell, set, name] of [[lightCell, light, 'light'], [darkCell, dark, 'dark']]) {
+      const shown = cell.match(/([\d.]+):1/u)?.[1];
+      assert.equal(shown, contrast(set[fore], set[back]).toFixed(1), `${label}, ${name}`);
+    }
   }
+  // The three lime figures in the text.
+  const lime = light['ctm-lime'];
+  assert.match(guide, new RegExp(`White on lime is ${contrast('#ffffff', lime).toFixed(1)}:1`, 'u'));
+  assert.match(guide, new RegExp(`Charcoal on lime is ${contrast(light['ctm-charcoal'], lime).toFixed(1)}:1`, 'u'));
+  assert.match(guide, new RegExp(`lime spark is ${contrast(lime, light['ctm-paper']).toFixed(1)}:1 against Paper`, 'u'));
 });
 
 const allowedElements = new Set(['svg', 'path', 'ellipse', 'circle', 'rect']);
@@ -88,6 +102,15 @@ test('Pip\'s SVGs hold only allowed elements, attributes and colours, and name t
       for (const [, attribute] of attributes.matchAll(/([\w:-]+)\s*=/gu)) assert.ok(allowedAttributes.has(attribute), `${file}: attribute ${attribute}`);
     }
     for (const colour of body.match(/#[0-9a-f]{6}/giu)) assert.ok(illustrationColours.has(colour.toLowerCase()), `${file}: colour ${colour}`);
+    // Review round 2: every paint is an allowed colour or none (no names, no url()),
+    // and the root keeps the attributes that make it an accessible, scalable image.
+    for (const [, attribute, value] of body.matchAll(/\s(fill|stroke)="([^"]*)"/gu)) {
+      assert.ok(value === 'none' || illustrationColours.has(value.toLowerCase()), `${file}: ${attribute}="${value}"`);
+    }
+    const root = body.match(/^<svg([^>]*)>/u)[1];
+    for (const required of ['xmlns="http://www.w3.org/2000/svg"', 'viewBox="0 0 120 120"', 'role="img"']) {
+      assert.ok(root.includes(required), `${file}: root has ${required}`);
+    }
   }
 });
 

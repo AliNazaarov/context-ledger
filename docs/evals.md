@@ -1397,7 +1397,7 @@ A brand guide for the console (U1), the video (U3) and other pages, built on the
 - Every text and background pair in the light (console) and dark (site) sets passes WCAG AA, 4.5:1. That includes the quoted and inferred marks on their fills and white text on the primary. White on lime is kept out, as the site's rule says.
 - No state is told by colour alone: each mark and agent state also has a word or a pose.
 - Pip is original. It takes Capy's warmth as a reference only, with no copied assets or look.
-- Pip's SVGs can be inlined under the console's content security policy as they are: small, named with aria-label (no IDs to clash), presentation attributes only, no scripts, styles, outside resources or fonts, and only the palette plus three documented illustration shades.
+- Pip's SVGs can be inlined under the console's content security policy as they are: small, named with aria-label (no IDs to clash), presentation attributes only, no scripts, styles, outside resources or fonts, and only the palette, White and two documented illustration colours.
 
 ### What is tested
 
@@ -1411,7 +1411,7 @@ A brand guide for the console (U1), the video (U3) and other pages, built on the
 
 ### U2 review (2026-11-17)
 
-- **Codex, round 1** (of the first U2 commit): one high finding, five medium, five low. All are fixed in the next commit:
+- **Codex, round 1** (of the first U2 commit): one high finding, four medium, five low. All are fixed in the next commit:
   - (high) The guide said the console could serve the SVGs as they are. Its policy has no `img-src`, so the guide now says to inline them, as U1's office module builds its figures, and what image files would need.
   - (medium) The dark set inherited the light badge fills (1.6:1). It now sets dark fills and every text, fill and button variable itself.
   - (medium) The dark strong violet failed on Charcoal (3.1:1). Links, link hover, button fill, button hover and button text now have their own pairs.
@@ -1422,3 +1422,5 @@ A brand guide for the console (U1), the video (U3) and other pages, built on the
   - (low) Savings claims now point to BENCHMARKS.md instead of naming two figures.
   - (low) The test is stricter: exact pose names, printed ratios, and an element and attribute allowlist.
   - (low) Codex saw low resemblance to Capy's capybara, but a plausible one to Tinky Winky (purple round body, pale belly, head ornament, carried item). Pip is now an index card with a folded corner and ruled lines, which ties it to the ledger and drops the round body and belly. The guide says to avoid both. The human sign-off stays, with a side-by-side check.
+- **Codex, round 2** (of 9bc136c): the CSP, dark-set, ID, small-size, tag, cheek and wording fixes hold, all 19 printed ratios are correct, and Codex saw no close resemblance between the redrawn Pip and Tinky Winky or Capy. Fixed in the next commit: (medium) the SVG test now checks every fill and stroke value and the root's required attributes; (medium) the ratio test checks each table cell against its own pair and the three lime figures one by one; (low) the colour list names White and the two extra illustration colours; (low) the round 1 count is four medium findings, not five.
+- **Still owed:** a person on the team signs off on Pip's look.
