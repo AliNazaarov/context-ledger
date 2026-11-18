@@ -14,19 +14,21 @@ function command(argv) {
   if (action === 'search') {
     const { values, positionals } = parseArgs({
       args,
-      options: { provider: { type: 'string' }, project: { type: 'string' } },
+      options: { provider: { type: 'string' }, project: { type: 'string', multiple: true } },
       allowPositionals: true,
     });
     if (values.provider && !['claude', 'codex'].includes(values.provider)) {
       throw new Error('Provider must be claude or codex.');
     }
     // The same rule as the server's, checked here so a bad slug sends no request.
-    if (values.project !== undefined && (values.project.length > 64 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(values.project))) {
+    if (values.project?.length > 1) throw new Error('Give --project once.');
+    const [project] = values.project ?? [];
+    if (project !== undefined && (project.length > 64 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(project))) {
       throw new Error('Project must be a slug of at most 64 lowercase letters, digits and single hyphens.');
     }
     const query = new URLSearchParams({ q: positionals.join(' ') });
     if (values.provider) query.set('provider', values.provider);
-    if (values.project) query.set('project', values.project);
+    if (project) query.set('project', project);
     return { action, path: '/api/sessions?' + query };
   }
   if (action === 'handoff' && args.length === 1 && /^[a-f0-9]{64}$/.test(args[0])) {

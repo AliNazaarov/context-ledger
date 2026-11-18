@@ -5,8 +5,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { graphContext } from './context.mjs';
 import { InputError } from './errors.mjs';
 import { canonicalPacket, validateGraph } from './graph.mjs';
-import { defaultProject, migrate, refuseNewerSchema } from './migrate.mjs';
-import { mountRooms } from './rooms.mjs';
+import { defaultProject, migrate } from './migrate.mjs';
+import { mountRooms, roomsSchema } from './rooms.mjs';
 
 export { InputError };
 
@@ -137,14 +137,9 @@ export function openStore(path) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const database = new DatabaseSync(path);
   database.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
-  // Before any DDL, so a newer file is refused unchanged; migrate() checks again under its lock.
-  try {
-    refuseNewerSchema(database);
-  } catch (error) {
-    database.close();
-    throw error;
-  }
-  database.exec(`
+  // The version 0 tables, created under the migration's lock after its version check,
+  // so a newer file is refused before any DDL. The migration then upgrades them.
+  const bootstrap = () => database.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex')),
@@ -159,7 +154,14 @@ export function openStore(path) {
       session_id TEXT NOT NULL REFERENCES sessions(id),
       payload TEXT NOT NULL
     ) STRICT;
+    ${roomsSchema}
   `);
+  try {
+    migrate(database, bootstrap);
+  } catch (error) {
+    database.close();
+    throw error;
+  }
 
   const insertGraph = database.prepare(`
     INSERT INTO graphs (id, session_id, payload)
@@ -174,14 +176,8 @@ export function openStore(path) {
   // Schema version 1 adds the listing columns. Its triggers stamp created_at and party
   // on every new graph and room row, whichever build inserts it (src/migrate.mjs).
   const rooms = mountRooms(database, readGraph);
-  try {
-    migrate(database);
-  } catch (error) {
-    database.close();
-    throw error;
-  }
 
-  // Prepared after the migration, which creates projects and sessions.project_id.
+  // Version 2 adds projects and sessions.project_id.
   const insert = database.prepare(`
     INSERT INTO sessions (id, provider, source, title, message_count, messages, search_text, project_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)

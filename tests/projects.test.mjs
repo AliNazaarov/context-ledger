@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { copyFile, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -297,46 +297,98 @@ test('a failed session insert leaves no new project behind and the store keeps w
 });
 
 test('two processes racing to import the same bytes into two projects create only the winner\'s project', async t => {
-  // Review round 1, finding 4. This test holds the write lock until both children have
-  // looked the session up and missed, so both reach BEGIN IMMEDIATE every run. Without the
-  // second lookup under the lock, the loser would create its project for nothing.
+  // Review rounds 1 and 2. Each child stops at its import's BEGIN IMMEDIATE, so both have
+  // looked the session up and missed before either takes the lock; the test then releases
+  // both. Without the second lookup under the lock, the loser would create its project.
   const { directory, keep } = await scratchDirectory(t, 'ledger-p1b-race-');
   const path = join(directory, 'ledger.sqlite');
+  const release = join(directory, 'release');
   openStore(path).close();
   const storeUrl = pathToFileURL(join(process.cwd(), 'src/store.mjs')).href;
   const transcript = claude('Raced synthetic transcript.');
-  const holder = new DatabaseSync(path);
-  keep(() => holder.close());
-  holder.exec('BEGIN IMMEDIATE');
+  const script = `import { existsSync, writeSync } from 'node:fs';
+    import { DatabaseSync } from 'node:sqlite';
+    import { openStore } from ${JSON.stringify(storeUrl)};
+    const exec = DatabaseSync.prototype.exec;
+    let armed = false;
+    DatabaseSync.prototype.exec = function (sql) {
+      if (armed && sql === 'BEGIN IMMEDIATE') {
+        armed = false;
+        writeSync(1, 'gate\\n');
+        const deadline = Date.now() + 20000;
+        const pause = new Int32Array(new SharedArrayBuffer(4));
+        while (!existsSync(process.env.RELEASE)) {
+          if (Date.now() > deadline) throw new Error('never released');
+          Atomics.wait(pause, 0, 0, 10);
+        }
+      }
+      return exec.call(this, sql);
+    };
+    const store = openStore(process.env.LEDGER_FILE);
+    armed = true;
+    const summary = store.importTranscript({ provider: 'claude', source: 'race.jsonl', transcript: process.env.TRANSCRIPT, project: process.env.PROJECT });
+    writeSync(1, JSON.stringify(summary) + '\\n');
+    store.close();`;
   const start = project => {
-    const child = spawn(process.execPath, ['--input-type=module', '-e', `import { openStore } from ${JSON.stringify(storeUrl)};
-      const store = openStore(process.env.LEDGER_FILE);
-      process.stdout.write('ready\\n');
-      const summary = store.importTranscript({ provider: 'claude', source: 'race.jsonl', transcript: process.env.TRANSCRIPT, project: process.env.PROJECT });
-      process.stdout.write(JSON.stringify(summary) + '\\n');
-      store.close();`], { env: { ...process.env, LEDGER_FILE: path, TRANSCRIPT: transcript, PROJECT: project }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script],
+      { env: { ...process.env, LEDGER_FILE: path, RELEASE: release, TRANSCRIPT: transcript, PROJECT: project }, stdio: ['ignore', 'pipe', 'pipe'] });
+    keep(() => child.exitCode === null && child.kill());
     let stdout = '';
     let stderr = '';
     child.stderr.on('data', chunk => { stderr += chunk; });
-    const ready = new Promise(resolve => child.stdout.on('data', chunk => {
-      stdout += chunk;
-      if (stdout.includes('ready\n')) resolve();
-    }));
-    return { ready, exit: once(child, 'exit').then(([code]) => ({ code, stderr, stdout })) };
+    const exit = once(child, 'exit').then(([code]) => ({ code, stderr, stdout }));
+    const gated = new Promise((resolve, reject) => {
+      child.stdout.on('data', chunk => {
+        stdout += chunk;
+        if (stdout.startsWith('gate\n')) resolve();
+      });
+      exit.then(result => reject(new Error(`a child exited before the gate: ${result.stderr}`)));
+    });
+    return { gated, exit };
   };
   const children = [start('left'), start('right')];
-  await Promise.all(children.map(child => child.ready));
-  // Each child now misses the first lookup and waits for the lock (busy_timeout is 5 s).
-  await new Promise(resolve => setTimeout(resolve, 750));
-  assert.equal(holder.prepare('SELECT count(*) AS n FROM sessions').get().n, 0, 'neither child could write while the lock was held');
-  holder.exec('ROLLBACK');
+  await Promise.all(children.map(child => child.gated));
+  const check = new DatabaseSync(path);
+  keep(() => check.close());
+  assert.equal(check.prepare('SELECT count(*) AS n FROM sessions').get().n, 0, 'both children missed the first lookup');
+  await writeFile(release, '');
   const results = await Promise.all(children.map(child => child.exit));
   for (const result of results) assert.equal(result.code, 0, result.stderr);
   const [left, right] = results.map(result => JSON.parse(result.stdout.split('\n')[1]));
   assert.deepEqual(left, right);
   assert.ok(['left', 'right'].includes(left.project));
-  assert.deepEqual(rows(holder, 'SELECT slug FROM projects ORDER BY rowid'), [{ slug: 'default' }, { slug: left.project }]);
-  assert.equal(holder.prepare('SELECT count(*) AS n FROM sessions').get().n, 1);
+  assert.deepEqual(rows(check, 'SELECT slug FROM projects ORDER BY rowid'), [{ slug: 'default' }, { slug: left.project }]);
+  assert.equal(check.prepare('SELECT count(*) AS n FROM sessions').get().n, 1);
+});
+
+test('a file that a newer build upgrades while this one opens it is refused and gets no DDL', async t => {
+  // Review round 2: the version is read again under the write lock before any DDL. The
+  // holder stands in for a newer build: it takes the lock first, drops a version 0 table
+  // and moves to version 3 while the child waits, then commits.
+  const { directory, keep } = await scratchDirectory(t, 'ledger-p1b-upgrade-race-');
+  const path = join(directory, 'ledger.sqlite');
+  openStore(path).close();
+  const storeUrl = pathToFileURL(join(process.cwd(), 'src/store.mjs')).href;
+  const holder = new DatabaseSync(path);
+  keep(() => holder.close());
+  holder.exec('BEGIN IMMEDIATE');
+  const child = spawn(process.execPath, ['--input-type=module', '-e',
+    `import { openStore } from ${JSON.stringify(storeUrl)}; process.stdout.write('ready\\n'); openStore(process.env.LEDGER_FILE).close();`],
+  { env: { ...process.env, LEDGER_FILE: path }, stdio: ['ignore', 'pipe', 'pipe'] });
+  keep(() => child.exitCode === null && child.kill());
+  let stderr = '';
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  const exit = once(child, 'exit');
+  await Promise.race([once(child.stdout, 'data'), exit.then(() => assert.fail(`the child exited before it was ready: ${stderr}`))]);
+  // The child now reads version 2 and waits for the lock (busy_timeout is 5 s).
+  await new Promise(resolve => setTimeout(resolve, 750));
+  holder.exec('DROP TABLE room_choices; PRAGMA user_version = 3;');
+  holder.exec('COMMIT');
+  const [code] = await exit;
+  assert.equal(code, 1, stderr);
+  assert.match(stderr, /written by a newer Context Ledger \(schema 3\)/u);
+  assert.deepEqual(rows(holder, "SELECT name FROM sqlite_master WHERE name = 'room_choices'"), []);
+  assert.equal(userVersion(holder), 3);
 });
 
 test('an import names its project, a new slug creates it once, and the default is default', () => {
@@ -376,11 +428,18 @@ test('invalid project slugs are refused before anything is written', async t => 
   assert.deepEqual(start, { sessions: 0, projects: 1 });
 });
 
-test('the same bytes in a second project keep the session where it is and create nothing', () => {
-  const store = openStore(':memory:');
+test('the same bytes in a second project keep the session where it is and create nothing', async t => {
+  const { directory, keep } = await scratchDirectory(t, 'ledger-p1b-duplicate-');
+  const path = join(directory, 'ledger.sqlite');
+  const store = openStore(path);
+  keep(() => store.close());
+  const check = new DatabaseSync(path);
+  keep(() => check.close());
   const transcript = claude('Shared synthetic transcript.');
   const stored = store.importTranscript({ provider: 'claude', source: 'shared.jsonl', transcript, project: 'acme' });
   const again = store.importTranscript({ provider: 'claude', source: 'renamed.jsonl', transcript, project: 'beta' });
+  // Review round 2: no beta row at all, not just a beta with no sessions.
+  assert.deepEqual(rows(check, 'SELECT slug FROM projects ORDER BY rowid'), [{ slug: 'default' }, { slug: 'acme' }]);
   assert.deepEqual({ ...again }, { ...stored });
   assert.equal(again.project, 'acme');
   assert.deepEqual(plain(store.list('', '', 'acme')).map(session => session.id), [stored.id]);
@@ -392,7 +451,6 @@ test('the same bytes in a second project keep the session where it is and create
   const codexCopy = codex('Shared synthetic transcript.');
   const other = store.importTranscript({ provider: 'codex', source: 'shared.jsonl', transcript: codexCopy, project: 'beta' });
   assert.equal(other.project, 'beta');
-  store.close();
 });
 
 test('search filters by project with the query, the provider and paging', () => {
@@ -531,5 +589,9 @@ test('HTTP import takes a project, the session list filters by it, and the CLI s
     const refused = await runCli(['search', '--project', slug, 'vega'], 1);
     assert.equal(refused.code, 1);
     assert.equal(refused.stderr.trim(), slugRule);
+  }
+  for (const args of [['--project', 'Bad-Slug', '--project', 'acme'], ['--project', 'acme', '--project', 'acme']]) {
+    const refused = await runCli(['search', ...args, 'vega'], 1);
+    assert.deepEqual({ code: refused.code, stderr: refused.stderr.trim() }, { code: 1, stderr: 'Give --project once.' });
   }
 });

@@ -13,6 +13,13 @@ const now = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 /** The slug of the project that sessions without one belong to. */
 export const defaultProject = 'default';
 
+const refuseNewer = version => {
+  if (version > schemaVersion) {
+    throw new Error(`This ledger database was written by a newer Context Ledger (schema ${version}). ` +
+      'Use that version or another CONTEXT_LEDGER_DB.');
+  }
+};
+
 /**
  * Version 1 adds created_at and party to graphs and created_at to rooms, with indexes
  * for listing. Version 2 adds projects and puts every session in one: existing
@@ -25,28 +32,22 @@ export const defaultProject = 'default';
  * without a project joins the default one. SQLite cannot add a NOT NULL column with a
  * foreign key, so sessions.project_id stays nullable and the trigger fills it.
  * Recreate the triggers if graphs, rooms or sessions is ever rebuilt.
+ *
+ * bootstrap creates the tables of the oldest schema (CREATE TABLE IF NOT EXISTS). It
+ * runs under the same write lock, after the version is read again, so a file that a
+ * newer build upgrades while this one opens it is refused before any DDL touches it.
+ * The lock is taken on every open; a file already at this version only rereads it.
  */
-const refuseNewer = version => {
-  if (version > schemaVersion) {
-    throw new Error(`This ledger database was written by a newer Context Ledger (schema ${version}). ` +
-      'Use that version or another CONTEXT_LEDGER_DB.');
-  }
-};
-
-/** Throws, writing nothing, when the file has a newer schema than this build. */
-export function refuseNewerSchema(database) {
+export function migrate(database, bootstrap = () => {}) {
+  // Refuse a newer file without waiting for the lock; checked again under it.
   refuseNewer(userVersion(database));
-}
-
-export function migrate(database) {
-  refuseNewer(userVersion(database));
-  if (userVersion(database) === schemaVersion) return;
 
   database.exec('BEGIN IMMEDIATE');
   try {
     // Another process may have migrated while this one waited for the lock.
     const version = userVersion(database);
     refuseNewer(version);
+    bootstrap();
     if (version < 1) {
       const graphColumns = columns(database, 'graphs');
       if (!graphColumns.has('created_at')) database.exec('ALTER TABLE graphs ADD COLUMN created_at TEXT');
