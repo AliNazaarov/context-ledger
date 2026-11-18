@@ -29,7 +29,7 @@ function command(argv) {
   // Card P4b: report what in a session looks like a secret, without showing any value.
   if (action === 'redact' && args.length >= 1 && args.length <= 2 && /^[a-f0-9]{64}$/.test(args[0])) {
     const format = args[1] === undefined ? 'report' : args[1] === '--json' ? 'json' : args[1] === '--text' ? 'text' : null;
-    if (format) return { action, format, path: '/api/sessions/' + args[0] };
+    if (format) return { action, format, id: args[0], path: '/api/sessions/' + args[0] };
   }
   if (action === 'handoff' && args.length === 1 && /^[a-f0-9]{64}$/.test(args[0])) {
     return { action, path: '/api/sessions/' + args[0] };
@@ -70,17 +70,20 @@ async function readGraphPacket(packetPath) {
   }
 }
 
-// The hand-off renderer keeps ZWNJ and ZWJ for emoji; the redaction view escapes every
-// format character, so nothing in it can be hidden.
-const strict = text => text.replace(/\p{Cf}/gu, character => Array.from({ length: character.length },
+// The hand-off renderer keeps ZWNJ, ZWJ and tabs; the redaction view escapes every format
+// character and tab too, so nothing in it can be hidden or misaligned.
+const strict = text => text.replace(/[\p{Cf}\t]/gu, character => Array.from({ length: character.length },
   (_, index) => `\\u${character.charCodeAt(index).toString(16).padStart(4, '0')}`).join(''));
 
 /** A session as the server returns it, checked before anything is scanned or printed. */
-function sessionShape(data) {
+function sessionShape(data, id) {
   const session = data?.session;
-  const ok = session && typeof session === 'object' && /^[a-f0-9]{64}$/u.test(session.id) && typeof session.source === 'string'
-    && typeof session.provider === 'string' && Array.isArray(session.messages)
-    && session.messages.every(message => message && typeof message.text === 'string' && typeof message.role === 'string'
+  // Provider and role are printed as they are, so only the values the store writes pass.
+  const ok = session && typeof session === 'object' && session.id === id && typeof session.source === 'string'
+    && (session.provider === 'claude' || session.provider === 'codex') && Array.isArray(session.messages)
+    && session.messages.every(message => message && typeof message.text === 'string'
+      && ['user', 'assistant', 'agent'].includes(message.role)
+      && (message.role !== 'agent' || (typeof message.author === 'string' && typeof message.recipient === 'string'))
       && Number.isSafeInteger(message.line) && message.line >= 1);
   if (!ok) throw new Error('Context Ledger returned an unexpected session response.');
   return session;
@@ -100,7 +103,7 @@ function redactionOutput(session, format) {
 }
 
 async function main() {
-  const { action, path, packetPath, format } = command(process.argv.slice(2));
+  const { action, path, packetPath, format, id } = command(process.argv.slice(2));
   const port = Number(process.env.PORT ?? 4317);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT.');
   const origin = `http://127.0.0.1:${port}`;
@@ -132,7 +135,7 @@ async function main() {
   if (action === 'redact') {
     let session;
     try {
-      session = sessionShape(await response.json());
+      session = sessionShape(await response.json(), id);
     } catch {
       // The parser's message can quote response bytes, so it is never shown.
       throw new Error('Context Ledger returned an unexpected session response.');

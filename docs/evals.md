@@ -1436,8 +1436,9 @@ All fixtures are synthetic. The fake credentials are put together at test time f
 - **Deliberate limits** (made explicit after review round 1):
   - A JWT needs a header and a payload that both start `eyJ`. Its signature may be empty (an unsecured token).
   - A bearer value needs at least eight characters.
-  - Under a secret-like name, a UUID or a 40-character git commit hash is not flagged, but any other hex value is.
-- **Whole values:** a match is extended to the end of its value: the rest of its character class, the closing quote of a quoted value, or a private key's END line. If there is no END line, every following base64 or PEM header line is included. No tail is ever left behind, however long the value.
+  - Under a secret-like name, a UUID, a 40-character git commit hash or a value of digits only is not flagged. Other hex values are flagged.
+  - A bearer token is found in a bare `Authorization: Bearer` header and in its JSON or quoted forms.
+- **Whole values:** a short pattern finds where a value starts, and a forward scan finds where it ends. That end is the rest of its character class; or a quoted value's closing quote (or the line break, which a backslash never escapes); or a JWT's third segment; or, for a private key, its END line. A key's span covers the BEGIN line, any PEM header lines with the blank line after them, and its base64 lines. An unfinished key ends at the first line that cannot belong to it, so it never takes in prose or a later key. No tail is ever left behind, however long the value.
 - **Overlaps:** overlapping matches merge into one span labelled with the most specific kind. Its prefix is shown only when that kind's match begins the span.
 - **Redaction:** `redactText(text)` replaces each finding with `[REDACTED <kind>]` and leaves everything else byte for byte. `redactSession(session)` does that for the source name and every message, keeps line numbers, and lists findings by line and kind; a finding in the source name has line `null` and is reported as "source name".
 - **The report never shows a secret:** `npm run ledger -- redact <session-id>` prints, for each finding:
@@ -1455,7 +1456,7 @@ All fixtures are synthetic. The fake credentials are put together at test time f
 
 ### P4b results (2026-11-17)
 
-- `tests/secrets.test.mjs` has 15 tests. Fake credentials are assembled at run time. Running the scanner over every committed file finds no provider-format credential.
+- `tests/secrets.test.mjs` has 23 tests. Fake credentials are assembled at run time. Running the scanner over every committed file finds no provider-format credential; its only hits are three generic `Authorization: Bearer` examples in the test text.
 - **Codex, round 1** (of 742b071): three high, four medium and three low findings, all fixed with tests:
   - (high) Overlapping matches kept only one span, so part of an enclosing bearer value could stay visible. Overlaps now merge into one span, and the prefix is hidden unless the labelled match begins it.
   - (high) Length caps could leave the tail of a long value: private keys over 16 KiB, long bearer values, quoted passwords with spaces. Values are now extended by a linear scan to their real end.
@@ -1467,3 +1468,16 @@ All fixtures are synthetic. The fake credentials are put together at test time f
   - (low) `--text` kept ZWNJ and ZWJ. It now escapes every format character.
   - (low) `constructor` was accepted as a format. The format is now checked exactly.
   - (low) The tests now cover every GitHub, OpenAI and Stripe variant with exact spans and previews, plus full CLI output.
+- **Codex, round 2** (of 8b45c18): four high, six medium and two low findings, fixed with tests. The capped patterns are replaced by start patterns plus forward scanners:
+  - (high) A quoted value starting with a space or a bracket was never read. The opening quote is now found on its own, and the value is read from inside it to its end.
+  - (high) A JWT with a long header or payload was missed. JWTs are now walked segment by segment.
+  - (high) An unfinished encrypted key left its body after the blank line under `Proc-Type`/`DEK-Info`. That blank line now belongs to the key.
+  - (high) JSON-style `Authorization` headers were missed. Quoted and JSON forms are now found.
+  - (medium) An unfinished key could take in prose and a later key. Keys are now walked line by line and stop at the first line that cannot belong to them.
+  - (medium) Extending matches was quadratic on nested candidates. Each pattern now resumes after the whole value it found.
+  - (medium) A bearer value that began with a GitHub token showed that token's prefix. A prefix is now shown only when the labelled match covers the whole span.
+  - (medium) Values starting `env-` or `env.` were skipped. Only complete environment references are skipped now, and the digits-only rule is stated in the eval.
+  - (medium) Odd provider or role values could reach `--text`. The reply must now be for the session asked for, with provider and role values the store writes.
+  - (medium) A quoted value ending in a backslash could cross a line break. A backslash no longer escapes a line break, for both LF and CRLF.
+  - (low) `--text` kept raw tabs. Tabs are now escaped.
+  - (low) The tests now require one exact finding and preview for every variant, and compare the full JSON and redacted text.

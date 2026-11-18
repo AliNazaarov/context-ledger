@@ -356,3 +356,118 @@ test('P4b review: an unreadable server response is a fixed sentence, never its b
     }
   }
 });
+
+// Review round 2 regressions.
+
+test('P4b review 2: quoted values, long JWTs, encrypted keys and JSON headers are redacted whole', () => {
+  const longJwt = join2('ey', 'JhbGciOiJIUzI1NiJ9', '.', 'ey', body('JzdWIi', 400), '.', body('Sf1K', 30));
+  const dek = `-----BEGIN ${pemType}-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0A1B2C3D\n\n${body('q1W2', 16)}\n${body('e3R4', 16)}`;
+  const quote = String.fromCodePoint(39);
+  const cases = [
+    ['password = " [x] secret 9" ok', 'password = "[REDACTED assigned-secret]" ok'],
+    [`api_key: ${quote} spaced value 42${quote} ok`, `api_key: ${quote}[REDACTED assigned-secret]${quote} ok`],
+    [`jwt ${longJwt} end`, 'jwt [REDACTED jwt] end'],
+    [`${dek}\nThen prose.`, '[REDACTED private-key]\nThen prose.'],
+    ['{"Authorization":"Bearer abcdefgh12345"}', '{"Authorization":"Bearer [REDACTED bearer-token]"}'],
+    [`{'Authorization': 'Bearer abcdefgh12345'}`, `{'Authorization': 'Bearer [REDACTED bearer-token]'}`],
+  ];
+  for (const [text, expected] of cases) assert.equal(redactText(text), expected, expected);
+});
+
+test('P4b review 2: an unfinished key never swallows prose or a later key', () => {
+  const unfinished = `-----BEGIN ${pemType}-----\n${body('q1W2', 16)}`;
+  const text = `${unfinished}\nSome prose in between.\n${pem}\nend`;
+  assert.equal(redactText(text), '[REDACTED private-key]\nSome prose in between.\n[REDACTED private-key]\nend');
+  const twoBegins = `${unfinished}\n${pem}`;
+  assert.equal(findSecrets(twoBegins).length, 2);
+});
+
+test('P4b review 2: a prefix is hidden when the labelled match does not cover the whole span', () => {
+  const text = `Authorization: Bearer ${fake['github-token']}.more9`;
+  const [finding] = findSecrets(text);
+  assert.equal(finding.kind, 'github-token');
+  assert.equal(maskedPreview(text, finding), '…');
+  assert.equal(redactText(text), 'Authorization: Bearer [REDACTED github-token]');
+  const exact = `Authorization: Bearer ${fake['github-token']}`;
+  assert.equal(maskedPreview(exact, findSecrets(exact)[0]), 'ghp_…', 'a bearer value that is exactly a token keeps its public prefix');
+});
+
+test('P4b review 2: environment-looking values, digit values, and quotes at a line break', () => {
+  assert.deepEqual(kinds('secret = env-9f8a7b6c5d4e'), ['assigned-secret']);
+  assert.deepEqual(kinds('secret = env.prod9key'), ['assigned-secret']);
+  assert.deepEqual(kinds('secret = process.env.SECRET'), []);
+  assert.deepEqual(kinds('secret = 12345678901234'), [], 'a value of digits only is not flagged');
+  for (const newline of ['\n', '\r\n']) {
+    const text = `password = "abc9defg\\${newline}next line stays`;
+    // The value runs to the line break, its trailing backslash included; the next line stays.
+    assert.equal(redactText(text), `password = "[REDACTED assigned-secret]${newline}next line stays`, JSON.stringify(newline));
+  }
+});
+
+test('P4b review 2: every remaining variant has one exact finding and preview', () => {
+  const variants = [
+    [`value ${join2('sk', '-svcacct-', body('Hk4t', 10))} end`, 'openai-key', 'sk-svcacct-…'],
+    [`value ${join2('sk', '-admin-', body('Hk4t', 10))} end`, 'openai-key', 'sk-admin-…'],
+    [`value ${join2('rk', '_test_', body('Rf5G', 6))} end`, 'stripe-key', 'rk_test_…'],
+    [`aws_secret_access_key = ${fake['aws-secret']}`, 'aws-secret-access-key', '…'],
+    [`Authorization: Bearer ${fake.bearer}`, 'bearer-token', '…'],
+    [`here:\n${pem}`, 'private-key', '…'],
+  ];
+  for (const [text, kind, preview] of variants) {
+    const found = findSecrets(text);
+    assert.equal(found.length, 1, text);
+    assert.equal(found[0].kind, kind);
+    assert.equal(maskedPreview(text, found[0]), preview);
+  }
+});
+
+test('P4b review 2: nested candidates scale linearly', () => {
+  const unit = 'sk-aaaaaaaaaaaaaaaaaaaaaaaa';
+  for (const size of [96, 384]) {
+    const text = unit.repeat(Math.ceil((size * 1024) / unit.length)) + '9';
+    const started = performance.now();
+    findSecrets(text);
+    assert.ok(performance.now() - started < 1000, `${size} kB took too long`);
+  }
+});
+
+test('P4b review 2: metadata the store would not write is refused with a fixed sentence', async () => {
+  const { createServer } = await import('node:http');
+  const id = 'a'.repeat(64);
+  const leak = fake['github-token'];
+  const bodies = [
+    { session: { id, source: 'x', provider: leak, messages: [] } },
+    { session: { id, source: 'x', provider: 'claude', messages: [{ line: 1, role: leak, text: 'hi' }] } },
+    { session: { id: 'b'.repeat(64), source: 'x', provider: 'claude', messages: [] } },
+  ];
+  for (const reply of bodies) {
+    const server = createServer((request, response) => {
+      response.setHeader('Content-Type', 'application/json');
+      response.end(JSON.stringify(reply));
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const run = await cli(['redact', id, '--text'], String(server.address().port));
+      assert.equal(run.code, 1);
+      assert.match(run.stderr, /Context Ledger returned an unexpected session response\./u);
+      assert.ok(!run.stdout.includes(leak) && !run.stderr.includes(leak));
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
+  }
+});
+
+test('P4b review 2: the full report, JSON and redacted text are exact, with tabs escaped', async t => {
+  const { origin, port } = await startServer(t);
+  const transcript = JSON.stringify({ type: 'user', message: { role: 'user', content: `tab\there ${fake['github-token']}` } });
+  const imported = await (await fetch(`${origin}/api/import`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ provider: 'claude', source: 'tabs.jsonl', transcript }),
+  })).json();
+  const id = imported.session.id;
+  const json = JSON.parse((await cli(['redact', id, '--json'], port)).stdout);
+  assert.deepEqual(json, { sessionId: id, count: 1, lines: 1, findings: [{ line: 1, kind: 'github-token', length: 40, preview: 'ghp_…' }] });
+  const text = (await cli(['redact', id, '--text'], port)).stdout;
+  assert.ok(text.includes('tab\\u0009here [REDACTED github-token]'), text);
+  assert.ok(!text.includes('\t'), 'no raw tab');
+});
