@@ -16,20 +16,59 @@ export const t3Release = Object.freeze({
   schemaHead: 96,
 });
 
+/** The ledger's import request limit (src/server.mjs), checked here before any request is sent. */
+export const maxImportBytes = 8 * 1024 * 1024;
+
 const unsupportedLayout = 'This T3 Code database layout is not supported. The importer reads copies made by T3 Code v0.1.10 (schema 96) only.';
 const unreadable = 'Cannot read the T3 Code database copy.';
 
-// Migration rows that must be present with these names (apps/server/src/persistence/Migrations.ts).
-const requiredMigrations = new Map([[55, 'OrchestrationV2'], [96, 'RepairStaleTitleRegeneration']]);
+// apps/server/src/persistence/Migrations.ts at the pinned commit: migration n is entry n - 1.
+// A copy must record exactly these, so a build with a different history is refused.
+const migrationManifest = [
+  'OrchestrationEvents', 'OrchestrationCommandReceipts', 'CheckpointDiffBlobs', 'ProviderSessionRuntime', 'Projections',
+  'ProjectionThreadSessionRuntimeModeColumns', 'ProjectionThreadMessageAttachments', 'ProjectionThreadActivitySequence',
+  'ProviderSessionRuntimeMode', 'ProjectionThreadsRuntimeMode', 'OrchestrationThreadCreatedRuntimeMode',
+  'ProjectionThreadsInteractionMode', 'ProjectionThreadProposedPlans', 'ProjectionThreadProposedPlanImplementation',
+  'ProjectionTurnsSourceProposedPlan', 'CanonicalizeModelSelections', 'ProjectionThreadsArchivedAt',
+  'ProjectionThreadsArchivedAtIndex', 'ProjectionSnapshotLookupIndexes', 'AuthAccessManagement',
+  'AuthSessionClientMetadata', 'AuthSessionLastConnectedAt', 'ProjectionThreadShellSummary',
+  'BackfillProjectionThreadShellSummary', 'CleanupInvalidProjectionPendingApprovals', 'CanonicalizeModelSelectionOptions',
+  'ProviderSessionRuntimeInstanceId', 'ProjectionThreadSessionInstanceId', 'ProjectionThreadDetailOrderingIndexes',
+  'ProjectionThreadShellArchiveIndexes', 'AuthAuthorizationScopes', 'AuthPairingProofKeyThumbprint',
+  'ProjectionThreadsSettled', 'ProjectionThreadsSnoozed', 'ProjectionThreadTitleRegeneration', 'ProjectionThreadsPinned',
+  'ProjectionTurnsKeysetIndex', 'ProjectionThreadsPinOrderKey', 'ProjectionProjectsDefaultThreadEnvMode',
+  'ProjectionProjectFaviconPath', 'AuthSessionClientConnection', 'ProjectionThreadLinkedPullRequest',
+  'ProjectionThreadsUnsettledAt', 'ClearAutomaticProjectModelDefaults', 'ProjectionProjectsAutoPull',
+  'RepairAutomaticSettlementTimestamps', 'ProjectionProjectIcon', 'ProjectionThreadBranchPullRequest',
+  'ProjectionThreadsActiveOrderKey', 'ProjectionThreadPullRequests', 'ProjectionThreadMessageContext',
+  'ProjectionThreadTitleState', 'PullRequestFilesViewed', 'ProjectionThreadsAutoSettleDisabledAt', 'OrchestrationV2',
+  'RemoveRedundantProjectionIndexes', 'ScheduledTaskWebhooks', 'WebhookRelayDeliveries', 'McpAppModelContext',
+  'ThreadSnapshotWindowIndexes', 'PullRequestReviewGuides', 'ThreadFailureLookupIndex', 'DropUnusedV1Projections',
+  'CanonicalizeThreadPullRequestLinks', 'CodexUsageNativeTurnIndex', 'RepairClientSettlementTimestamps', 'WebhookDedupe',
+  'ShellStopRequestIndex', 'ThreadMessageSearch', 'PeerLinks', 'PeerLinkFence', 'WaitingLinkRequestIndex',
+  'ActiveTurnItemIndexes', 'ExcludeAttachmentPlaceholdersFromSearch', 'SubagentDeliveryState',
+  'ProjectionProjectsPinArchive', 'RepairBooleanSettledOverride', 'DropOrchestrationEventCorrelationIndex',
+  'DelegatedRecoveryIndexes', 'ScheduledTaskThreadMode', 'ProjectionMessageSearchText', 'TurnItemConversationIndex',
+  'CommandReadIndexes', 'LastExecutedRunIndex', 'TurnItemCounts', 'QueuedTurnInputIndex', 'ProjectionProjectsCustomTitle',
+  'TurnItemTypeStatusIndex', 'ShellThreadReadIndexes', 'AuthConnectDevices', 'AuthConnectDeniedRequests',
+  'QueuedTurnInputIndexJsonValid', 'ProviderTurnAttemptIndex', 'TurnItemMessageOrdinalIndex', 'TurnItemInlineWorkOutput',
+  'RepairStaleTitleRegeneration',
+];
 
-// Every column read below, as created by migrations 055, OrchestrationV2/Foundation and 081.
+// Every column read below with its declared type, and the primary key it must be, as
+// created by migrations 055, OrchestrationV2/Foundation and 081. Each must be a table.
 const requiredColumns = {
-  effect_sql_migrations: ['migration_id', 'name'],
-  orchestration_v2_projection_threads: ['thread_id', 'title', 'created_at', 'deleted_at'],
-  orchestration_v2_projection_runs: ['run_id', 'thread_id', 'provider_thread_id', 'payload_json'],
-  orchestration_v2_projection_run_attempts: ['thread_id', 'provider_thread_id'],
-  orchestration_v2_projection_provider_threads: ['provider_thread_id', 'driver'],
-  orchestration_v2_projection_messages: ['message_id', 'thread_id', 'role', 'streaming', 'created_at', 'payload_json'],
+  effect_sql_migrations: { migration_id: ['INTEGER', 1], name: ['VARCHAR(255)'] },
+  orchestration_v2_projection_threads: {
+    thread_id: ['TEXT', 1], title: ['TEXT'], created_at: ['TEXT'], deleted_at: ['TEXT'], payload_json: ['TEXT'],
+  },
+  orchestration_v2_projection_runs: { run_id: ['TEXT', 1], thread_id: ['TEXT'], provider_thread_id: ['TEXT'], payload_json: ['TEXT'] },
+  orchestration_v2_projection_run_attempts: { attempt_id: ['TEXT', 1], thread_id: ['TEXT'], run_id: ['TEXT'], provider_thread_id: ['TEXT'] },
+  orchestration_v2_projection_provider_threads: { provider_thread_id: ['TEXT', 1], driver: ['TEXT'] },
+  orchestration_v2_projection_messages: {
+    message_id: ['TEXT', 1], thread_id: ['TEXT'], run_id: ['TEXT'], role: ['TEXT'], streaming: ['INTEGER'],
+    created_at: ['TEXT'], payload_json: ['TEXT'],
+  },
 };
 
 // T3 driver kinds (packages/contracts/src/model.ts) for the two agents the ledger stores.
@@ -42,12 +81,15 @@ const refusals = {
   unknownAgent: 'This T3 thread has a run whose agent is not recorded.',
   manyAgents: 'This T3 thread was run by more than one agent. Only threads run by one agent are imported.',
   otherAgent: 'This T3 thread was run by an agent other than Claude Code or Codex.',
+  subagent: 'This T3 thread is a subagent\'s. Import the thread that started it.',
   badMessage: 'A message in this T3 thread could not be read.',
   noMessages: 'This T3 thread has no finished user or assistant messages.',
+  tooLarge: 'This T3 thread is larger than the 8 MiB import limit.',
 };
 
 function isLiveStore(path) {
-  // T3 keeps its database at <base-dir>/userdata/statev2.sqlite (apps/server/src/config.ts).
+  // A name check only: T3 keeps its database at <base-dir>/userdata/statev2.sqlite
+  // (apps/server/src/config.ts). A link to it under another name is not caught.
   let real = path;
   try {
     real = realpathSync(path);
@@ -68,17 +110,31 @@ function hasSqliteHeader(path) {
   }
 }
 
-function checkLayout(database) {
-  for (const [table, columns] of Object.entries(requiredColumns)) {
-    const present = new Set(database.prepare('SELECT name FROM pragma_table_info(?)').all(table).map(row => row.name));
-    if (!columns.every(column => present.has(column))) throw new T3ImportError(unsupportedLayout);
+// A -wal file with content beside the copy means T3 (or a copy of its files) was still
+// writing: the copy is then not one snapshot. An empty one is left by an earlier read.
+function hasPendingWal(path) {
+  try {
+    return statSync(path + '-wal').size > 0;
+  } catch {
+    return false;
   }
-  const head = database.prepare('SELECT MAX(migration_id) AS head FROM effect_sql_migrations').get().head;
-  if (head !== t3Release.schemaHead) throw new T3ImportError(unsupportedLayout);
-  const nameAt = database.prepare('SELECT name FROM effect_sql_migrations WHERE migration_id = ?');
-  for (const [id, name] of requiredMigrations) {
-    const rows = nameAt.all(id);
-    if (rows.length !== 1 || rows[0].name !== name) throw new T3ImportError(unsupportedLayout);
+}
+
+function checkLayout(database) {
+  const kind = database.prepare('SELECT type FROM sqlite_schema WHERE name = ?');
+  const info = database.prepare('SELECT name, type, pk FROM pragma_table_info(?)');
+  for (const [table, columns] of Object.entries(requiredColumns)) {
+    if (kind.get(table)?.type !== 'table') throw new T3ImportError(unsupportedLayout);
+    const present = new Map(info.all(table).map(row => [row.name, row]));
+    for (const [column, [type, pk = 0]] of Object.entries(columns)) {
+      const row = present.get(column);
+      if (!row || row.type.toUpperCase() !== type || (pk === 1) !== (row.pk === 1)) throw new T3ImportError(unsupportedLayout);
+    }
+  }
+  const recorded = database.prepare('SELECT migration_id AS id, name FROM effect_sql_migrations ORDER BY migration_id').all();
+  if (recorded.length !== migrationManifest.length
+    || recorded.some((row, index) => row.id !== index + 1 || row.name !== migrationManifest[index])) {
+    throw new T3ImportError(unsupportedLayout);
   }
 }
 
@@ -93,6 +149,9 @@ export function openT3Copy(path) {
   try {
     if (!statSync(absolute).isFile()) throw new T3ImportError(unreadable);
     if (!hasSqliteHeader(absolute)) throw new T3ImportError('This file is not a SQLite database.');
+    if (hasPendingWal(absolute)) {
+      throw new T3ImportError('This copy has unsaved changes in a -wal file beside it. Quit T3 Code, then copy statev2.sqlite again.');
+    }
     database = new DatabaseSync(absolute, { readOnly: true });
     database.exec('PRAGMA query_only = ON');
     checkLayout(database);
@@ -102,14 +161,6 @@ export function openT3Copy(path) {
     throw new T3ImportError(unreadable);
   }
   return reader(database);
-}
-
-function agentOf(drivers, unresolved) {
-  if (unresolved > 0 || drivers.some(driver => typeof driver !== 'string')) return { refusal: refusals.unknownAgent };
-  if (drivers.length === 0) return { refusal: refusals.noRun };
-  if (drivers.length > 1) return { refusal: refusals.manyAgents };
-  const provider = providerForDriver.get(drivers[0]);
-  return provider ? { provider } : { refusal: refusals.otherAgent };
 }
 
 // One JSONL line per message, in the mapped provider's format, so the existing parser imports it.
@@ -128,42 +179,35 @@ function messageLine(provider, role, text) {
   });
 }
 
+// T3's own rule for a conversation message (apps/server/src/orchestration-v2/messageSearchIndex.ts):
+// finished, and either the assistant's or a user-role message the person wrote (createdBy user or absent).
 function isConversation(row, payload) {
   if (row.streaming !== 0) return false;
   if (typeof payload?.text !== 'string' || !payload.text.trim()) return false;
   if (row.role === 'assistant') return true;
-  // T3 counts a user-role message as the person's only when createdBy is user or absent
-  // (apps/server/src/orchestration-v2/messageSearchIndex.ts).
   return row.role === 'user' && (payload.createdBy === undefined || payload.createdBy === 'user');
 }
 
+// Bytes a string adds inside the JSON-encoded transcript field of the import request.
+const encodedBytes = text => Buffer.byteLength(JSON.stringify(text)) - 2;
+
 function reader(database) {
   const listThreads = database.prepare(`
-    SELECT thread_id AS id, title FROM orchestration_v2_projection_threads
+    SELECT thread_id AS id, title, payload_json AS payload FROM orchestration_v2_projection_threads
     WHERE deleted_at IS NULL ORDER BY created_at ASC, thread_id ASC
   `);
   const findThread = database.prepare(`
-    SELECT thread_id AS id, title FROM orchestration_v2_projection_threads
+    SELECT thread_id AS id, title, payload_json AS payload FROM orchestration_v2_projection_threads
     WHERE thread_id = ? AND deleted_at IS NULL
   `);
-  const providerThreadIds = `
-    SELECT provider_thread_id AS id FROM orchestration_v2_projection_runs
-    WHERE thread_id = $thread AND provider_thread_id IS NOT NULL
-    UNION
-    SELECT provider_thread_id FROM orchestration_v2_projection_run_attempts
-    WHERE thread_id = $thread AND provider_thread_id IS NOT NULL
-  `;
-  const drivers = database.prepare(`
-    SELECT DISTINCT provider.driver AS driver
-    FROM (${providerThreadIds}) AS ids
-    JOIN orchestration_v2_projection_provider_threads AS provider ON provider.provider_thread_id = ids.id
+  const runs = database.prepare('SELECT run_id AS id, provider_thread_id AS providerThreadId FROM orchestration_v2_projection_runs WHERE thread_id = ?');
+  const attempts = database.prepare(`
+    SELECT run_id AS runId, provider_thread_id AS providerThreadId FROM orchestration_v2_projection_run_attempts
+    WHERE thread_id = ?
   `);
-  const unresolved = database.prepare(`
-    SELECT COUNT(*) AS count FROM (${providerThreadIds}) AS ids
-    WHERE NOT EXISTS (
-      SELECT 1 FROM orchestration_v2_projection_provider_threads AS provider
-      WHERE provider.provider_thread_id = ids.id
-    )
+  const providerThread = database.prepare('SELECT driver FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = ?');
+  const assistantRuns = database.prepare(`
+    SELECT DISTINCT run_id AS runId FROM orchestration_v2_projection_messages WHERE thread_id = ? AND role = 'assistant'
   `);
   const models = database.prepare(`
     SELECT DISTINCT json_extract(payload_json, '$.modelSelection.model') AS model
@@ -172,45 +216,83 @@ function reader(database) {
       AND json_type(payload_json, '$.modelSelection.model') = 'text'
     ORDER BY model
   `);
-  // T3 reads a thread's messages in this order (ProjectionStore.ts).
+  // T3 reads a thread's messages in this order (ProjectionStore.ts). message_id is the key.
   const messages = database.prepare(`
     SELECT role, streaming, payload_json AS payload FROM orchestration_v2_projection_messages
     WHERE thread_id = ? ORDER BY created_at ASC, message_id ASC
   `);
 
-  const describe = ({ id, title }) => {
+  // Attribution is per run: every provider thread a run or its attempts used must name a
+  // driver, and every assistant message must belong to a run with one. Else unknown.
+  const agentOf = threadId => {
+    const providerThreadsByRun = new Map();
+    for (const run of runs.all(threadId)) {
+      providerThreadsByRun.set(run.id, new Set(run.providerThreadId === null ? [] : [run.providerThreadId]));
+    }
+    for (const attempt of attempts.all(threadId)) {
+      if (!providerThreadsByRun.has(attempt.runId)) providerThreadsByRun.set(attempt.runId, new Set());
+      if (attempt.providerThreadId !== null) providerThreadsByRun.get(attempt.runId).add(attempt.providerThreadId);
+    }
+    const drivers = new Set();
+    let unknown = false;
+    for (const ids of providerThreadsByRun.values()) {
+      for (const id of ids) {
+        const driver = providerThread.get(id)?.driver;
+        if (typeof driver === 'string') drivers.add(driver);
+        else unknown = true;
+      }
+    }
+    for (const { runId } of assistantRuns.all(threadId)) {
+      if (runId === null || !(providerThreadsByRun.get(runId)?.size > 0)) unknown = true;
+    }
+    if (providerThreadsByRun.size === 0) return { refusal: refusals.noRun };
+    if (unknown) return { refusal: refusals.unknownAgent };
+    if (drivers.size === 0) return { refusal: refusals.noRun };
+    if (drivers.size > 1) return { refusal: refusals.manyAgents };
+    const provider = providerForDriver.get([...drivers][0]);
+    return provider ? { provider } : { refusal: refusals.otherAgent };
+  };
+
+  const describe = ({ id, title, payload }) => {
     if (typeof id !== 'string' || !threadIdPattern.test(id)) {
       return { id: null, refusal: 'This T3 thread ID has an unsupported form.' };
     }
-    const agent = agentOf(
-      drivers.all({ $thread: id }).map(row => row.driver),
-      unresolved.get({ $thread: id }).count,
-    );
-    return { id, title: typeof title === 'string' ? title : '', ...agent };
+    let thread;
+    try {
+      thread = JSON.parse(payload);
+    } catch {
+      return { id, refusal: unreadable };
+    }
+    // Subagent threads live inside their parent's view in T3 (orchestrationV2.ts, isListedThreadLineage).
+    if (thread?.lineage?.relationshipToParent === 'subagent') return { id, refusal: refusals.subagent };
+    return { id, title: typeof title === 'string' ? title : '', ...agentOf(id) };
   };
 
   const transcript = thread => {
+    const source = `t3-${thread.id}.jsonl`;
+    const marker = JSON.stringify({ t3: { threadId: thread.id } });
+    // The request is {"provider":…,"source":…,"transcript":…}; count it as the lines are added.
+    let bytes = Buffer.byteLength(JSON.stringify({ provider: thread.provider, source, transcript: '' })) + encodedBytes(marker + '\n');
     const lines = [];
     let count = 0;
-    for (const row of messages.all(thread.id)) {
+    for (const row of messages.iterate(thread.id)) {
       let payload;
       try {
         payload = JSON.parse(row.payload);
       } catch {
         return { refusal: refusals.badMessage };
       }
-      if (isConversation(row, payload)) {
-        lines.push(messageLine(thread.provider, row.role, payload.text));
-        count += 1;
-      } else {
-        // Keeps line n on the thread's message n.
-        lines.push('{}');
-      }
+      // A placeholder keeps line n on the thread's message n.
+      const line = isConversation(row, payload) ? messageLine(thread.provider, row.role, payload.text) : '{}';
+      if (line !== '{}') count += 1;
+      bytes += encodedBytes(line + '\n');
+      if (bytes > maxImportBytes) return { refusal: refusals.tooLarge };
+      lines.push(line);
     }
     if (count === 0) return { refusal: refusals.noMessages };
     // The thread ID keeps two threads with the same text apart; the parser skips this line.
-    lines.push(JSON.stringify({ t3: { threadId: thread.id } }));
-    return { messageCount: count, transcript: lines.join('\n') + '\n' };
+    lines.push(marker);
+    return { messageCount: count, source, transcript: lines.join('\n') + '\n' };
   };
 
   // A SQLite error mid-read (a damaged copy) becomes the fixed sentence, never its own text.
@@ -250,7 +332,7 @@ function reader(database) {
       if (thread.refusal) return { refusal: thread.refusal };
       const built = transcript(thread);
       if (built.refusal) return built;
-      return { provider: thread.provider, source: `t3-${thread.id}.jsonl`, transcript: built.transcript };
+      return { provider: thread.provider, source: built.source, transcript: built.transcript };
     }),
 
     close() {

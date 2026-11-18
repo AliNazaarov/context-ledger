@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -87,11 +88,11 @@ const schema = `
 const at = minute => `2026-11-10T10:${String(minute).padStart(2, '0')}:00.000Z`;
 
 /** A synthetic thread with one run per agent driver given, and its messages. */
-function thread(id, { drivers = ['claudeAgent'], instance = drivers[0] ?? 'claudeAgent', messages = [], deletedAt = null, minute = 0 } = {}) {
-  return { id, drivers, instance, messages, deletedAt, minute };
+function thread(id, { drivers = ['claudeAgent'], instance = 'claudeAgent', messages = [], deletedAt = null, minute = 0, lineage } = {}) {
+  return { id, drivers, instance, messages, deletedAt, minute, lineage };
 }
 
-function buildCopy(path, threads, { head = 96, rename = null, dropMessageColumn = false } = {}) {
+function buildCopy(path, threads, { head = 96, rename = null, dropMessageColumn = false, mutate } = {}) {
   const database = new DatabaseSync(path);
   database.exec('PRAGMA journal_mode = WAL');
   database.exec(dropMessageColumn ? schema.replace('streaming INTEGER NOT NULL, ', '') : schema);
@@ -114,8 +115,10 @@ function buildCopy(path, threads, { head = 96, rename = null, dropMessageColumn 
   for (const item of threads) {
     const created = at(item.minute);
     insertThread.run(item.id, `Synthetic ${item.id}`, item.instance, created, created, item.deletedAt,
-      JSON.stringify({ id: item.id, providerInstanceId: item.instance }), item.instance);
-    item.drivers.forEach((driver, index) => {
+      JSON.stringify({ id: item.id, providerInstanceId: item.instance, ...(item.lineage ? { lineage: item.lineage } : {}) }), item.instance);
+    item.drivers.forEach((spec, index) => {
+      // A driver, or { run, attempt } when a run's second attempt used another provider thread.
+      const driver = typeof spec === 'string' ? spec : spec.run;
       const runId = `${item.id}-run-${index + 1}`;
       const providerThreadId = driver === 'missing-run' ? null : `${item.id}-pt-${index + 1}`;
       const model = driver === 'codex' ? 'gpt-synthetic' : 'claude-synthetic';
@@ -125,6 +128,9 @@ function buildCopy(path, threads, { head = 96, rename = null, dropMessageColumn 
       insertAttempt.run(`${runId}-attempt`, item.id, runId, `${runId}-root`, item.instance, providerThreadId, item.instance);
       if (driver === 'missing-provider-thread') return;
       insertProviderThread.run(providerThreadId, item.id, item.instance, created, driver === 'null-driver' ? null : driver, item.instance);
+      if (typeof spec === 'string') return;
+      insertAttempt.run(`${runId}-attempt-2`, item.id, runId, `${runId}-root`, item.instance, `${providerThreadId}-b`, item.instance);
+      insertProviderThread.run(`${providerThreadId}-b`, item.id, item.instance, created, spec.attempt, item.instance);
     });
     item.messages.forEach((message, index) => {
       const id = message.id ?? `${item.id}-m${String(index + 1).padStart(2, '0')}`;
@@ -134,9 +140,11 @@ function buildCopy(path, threads, { head = 96, rename = null, dropMessageColumn 
         ...(message.createdBy === undefined ? {} : { createdBy: message.createdBy }),
         attachments: [], streaming: Boolean(message.streaming),
       });
-      insertMessage.run(id, item.id, `${item.id}-run-1`, message.role, message.streaming ? 1 : 0, createdAt, createdAt, payload);
+      const run = message.run === null ? null : `${item.id}-run-${message.run ?? 1}`;
+      insertMessage.run(id, item.id, run, message.role, message.streaming ? 1 : 0, createdAt, createdAt, payload);
     });
   }
+  if (mutate) database.exec(mutate);
   database.close();
   return path;
 }
@@ -260,7 +268,7 @@ test('threads whose agent is another, several, unrecorded or absent are refused'
     { id: 't-lost', refusal: 'This T3 thread has a run whose agent is not recorded.' },
     { id: 't-null', refusal: 'This T3 thread has a run whose agent is not recorded.' },
     { id: 't-none', refusal: 'This T3 thread has no recorded agent run, so its agent is unknown.' },
-    { id: 't-queued', refusal: 'This T3 thread has no recorded agent run, so its agent is unknown.' },
+    { id: 't-queued', refusal: 'This T3 thread has a run whose agent is not recorded.' },
     { id: 't-quiet', refusal: 'This T3 thread has no finished user or assistant messages.' },
   ]);
 });
@@ -446,4 +454,193 @@ test('CLI refusals are fixed sentences on stderr with exit code 1', async t => {
   const good = buildCopy(join(directory, 'good.sqlite'), [thread('thread-1', { messages: conversation })]);
   const unreachable = await failure(good);
   assert.equal(unreachable.stderr.trim(), 'Cannot reach Context Ledger on port 1. Start it with npm start.');
+});
+
+// Review round 1 (Codex, of 6384054): one regression test or more per finding.
+
+test('attribution is per run: an unlinked run with an answer, an attempt on another agent, an answer without a run', t => {
+  const answerInRun2 = [...conversation.slice(0, 2), { role: 'user', text: 'Again.', run: 2 }, { role: 'assistant', text: 'Unattributed.', run: 2 }];
+  const path = buildCopy(join(workspace(t), 'copy.sqlite'), [
+    thread('t-mixed', { drivers: ['claudeAgent', 'missing-run'], messages: answerInRun2, minute: 1 }),
+    thread('t-attempt-switch', { drivers: [{ run: 'claudeAgent', attempt: 'codex' }], messages: conversation, minute: 2 }),
+    thread('t-orphan', { messages: [...conversation, { role: 'assistant', text: 'From nowhere.', run: null }], minute: 3 }),
+    // A queued run holds only the person's message; nothing in it needs an agent.
+    thread('t-queued-ok', { drivers: ['claudeAgent', 'missing-run'], messages: [...conversation, { role: 'user', text: 'Queued.', run: 2 }], minute: 4 }),
+  ]);
+  const [mixed, attempt, orphan, queued] = requestsFor(path);
+  assert.equal(mixed.refusal, 'This T3 thread has a run whose agent is not recorded.');
+  assert.equal(attempt.refusal, 'This T3 thread was run by more than one agent. Only threads run by one agent are imported.');
+  assert.equal(orphan.refusal, 'This T3 thread has a run whose agent is not recorded.');
+  assert.equal(queued.provider, 'claude');
+});
+
+test('the layout gate checks the whole migration history, table kinds, column types and keys', t => {
+  const directory = workspace(t);
+  const layout = 'This T3 Code database layout is not supported. The importer reads copies made by T3 Code v0.1.10 (schema 96) only.';
+  const messagesWithoutKey = `
+    ALTER TABLE orchestration_v2_projection_messages RENAME TO old_messages;
+    CREATE TABLE orchestration_v2_projection_messages (
+      message_id TEXT, thread_id TEXT NOT NULL, run_id TEXT, node_id TEXT, role TEXT NOT NULL,
+      streaming INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, payload_json TEXT NOT NULL,
+      search_text TEXT
+    );
+    INSERT INTO orchestration_v2_projection_messages SELECT * FROM old_messages;
+    DROP TABLE old_messages;`;
+  const cases = {
+    'gap.sqlite': { mutate: 'DELETE FROM effect_sql_migrations WHERE migration_id = 50' },
+    'renamed-50.sqlite': { rename: { id: 50, name: 'ProjectionThreadPullRequestz' } },
+    'view.sqlite': {
+      mutate: `ALTER TABLE orchestration_v2_projection_messages RENAME TO real_messages;
+        CREATE VIEW orchestration_v2_projection_messages AS SELECT * FROM real_messages;`,
+    },
+    'no-key.sqlite': { mutate: messagesWithoutKey },
+    'retyped.sqlite': {
+      mutate: `ALTER TABLE orchestration_v2_projection_provider_threads RENAME COLUMN driver TO old_driver;
+        ALTER TABLE orchestration_v2_projection_provider_threads ADD COLUMN driver BLOB;`,
+    },
+  };
+  for (const [name, options] of Object.entries(cases)) {
+    const path = buildCopy(join(directory, name), [thread('thread-1', { messages: conversation })], options);
+    assert.throws(() => openT3Copy(path), { message: layout }, name);
+  }
+  const good = buildCopy(join(directory, 'good.sqlite'), [thread('thread-1', { messages: conversation })]);
+  openT3Copy(good).close();
+});
+
+test('reading leaves only empty SQLite side files beside the copy, and a copy with a pending -wal is refused', t => {
+  const directory = workspace(t);
+  const copy = buildCopy(join(directory, 'copy.sqlite'), [thread('thread-1', { messages: conversation })]);
+  const before = readFileSync(copy);
+  requestsFor(copy);
+  requestsFor(copy);
+  assert.deepEqual(readFileSync(copy), before);
+  const entries = readdirSync(directory).sort();
+  assert.ok(entries.every(entry => ['copy.sqlite', 'copy.sqlite-shm', 'copy.sqlite-wal'].includes(entry)), entries.join(','));
+  if (entries.includes('copy.sqlite-wal')) assert.equal(statSync(join(directory, 'copy.sqlite-wal')).size, 0);
+
+  const pending = buildCopy(join(directory, 'pending.sqlite'), [thread('thread-1', { messages: conversation })]);
+  writeFileSync(pending + '-wal', 'synthetic unsaved frames');
+  assert.throws(() => openT3Copy(pending), { message: 'This copy has unsaved changes in a -wal file beside it. Quit T3 Code, then copy statev2.sqlite again.' });
+});
+
+test('the 8 MiB limit is counted on the encoded request, with multibyte text and escapes, before any request', t => {
+  const directory = workspace(t);
+  const prefix = 'Synthetic ' + String.fromCodePoint(0xe9, 0x4e2d, 0x1f600) + ' "quoted" \\ ' + String.fromCodePoint(7) + ' ';
+  const build = (name, fill) => buildCopy(join(directory, name), [
+    thread('thread-big', { messages: [{ role: 'user', text: prefix + 'a'.repeat(fill) }] }),
+  ]);
+  const [{ id: smallId, ...small }] = requestsFor(build('small.sqlite', 0));
+  const room = 8 * 1024 * 1024 - Buffer.byteLength(JSON.stringify(small));
+  const [{ id: exactId, ...exact }] = requestsFor(build('exact.sqlite', room));
+  assert.equal(Buffer.byteLength(JSON.stringify(exact)), 8 * 1024 * 1024);
+  assert.deepEqual([smallId, exactId, exact.provider], ['thread-big', 'thread-big', 'claude']);
+  const over = build('over.sqlite', room + 1);
+  assert.deepEqual(requestsFor(over), [{ id: 'thread-big', refusal: 'This T3 thread is larger than the 8 MiB import limit.' }]);
+  const copy = openT3Copy(over);
+  try {
+    assert.deepEqual(copy.threads().map(item => copy.summary(item)), [{
+      thread: 'thread-big', agent: 'claude', models: ['claude-synthetic'],
+      refused: 'This T3 thread is larger than the 8 MiB import limit.', title: 'Synthetic thread-big',
+    }]);
+  } finally {
+    copy.close();
+  }
+
+  const store = openStore(':memory:');
+  t.after(() => store.close());
+  assert.equal(store.get(store.importTranscript(exact).id).messages[0].text, prefix + 'a'.repeat(room));
+});
+
+test('a subagent thread is refused and a fork imports only its own messages', t => {
+  const path = buildCopy(join(workspace(t), 'copy.sqlite'), [
+    thread('thread-child', {
+      messages: conversation, minute: 1,
+      lineage: { parentThreadId: 'thread-parent', relationshipToParent: 'subagent', rootThreadId: 'thread-parent' },
+    }),
+    thread('thread-fork', {
+      messages: conversation.slice(2), minute: 2,
+      lineage: { parentThreadId: 'thread-parent', relationshipToParent: 'fork', rootThreadId: 'thread-parent' },
+    }),
+  ]);
+  const [child, fork] = requestsFor(path);
+  assert.deepEqual(child, { id: 'thread-child', refusal: 'This T3 thread is a subagent\'s. Import the thread that started it.' });
+  const store = openStore(':memory:');
+  t.after(() => store.close());
+  assert.deepEqual(importInto(store, fork).messages.map(message => message.line), [1, 2]);
+});
+
+test('a later snapshot of a thread is a new session whose earlier lines are unchanged', t => {
+  const directory = workspace(t);
+  const first = buildCopy(join(directory, 'first.sqlite'), [thread('thread-1', { messages: conversation })]);
+  const second = buildCopy(join(directory, 'second.sqlite'), [thread('thread-1', { messages: [...conversation, { role: 'user', text: 'One more.' }] })]);
+  const store = openStore(':memory:');
+  t.after(() => store.close());
+  const before = importInto(store, requestsFor(first)[0]);
+  const after = importInto(store, requestsFor(second)[0]);
+  assert.notEqual(after.id, before.id);
+  assert.deepEqual(after.messages.slice(0, before.messages.length), before.messages);
+});
+
+/** A loopback stand-in for the ledger that answers each import with the next reply. */
+async function fakeLedger(t, replies) {
+  const seen = [];
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    seen.push(body);
+    const reply = replies[seen.length - 1];
+    if (reply === 'drop') return request.socket.destroy();
+    response.writeHead(reply.status, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify(typeof reply.body === 'function' ? reply.body(body) : reply.body));
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  return { port: server.address().port, seen };
+}
+
+const sessionFor = body => ({ session: { id: 'c'.repeat(64), provider: body.provider, source: body.source, title: 'x', messageCount: 1 } });
+
+test('the CLI prints only its own sentences for server errors and checks what the server returns', async t => {
+  const path = buildCopy(join(workspace(t), 'copy.sqlite'), [thread('thread-1', { messages: conversation })]);
+  const echo = 'C:\\Users\\someone\\secret\\statev2.sqlite thread-1' + String.fromCodePoint(0x2028) + 'text';
+  const cases = [
+    [{ status: 400, body: { error: echo } }, 'Context Ledger refused this T3 thread.'],
+    [{ status: 400, body: { error: 'No supported conversation messages found.' } }, 'No supported conversation messages found.'],
+    [{ status: 413, body: { error: echo } }, 'This T3 thread is larger than the 8 MiB import limit.'],
+    [{ status: 500, body: { error: echo } }, 'Context Ledger returned HTTP 500.'],
+    [{ status: 200, body: { session: { id: 'not-an-id', provider: 'claude', source: 't3-thread-1.jsonl' } } }, 'Context Ledger returned an unexpected response.'],
+    [{ status: 200, body: body => ({ session: { ...sessionFor(body).session, provider: 'codex' } }) }, 'Context Ledger returned an unexpected response.'],
+    [{ status: 200, body: body => ({ session: { ...sessionFor(body).session, source: 'other.jsonl' } }) }, 'Context Ledger returned an unexpected response.'],
+  ];
+  for (const [reply, message] of cases) {
+    const { port } = await fakeLedger(t, [reply]);
+    const error = await cli(port, path, '--thread', 'thread-1').then(() => assert.fail('expected exit 1'), failure => failure);
+    assert.equal(error.code, 1);
+    assert.equal(error.stderr.trim(), message);
+    assert.equal(error.stdout, '');
+  }
+});
+
+test('a dropped connection keeps the imports already confirmed and marks the rest unknown', async t => {
+  const path = buildCopy(join(workspace(t), 'copy.sqlite'), [
+    thread('thread-a', { messages: conversation, minute: 1 }),
+    thread('thread-b', { messages: conversation, minute: 2 }),
+    thread('thread-c', { messages: conversation, minute: 3 }),
+  ]);
+  const { port, seen } = await fakeLedger(t, [{ status: 200, body: sessionFor }, 'drop']);
+  const error = await cli(port, path).then(() => assert.fail('expected exit 1'), failure => failure);
+  assert.equal(error.code, 1);
+  assert.equal(seen.length, 2);
+  assert.match(error.stderr, /^Cannot reach Context Ledger on port \d+\. Start it with npm start\. Run the same import again/u);
+  const output = JSON.parse(error.stdout);
+  assert.deepEqual(output.imported.map(item => item.thread), ['thread-a']);
+  assert.deepEqual(output.refused, []);
+  assert.deepEqual(output.unknown, [
+    { thread: 'thread-b', unknown: 'The connection to Context Ledger was lost; this thread may not be imported.' },
+    { thread: 'thread-c', unknown: 'Not tried after the connection was lost.' },
+  ]);
 });

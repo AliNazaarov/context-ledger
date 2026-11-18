@@ -9,7 +9,6 @@ const usage = 'Usage: npm run ledger -- search [--provider claude|codex] [query]
   '       npm run ledger -- graph read <graph-id>\n' +
   '       npm run ledger -- import-t3 <copy-of-statev2.sqlite> [--thread <id>] [--list]';
 const maxGraphPacketBytes = 8 * 1024 * 1024;
-const maxImportBytes = 8 * 1024 * 1024;
 
 function command(argv) {
   const [action, ...args] = argv;
@@ -76,11 +75,21 @@ function serverProblem(problem) {
   if (typeof problem?.error === 'string' && problem.error.length <= 160 && !/\p{C}/u.test(problem.error)) return problem.error;
 }
 
-async function postImport(port, request) {
+// Messages the store can give for an import (src/store.mjs). Any other text from the
+// server is replaced by a fixed sentence, so the CLI never prints what it did not write.
+const knownImportProblems = new Set([
+  'No supported conversation messages found.',
+  'Invalid transcript file name.',
+  'Transcript must be JSONL text.',
+]);
+
+/** One import request. Returns { session }, { refused } or { lost } when the outcome is unknown. */
+async function postImport(port, request, maxBytes) {
   const origin = `http://127.0.0.1:${port}`;
   const body = JSON.stringify(request);
-  if (Buffer.byteLength(body) > maxImportBytes) return { refused: 'This T3 thread is larger than the 8 MiB import limit.' };
+  if (Buffer.byteLength(body) > maxBytes) return { refused: 'This T3 thread is larger than the 8 MiB import limit.' };
   let response;
+  let data;
   try {
     response = await fetch(origin + '/api/import', {
       method: 'POST',
@@ -89,16 +98,22 @@ async function postImport(port, request) {
       redirect: 'error',
       signal: AbortSignal.timeout(30000),
     });
+    data = await response.json().catch(() => null);
   } catch {
-    throw new Error(`Cannot reach Context Ledger on port ${port}. Start it with npm start.`);
+    return { lost: true };
   }
-  if (!response.ok) {
-    const problem = response.status === 400 || response.status === 413 ? await response.json().catch(() => null) : null;
-    return { refused: serverProblem(problem) ?? `Context Ledger returned HTTP ${response.status}.` };
+  if (response.status === 413) return { refused: 'This T3 thread is larger than the 8 MiB import limit.' };
+  if (response.status === 400) {
+    const problem = data?.error;
+    return { refused: knownImportProblems.has(problem) ? problem : 'Context Ledger refused this T3 thread.' };
   }
-  const data = await response.json().catch(() => null);
-  if (typeof data?.session?.id !== 'string') return { refused: 'Context Ledger returned an unexpected response.' };
-  return { session: data.session };
+  if (!response.ok) return { refused: `Context Ledger returned HTTP ${response.status}.` };
+  const session = data?.session;
+  if (typeof session?.id !== 'string' || !/^[a-f0-9]{64}$/u.test(session.id)
+    || session.provider !== request.provider || session.source !== request.source) {
+    return { refused: 'Context Ledger returned an unexpected response.' };
+  }
+  return { session };
 }
 
 // Imports T3 Code threads from a copy of T3's database that the person names. Read-only;
@@ -117,11 +132,12 @@ async function importT3(args) {
   const { values, positionals } = parsed;
   if (positionals.length !== 1) throw new Error(usage);
   // Loaded here so the other commands do not load node:sqlite and print its warning.
-  const { openT3Copy, threadIdPattern } = await import('./t3code.mjs');
+  const { maxImportBytes, openT3Copy, threadIdPattern } = await import('./t3code.mjs');
   if (values.thread !== undefined && !threadIdPattern.test(values.thread)) {
     throw new Error('A T3 thread ID is 1 to 128 letters, digits, hyphens or underscores.');
   }
   const port = values.list ? undefined : ledgerPort();
+  const unreachable = `Cannot reach Context Ledger on port ${port}. Start it with npm start.`;
 
   const copy = openT3Copy(positionals[0]);
   try {
@@ -132,15 +148,27 @@ async function importT3(args) {
     }
     const imported = [];
     const refused = [];
-    for (const thread of threads) {
+    const unknown = [];
+    let answered = false;
+    for (const [index, thread] of threads.entries()) {
       const request = copy.importRequest(thread);
-      const result = request.refusal ? { refused: request.refusal } : await postImport(port, request);
+      const result = request.refusal ? { refused: request.refusal } : await postImport(port, request, maxImportBytes);
+      if (result.lost) {
+        if (!answered) throw new Error(unreachable);
+        // The server may have stored it before the connection dropped. Importing again is
+        // safe: the same thread gives the same session.
+        unknown.push({ thread: thread.id, unknown: 'The connection to Context Ledger was lost; this thread may not be imported.' });
+        for (const rest of threads.slice(index + 1)) unknown.push({ thread: rest.id, unknown: 'Not tried after the connection was lost.' });
+        break;
+      }
+      if (!request.refusal) answered = true;
       if (result.session) imported.push({ thread: thread.id, agent: request.provider, session: result.session });
       else refused.push({ thread: thread.id, refused: result.refused });
     }
     if (values.thread !== undefined && refused.length > 0) throw new Error(refused[0].refused);
-    console.log(terminalJson({ imported, refused }));
-    if (refused.length > 0) process.exitCode = 1;
+    console.log(terminalJson({ imported, refused, ...(unknown.length ? { unknown } : {}) }));
+    if (unknown.length > 0) console.error(unreachable + ' Run the same import again to finish; it does not import a thread twice.');
+    if (refused.length > 0 || unknown.length > 0) process.exitCode = 1;
   } finally {
     copy.close();
   }
