@@ -1409,3 +1409,23 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## P1e — Loopback API token (`ruslan/p1e-loopback-token`, defined 2026-11-17, before implementation)
+
+ADR-10 in the P1 design (PR #37, section 6): the loopback server needs a secret on every API request, the browser gets it as a cookie through a one-time sign-in link, and the CLI and the MCP adapter read it from a file. This card is security work: it needs a human security review before merge (AGENTS.md section 4).
+
+**Threat model.**
+
+- **Other local users** on the same machine can reach 127.0.0.1 but cannot read files in the owner's account. Today they can read and write the whole ledger. After this card they get 401 on every API route unless they can read the token file (mode 0600 on POSIX, in a 0700 folder) or steal a browser cookie.
+- **Other local processes of the same user** (including agents and malware) can read the token file, so they are not stopped. The token stops honest clients that were not given access and processes sandboxed away from the user's files; it does not stop same-user malware. The decisions route keeps its `Sec-Fetch-Site` rule, which an agent with the token can still forge.
+- **A web page in the user's browser** cannot read the token or the cookie. The cookie is `HttpOnly; SameSite=Strict`. The Host allowlist (DNS rebinding), the exact Origin check on writes, JSON-only bodies and no CORS stay as they are, so a page can neither read API responses nor write.
+- **Not protected:** same-user malware, root or an administrator; anyone who can read the token file; a page served from another port on 127.0.0.1 in the same browser, which receives the cookie because cookies are not isolated by port (so another local user who gets the owner to open their local page can take a browser session until it expires or the server restarts); a sign-in link that someone else opens first within its lifetime. On Windows the file mode is not enforced: the token file gets the ACL of its folder, which under the user profile is normally the user, SYSTEM and Administrators.
+
+| Eval | Expected |
+| --- | --- |
+| Token at start | Each server start writes a fresh token of at least 32 random bytes to `<database>.token`, created exclusively (an existing file or link there is removed first, and a race fails closed) with mode 0600 where the OS supports it, in a folder created as 0700. The server keeps only a SHA-256 digest in memory. The token is never printed. |
+| Every API request needs it | Without the token or a valid session cookie, every route outside the static files and `/login`, every method and every unknown path, answers 401 with a fixed message and `WWW-Authenticate: Bearer`. A wrong, short, long or malformed token, a cookie from another start, and a token sent as a cookie all get 401. The comparison is constant time on digests. Static files stay public. |
+| Checks keep their order | The Host and URL checks still come before the token check (a foreign Host without a token is 403, not 401). With the token, every probe in `tests/routes.test.mjs` answers as before; the only change to that test is that it sends the token, plus a block that pins the 401s. |
+| Browser sign-in | The server prints a one-time sign-in URL `/login?code=…` at start; `npm run ledger -- login` prints a new one. A code works once, within 60 seconds, and sets an `HttpOnly; SameSite=Strict; Path=/` session cookie (12 hours, per port), then redirects to `/` (303). A used, expired, unknown or malformed code is 401 and sets no cookie. The token itself never reaches the browser, a URL or a fragment; codes are minted only with the bearer token, not with a cookie. |
+| CLI and MCP keep working | The CLI and the MCP adapter read the token file named by `CONTEXT_LEDGER_DB` (the repository's `.context-ledger/ledger.sqlite` by default) on each request and send `Authorization: Bearer`. Their errors for a missing file or a refused token are fixed sentences that name neither the token nor a path; a ledger that is not running still gives the existing "Cannot reach" message. |
+| Suites | Every node test and Playwright spec that calls the API passes, using the token file (node) or the sign-in link (browser). Playwright adds a browser test for sign-in and for an unauthenticated page. Node, graph, Playwright and Python suites pass. |
