@@ -1389,13 +1389,13 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
 
 ## D1 — T3 Code integration (defined 2026-11-17)
 
-The card has two parts: a guide for using the ledger from T3 Code, and an explicit, user-chosen importer for T3's thread store.
+D1 is the guide for using the ledger from T3 Code. The importer for T3's thread store, first part of this card, moved to D3, and `ledger install` belongs to G8.
 
 ### The guide (built)
 
 `docs/integrations/t3code.md`, written from T3's public documentation, with the page behind each step linked:
 
-- T3 runs Claude Code and Codex with their own configuration. So the server is registered for those CLIs (`ledger install` or the README), on the machine of the environment whose threads use it, because the ledger answers on loopback.
+- T3 runs Claude Code and Codex with their own configuration. So the server is registered for those CLIs, as in the README, on the machine of the environment whose threads use it, because the ledger answers on loopback. Whether T3 sessions load it is unverified, and a check from a new thread ends the steps.
 - T3 instances with their own `CLAUDE_CONFIG_DIR` or `CODEX_HOME` need the server registered in that folder. A Codex shadow home shares the main home's configuration.
 - Other providers, and T3's own outside-agents MCP endpoint, are out of scope; the guide says which direction that endpoint goes.
 - What was not checked, since we have not run T3.
@@ -1407,8 +1407,8 @@ The card has two parts: a guide for using the ledger from T3 Code, and an explic
 An importer would read T3's SQLite store read-only, from a copy the person makes. We did not build it, for three reasons:
 
 - T3's V2 store (`statev2.sqlite`) is event-sourced, and its tables are not documented.
-- The legacy tables T3's own recovery guide queries (`projection_thread_messages` with `role` and `text`) do not match the released schema of at least one public fork (`author` and `message_json`). So the layout changes between versions.
-- We have no real or synthetic T3 database of a known version to test against, and the ledger's store takes only Claude Code and Codex transcripts (a third provider is a schema change, after P1).
+- The only layout T3 documents is the recovery query for the V1 database (`state.sqlite`). V2 keeps an event log with derived tables whose layout is not documented.
+- We have no test database made from synthetic threads on a pinned T3 release, and the ledger's store takes only Claude Code and Codex transcripts (a third provider is a schema change, after P1).
 
 An importer built on a guessed layout could silently misread threads, which matters for a tool whose point is citing the exact line. A new Backlog card, D3, holds it until a sample database exists.
 
@@ -1429,3 +1429,9 @@ An importer built on a guessed layout could silently misread threads, which matt
   - (medium) This eval now says what the test checks and what is still owed.
   - (low) Prerequisites, `PORT`, shell labels and PowerShell forms are added. The claim about every provider taking MCP servers is removed. The session-file paths are leads to check.
   - D3 stays deferred, as the review advised. Its row now says to pin one T3 release, build a test database from synthetic threads, and consider T3's thread-reading MCP tool as a source.
+- **Codex, round 2** (of fc58cf1): the high finding is fixed, and the setup, provider, storage and permission fixes hold. Fixed in the next commit:
+  - (medium) How to use your own Codex login (Configure manually), with the check run per instance and on the tool result itself.
+  - (medium) Where to open the ledger on a remote host (on it, or through a port forward; WSL).
+  - (medium) This eval's body now matches the board: D1 is the guide, D3 the importer, G8 the installer. The fork comparison is gone.
+  - (low) T3's labels for access levels, what a migrated thread's session file may lack, and the README wording.
+- **Still owed:** a person who runs T3 follows the guide for Claude and for a manually configured Codex instance and records the result here.

@@ -17,7 +17,7 @@ test('D1: the T3 Code guide matches the code and the README', () => {
   for (const line of commands) assert.match(line, /mcp add (?:--scope user )?context-ledger -- node \S*\/src\/mcp\.mjs/u, line);
   // Review round 1: discovery in T3 sessions is labelled unverified, and step 5 checks it.
   assert.match(guide, /That is likely, but unverified/u);
-  assert.match(guide, /Check it from a T3 thread, once per provider/u);
+  assert.match(guide, /Check it from a T3 thread, once per instance/u);
   assert.ok(guide.includes('../../README.md#negotiation-room'));
   assert.match(readme, /^## Negotiation room$/mu);
   assert.match(readme, /^## Connect an agent over MCP$/mu);

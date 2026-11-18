@@ -34,7 +34,7 @@ Claim a card before working on it (AGENTS.md section 2). States: Backlog, Ready,
 | U1 Console v0 | Unassigned | — | Read-only Grafana-style console in the loopback browser app, built on today's API: live graph as agents publish, evidence pane with cited lines highlighted, panels for handoffs, estimated tokens saved, quoted vs inferred nodes and which agent read or published what (aggregate counts only for dogfooding). Review actions stay in P3 | Backlog |
 | U2 Brand and mascot | Unassigned | — | Original character, palette and type for the console and video; take Capy's warmth as a reference only, no copied assets or look | Backlog |
 | U3 60-second demo video | Unassigned | — | Script and record install, two agents, graph growing, click-through to a cited line; synthetic transcripts only | Backlog (after U1, G8) |
-| D1 T3 Code integration | Claude Code (for Ruslan) | `ruslan/d1-t3code-guide` | Guide for using the ledger from T3 Code's Claude and Codex threads. The importer for T3's thread store moved to D3 | In progress |
+| D1 T3 Code integration | Claude Code (for Ruslan) | `ruslan/d1-t3code-guide` | Guide for using the ledger from T3 Code's Claude and Codex threads. The importer for T3's thread store moved to D3 | In review |
 | D3 T3 Code thread importer | Unassigned | — | Explicit, read-only importer for T3 threads, from a copy of its store the person makes. Blocked on a documented, versioned layout and a test database made from synthetic threads on one pinned T3 release (D1 eval); T3's thread-reading MCP tool is another source to evaluate | Backlog (needs a sample; after P1 for a third provider) |
 | D2 Capy integration guide | Unassigned | — | Guide for adding the ledger as an MCP server for a Capy organization | Backlog |
 
