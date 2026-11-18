@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -489,7 +489,13 @@ test('review round 4: an existing Codex HTTP entry is recognised and left alone'
 });
 
 test('review round 4: a file swapped for one with the same bytes, or given another mode, during install is not overwritten', t => {
-  const swaps = [['same bytes, new file', path => { const bytes = readFileSync(path); rmSync(path); writeFileSync(path, bytes); }]];
+  // The new file is written beside the old one and renamed over it, so it cannot reuse
+  // the old inode (Linux reuses a freed inode at once, which CI showed).
+  const swaps = [['same bytes, new file', path => {
+    const fresh = `${path}.fresh`;
+    writeFileSync(fresh, readFileSync(path));
+    renameSync(fresh, path);
+  }]];
   if (!windows) swaps.push(['mode changed', path => chmodSync(path, 0o600)]);
   for (const [what, swap] of swaps) {
     const box = sandbox(t);
