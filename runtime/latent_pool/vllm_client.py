@@ -77,7 +77,9 @@ class _Watch:
     def _shut(self):
         if self._sock is not None:
             try:
-                self._sock.shutdown(socket.SHUT_RDWR)
+                # The plain socket's shutdown, even for a TLS socket: SSLSocket.shutdown
+                # drops the TLS state that an in-flight read or handshake still uses.
+                socket.socket.shutdown(self._sock, socket.SHUT_RDWR)
             except OSError:
                 pass
 
@@ -158,6 +160,10 @@ def _connector(watch):
                     sock.bind(source_address)
                 watch.attach(sock)
                 sock.connect(sockaddr)
+                # The timer may have fired while the socket was still connecting, when
+                # shutdown has nothing to act on: check again before handing it over.
+                if watch.expired:
+                    raise socket.timeout("connect ran out of time")
                 return sock
             except OSError as error:
                 if sock is not None:

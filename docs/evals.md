@@ -1016,6 +1016,10 @@ From the H7 Codex review. `VllmClient._chat` passes the call's budget (the clien
   - (low) A failure making the socket skipped the remaining addresses. Socket creation is now inside the per-address guard. Test: an IPv6 address whose socket cannot be made is skipped and the IPv4 one is used.
   - (low) The truncated-body test did not raise `IncompleteRead`. It now uses a truncated chunked body.
   - (low) The late-reply test could pass through a socket timeout, and the DNS test slept 3 s with ambient proxies. The late-reply test now checks that the whole reply was read first; the DNS test isolates proxies and releases its lookup with an event.
+  - Found while running in WSL: the late-reply test checked the server's "finished" flag before the server set it. The flag is now an event set right after the last byte, and the test waits for it.
+- **Codex, round 3** (of 027fe2b): two medium findings, fixed with tests that fail against 027fe2b.
+  - (medium) `SSLSocket.shutdown` drops the TLS state, so a timer firing during a TLS read or handshake could raise outside the timeout handlers. The watch now calls the plain socket's shutdown on any socket. Test: after the watch fires on a TLS socket, its TLS state is still there and the peer sees the transport close.
+  - (medium) If the timer fired while a socket was still connecting, the shutdown had nothing to act on, and the socket could be handed over after the deadline. The connector now checks the deadline again after `connect()` and closes the socket. Test: a socket that connects only after the deadline raises a timeout and is closed.
 
 ## Cycle 11 — Latent runtime performance baseline (defined 2026-11-12, before measuring)
 

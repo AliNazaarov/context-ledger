@@ -384,6 +384,53 @@ class ReviewRoundTwoTest(unittest.TestCase):
         self.assertEqual((caught.exception.status, caught.exception.message), (503, NOT_READY))
 
 
+class ReviewRoundThreeTest(unittest.TestCase):
+    """Codex review of 027fe2b."""
+
+    def test_the_watch_keeps_the_tls_state_when_it_shuts_a_tls_socket(self):
+        from latent_pool.vllm_client import _Watch
+        mine, peer = socket.socketpair()
+        tls = ssl.create_default_context().wrap_socket(mine, server_hostname="model.invalid",
+                                                        do_handshake_on_connect=False)
+        watch = _Watch(time.perf_counter() + 30)
+        try:
+            watch.attach(tls)
+            watch._expire()
+            self.assertIsNotNone(tls._sslobj, "an in-flight TLS read keeps its state")
+            peer.settimeout(2)
+            self.assertEqual(peer.recv(16), b"", "the transport was shut down")
+        finally:
+            watch.cancel()
+            tls.close()
+            peer.close()
+
+    def test_a_socket_that_connects_after_the_deadline_is_not_handed_over(self):
+        from latent_pool.vllm_client import _Watch, _connector
+        server = TrickleServer("whole")
+        port = int(server.url.rsplit(":", 1)[1].split("/")[0])
+        made = []
+
+        class SlowConnect(socket.socket):
+            def connect(self, address):
+                super().connect(address)
+                time.sleep(0.4)  # connected, but only after the deadline
+
+        def slow_socket(*args, **kwargs):
+            made.append(SlowConnect(*args, **kwargs))
+            return made[-1]
+
+        try:
+            with mock.patch("latent_pool.vllm_client.threading.Timer", _SilentTimer), \
+                    mock.patch("latent_pool.vllm_client._new_socket", slow_socket):
+                watch = _Watch(time.perf_counter() + 0.2)
+                with self.assertRaises(socket.timeout):
+                    _connector(watch)(("127.0.0.1", port))
+        finally:
+            server.close()
+        self.assertEqual(len(made), 1)
+        self.assertEqual(made[0].fileno(), -1, "the late socket was closed")
+
+
 class _LateClient:
     """A client that answers, or fails with `error`, only after `delay` seconds."""
 
