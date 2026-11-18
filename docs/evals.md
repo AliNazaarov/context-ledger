@@ -1386,3 +1386,34 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## D1 — T3 Code integration (defined 2026-11-17)
+
+The card has two parts: a guide for using the ledger from T3 Code, and an explicit, user-chosen importer for T3's thread store.
+
+### The guide (built)
+
+`docs/integrations/t3code.md`, written from T3's public documentation, with the page behind each step linked:
+
+- T3 runs Claude Code and Codex with their own configuration. So the server is registered for those CLIs (`ledger install` or the README), on the machine of the environment whose threads use it, because the ledger answers on loopback.
+- T3 instances with their own `CLAUDE_CONFIG_DIR` or `CODEX_HOME` need the server registered in that folder. A Codex shadow home shares the main home's configuration.
+- Other providers, and T3's own outside-agents MCP endpoint, are out of scope; the guide says which direction that endpoint goes.
+- What was not checked, since we have not run T3.
+
+`tests/integrations-t3.test.mjs` keeps the guide in step with the code: the commands it gives use the server name, path and arguments that `src/install.mjs` registers. Its README link exists, and every T3 link points at the T3 repository.
+
+### The importer (not built; blocked)
+
+An importer would read T3's SQLite store read-only, from a copy the person makes. We did not build it, for three reasons:
+
+- T3's V2 store (`statev2.sqlite`) is event-sourced, and its tables are not documented.
+- The legacy tables T3's own recovery guide queries (`projection_thread_messages` with `role` and `text`) do not match the released schema of at least one public fork (`author` and `message_json`). So the layout changes between versions.
+- We have no real or synthetic T3 database of a known version to test against, and the ledger's store takes only Claude Code and Codex transcripts (a third provider is a schema change, after P1).
+
+An importer built on a guessed layout could silently misread threads, which matters for a tool whose point is citing the exact line. A new Backlog card, D3, holds it until a sample database exists.
+
+### Acceptance
+
+- The four suites pass.
+- Codex reviews the guide read-only against T3's documentation; findings are fixed or recorded here.
+- A person who runs T3 follows the guide once and records the result here.
