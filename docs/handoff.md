@@ -259,3 +259,13 @@ Next steps:
 1. **The 60-second recording (raw material for U3) is for a person to make.** Run `npm start`, open `http://127.0.0.1:4317/console/?demo&autoplay=0` in a 1440×900 window, start a screen recorder, click **Play demo**, wait for "Demo finished" (34 s), then click "The ledger stays on port 4317" to open its proof, and stop at about 60 s.
 2. A human review of the PR. It touches no security, export or signing code, but it does add static routes to the server.
 3. When G7 lands, give the quoted and inferred marks a field name and check the colours in the console.
+
+## Current checkpoint — U3 60-second demo video (2026-11-17)
+
+Branch `ruslan/u3-demo-video`, stacked on U1 (`ruslan/console-v0`). [docs/video/u3-script.md](video/u3-script.md) is the shot list and voice-over, timed to 60 seconds. `node demo/record-console.mjs` records the console part as raw footage into `test-results/u3/console-demo.webm` (about 42 seconds, synthetic Orbit demo, not committed).
+
+Next steps:
+
+1. A person records the terminal shots and the voice-over and cuts the video to the shot list. The install shot uses `npm run ledger -- install` once G8 is merged, or the README's two `mcp add` commands before that.
+2. Swap in Pip for the title card once U2 is merged.
+3. Link the finished video in the U3 eval section, and move the card to Done.
