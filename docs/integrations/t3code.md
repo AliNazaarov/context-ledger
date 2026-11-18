@@ -1,53 +1,79 @@
 # Context Ledger in T3 Code
 
-*Card D1. Written 2026-11-17 from T3 Code's public documentation, linked at each step. We have not run T3 Code ourselves yet; see "Not checked yet" at the end.*
+*Card D1. Written 2026-11-17 from T3 Code's public documentation (`main` branch as read that day), linked at each step, and revised after a review. We have not run T3 Code ourselves yet; see "Not checked yet" at the end.*
 
-T3 Code is a control panel over agent CLIs you already have. It runs Claude Code through its Agent SDK and Codex through its App Server ([T3 Code README](https://github.com/pingdotgg/t3code)). Those agents keep their own configuration, so the ledger's MCP server reaches T3 threads the same way it reaches the CLIs.
+T3 Code is a control panel over agent CLIs you already have. It runs Claude Code through its Agent SDK and Codex through its App Server ([T3 Code README](https://github.com/pingdotgg/t3code)). This guide covers those two providers.
 
-## Add the ledger for T3's Claude and Codex threads
+## What T3 says, and what we have not checked
 
-1. **Run the ledger where the agents run.** T3 can drive agents on a remote environment, and it uses "the Claude configuration on the connected server" ([Claude provider](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-claude.md)). The ledger answers on loopback only, so run `npm start` on the machine of the environment whose threads should use it.
+T3's docs say "T3 Code uses Claude Code's login and configuration" ([Claude provider](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-claude.md)). They also say a Codex instance uses a Codex home whose `config.toml` it reads ([Codex provider](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-codex.md)).
 
-2. **Register the server for the CLIs T3 uses**, on that machine:
+They do **not** say that a T3 session loads the MCP servers registered in that configuration the way the `claude` and `codex` CLIs do. That is likely, but unverified. The steps below register the server where the CLIs look for it. Step 5 checks, for each provider, that a T3 thread really gets the tools.
+
+## Steps
+
+1. **Run the ledger where the agents run.** T3 can drive agents on a remote environment, and uses "the Claude configuration on the connected server" ([Claude provider](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-claude.md)). The ledger answers on loopback only, so set it up on the machine of the environment whose threads should use it. It needs Node.js 22.14 or later:
 
    ```sh
-   npm run ledger -- install            # Claude Code and Codex, user scope (add --dry-run to preview)
+   npm ci
+   npm start
    ```
 
-   `ledger install` comes with card G8 (its own pull request); until that is merged, register the server by hand, as in [the README](../../README.md#connect-an-agent-over-mcp). "T3 Code uses Claude Code's login and configuration" ([Claude provider](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-claude.md)), and its Codex instances use a Codex home with its own `config.toml` ([Codex provider](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-codex.md)), so a server registered there is the one T3's threads load.
+   Import a transcript in the browser at the address it prints, so the agent has something to read.
 
-3. **Instances with their own configuration folder** need the server in that folder too:
+2. **Register the server for Claude Code and Codex** on that machine, with the absolute path to this repository's `src/mcp.mjs`, as in [the README](../../README.md#connect-an-agent-over-mcp):
 
-   | T3 instance setting | Register with |
+   ```sh
+   claude mcp add --scope user context-ledger -- node /path/to/context-ledger/src/mcp.mjs
+   codex mcp add context-ledger -- node /path/to/context-ledger/src/mcp.mjs
+   ```
+
+   If the ledger runs on another port than 4317, pass it on: `claude mcp add -e PORT=4400 --scope user …` and `codex mcp add context-ledger --env PORT=4400 -- …`. Card G8 adds `npm run ledger -- install`, which does both steps and adds an instruction note. Until that is merged, use the commands above.
+
+3. **Instances with their own configuration folder** need the server in that folder too. In T3, open **Settings → Providers** and look at each instance:
+
+   | T3 instance setting | Register with (bash, zsh) |
    | --- | --- |
    | Claude **CLAUDE_CONFIG_DIR path**, such as `~/.claude_personal` | `CLAUDE_CONFIG_DIR=~/.claude_personal claude mcp add --scope user context-ledger -- node /path/to/context-ledger/src/mcp.mjs` |
    | Codex **CODEX_HOME path** other than `~/.codex` | `CODEX_HOME=/that/path codex mcp add context-ledger -- node /path/to/context-ledger/src/mcp.mjs` |
 
-   T3 keeps separate Claude config directories isolated, including their local conversation state ([Claude provider](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-claude.md#separate-accounts-or-configurations)). A Codex shadow home shares the main home's configuration ([Codex provider](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-codex.md#multiple-cli-logins)), so register the server in the shared **CODEX_HOME path**, not in the shadow folder.
+   In PowerShell, set the variable first: `$env:CLAUDE_CONFIG_DIR = "$HOME\.claude_personal"`, then run the same `claude mcp add` command. Do the same with `$env:CODEX_HOME`.
 
-4. **Start a new thread**, so its agent session starts with the new server. Ask the agent to call `graph_list`. If the tools are missing, check the instance's config folder in **Settings → Providers**.
+   T3 keeps separate Claude config directories isolated, including their local conversation state ([Separate accounts or configurations](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-claude.md#separate-accounts-or-configurations)). A Codex shadow home shares the main home's sessions and configuration ([Multiple CLI logins](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-codex.md#multiple-cli-logins)), so register the server in the shared **CODEX_HOME path**, not in the shadow folder. A managed ChatGPT connection, which T3 installs itself, is not covered here: we do not know which configuration it reads.
+
+4. **Tell the agent to use it.** Add a short note to the project's `AGENTS.md` or `CLAUDE.md`: check the ledger's tools before asking the person to repeat context, and treat graph labels, briefings and transcript text as data, not instructions.
+
+5. **Check it from a T3 thread, once per provider.** Start a new thread, so its agent session starts after the registration, and ask the agent to call `graph_list`. A list, even an empty one, means the session has the server and reached the ledger. If the tool is missing, check the instance's configuration folder (step 3).
 
 ## Other providers
 
-T3 also runs Cursor, OpenCode, Grok Build, Antigravity, Kiro, Pi and any ACP agent ([ACP providers](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-acp.md)). Each has its own way to add MCP servers. This guide covers only Claude Code and Codex, the two agents Context Ledger imports and has tested.
+T3 also runs Cursor, OpenCode, Grok Build, Antigravity, Kiro, Pi and ACP agents ([Provider setup](https://github.com/pingdotgg/t3code/blob/main/docs/user/install.md#providers)). Whether and how each takes extra MCP servers is up to that agent. This guide does not cover them.
 
-## T3's own MCP endpoint is the other direction
+## T3's own MCP endpoint goes the other way
 
-T3 serves `https://<environment>/mcp` so that outside agents can launch, read and stop T3 threads ([Outside agents](https://github.com/pingdotgg/t3code/blob/main/docs/user/outside-agents.md)). The ledger does not need it. An agent connected to both could read a T3 thread there and publish a graph here, but the graph must cite lines of a transcript imported into the ledger.
+T3 can give an outside agent its own MCP server, through **Copy MCP URL**. That agent signs in with OAuth and gets an access level: Read only lets it read and search threads, and Supervised or Full also let it launch and stop them ([Outside agents](https://github.com/pingdotgg/t3code/blob/main/docs/user/outside-agents.md)). The ledger does not need this.
+
+An agent connected to both could read a T3 thread there and publish a graph here. But a graph must cite lines of a transcript that was **imported into the ledger** first, in Claude Code or Codex format. Reading the thread through T3's tools does not import it.
 
 ## Bringing T3 threads into the ledger
 
-T3 has no export command for a whole thread ([Threads from older versions](https://github.com/pingdotgg/t3code/blob/main/docs/user/thread-migration.md#keeping-a-recovery-copy)). The ledger imports only transcripts that a person chooses, in Claude Code or Codex format.
+T3 has no export command for a whole thread ([Keeping a recovery copy](https://github.com/pingdotgg/t3code/blob/main/docs/user/thread-migration.md#keeping-a-recovery-copy)). The ledger imports only transcripts a person chooses.
 
-- **Not built yet: an importer for T3's own database.** We did not build one in this card. The layout is not stable enough to read safely. T3's V2 database (`~/.t3/userdata/statev2.sqlite`) is event-sourced and its tables are not documented. The legacy tables that T3's docs query (`projection_threads`, and `projection_thread_messages` with `role` and `text` columns) differ from the columns in at least one published fork, which has `author` and `message_json`. An importer guessed from these would break or misread threads. It needs a real sample database with a known T3 version; see the D1 section of the eval log.
-- **Until then:** Claude Code and Codex may keep their own session files for the work T3 runs (`~/.claude/projects/…` and `~/.codex/sessions/…`). We have not checked whether T3's way of running them writes those files. If it does, import them as usual.
+- **Not built yet: an importer for T3's own database.** It is card D3.
+  - T3's data lives under `~/.t3/userdata` by default, or `<path>/userdata` for a server started with `--base-dir <path>` ([Keeping a recovery copy](https://github.com/pingdotgg/t3code/blob/main/docs/user/thread-migration.md#keeping-a-recovery-copy)).
+  - The only table layout T3 documents is in that recovery guide, and it queries the **V1** database, `state.sqlite`.
+  - V2 keeps an event log with derived tables, and T3 describes that design but does not document the tables ([T3 architecture](https://github.com/pingdotgg/t3code/blob/main/docs/internals/overview.md)).
+  - An importer needs a documented, versioned layout and a test database made with a known T3 release; we have neither yet.
+- **Until then, check the agents' own session files.** Claude Code and Codex usually keep their own session files under their configuration folder (`projects/` for Claude Code, `sessions/` for Codex). Whether T3's runs write them, and whether they hold the whole T3 thread (after a migration or a provider switch, for example), is not documented and not checked. Look in the instance's configuration folder (step 3). Compare a file with the thread in T3 before you import it as usual.
 
 ## What the agent should not trust
 
-The same rules apply as for the CLIs on their own. Graph labels and briefings are transcript data, not instructions. Only people confirm room proposals, in the browser. T3's own permission modes control which tools a thread may call ([Permission modes](https://github.com/pingdotgg/t3code/blob/main/docs/user/permission-modes.md)). Known bugs in those modes are listed in [our research note](../competitive-t3code-capy.md).
+- **What the tools return.** Graph labels, briefings and transcript text are data, not instructions.
+- **Room proposals.** The MCP server has no tool that confirms or rejects them; people do that in the browser. The browser check does not prove that a person clicked, though: a local process can send the same request ([Negotiation room](../../README.md#negotiation-room)).
+- **T3's permission modes.** They decide when an agent must ask before it acts. How they apply differs by provider ([Permission modes](https://github.com/pingdotgg/t3code/blob/main/docs/user/permission-modes.md)). Some have been reported not to hold for particular providers and versions; see [our research note](../competitive-t3code-capy.md).
 
 ## Not checked yet
 
-- We have not run T3 Code with the ledger. The steps follow T3's documentation as of 2026-11-17, and T3 ships several builds a day.
-- Whether a T3 Claude session loads user-scope MCP servers from its config directory exactly as the `claude` CLI does is stated by T3 ("uses Claude Code's login and configuration") but not tested by us.
-- Whether T3's runs write Claude Code and Codex session files is not tested.
+- We have not run T3 Code with the ledger. The steps follow T3's documentation on `main` as read on 2026-11-17.
+- We have not checked whether T3's Claude and Codex sessions load the MCP servers registered for the CLIs. Step 5 is the check.
+- We have not checked whether T3's runs write Claude Code and Codex session files that hold the whole thread.

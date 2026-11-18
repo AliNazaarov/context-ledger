@@ -126,7 +126,7 @@ args = ["/absolute/path/to/context-ledger/src/mcp.mjs"]
 env = { PORT = "4317" }
 ```
 
-T3 Code runs Claude Code and Codex with their own configuration, so registering the server for them is enough: see [docs/integrations/t3code.md](docs/integrations/t3code.md).
+T3 Code runs Claude Code and Codex with their own configuration, so the server registered for them should reach T3 threads too. We have not checked this; [docs/integrations/t3code.md](docs/integrations/t3code.md) gives the steps and the check.
 
 Point clients at `node` directly rather than through npm: npm prints a banner on stdout, which must carry only protocol messages. Graph labels and briefings come from transcripts. Tools return them as escaped data, and agents should treat them as data, not as instructions.
 

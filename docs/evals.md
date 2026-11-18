@@ -1400,7 +1400,7 @@ The card has two parts: a guide for using the ledger from T3 Code, and an explic
 - Other providers, and T3's own outside-agents MCP endpoint, are out of scope; the guide says which direction that endpoint goes.
 - What was not checked, since we have not run T3.
 
-`tests/integrations-t3.test.mjs` keeps the guide in step with the code: the commands it gives use the server name, path and arguments that `src/install.mjs` registers. Its README link exists, and every T3 link points at the T3 repository.
+`tests/integrations-t3.test.mjs` checks the guide against this repository only. Every full registration command uses the server name `context-ledger` and runs `node` with `src/mcp.mjs`. The README sections it links to exist, every T3 link points at the T3 repository, and the guide marks what is unverified. It does not check T3 itself: a live run with Claude and Codex providers is still owed, ideally with a synthetic imported transcript, `session_read` and a cited `graph_publish`.
 
 ### The importer (not built; blocked)
 
@@ -1417,3 +1417,15 @@ An importer built on a guessed layout could silently misread threads, which matt
 - The four suites pass.
 - Codex reviews the guide read-only against T3's documentation; findings are fixed or recorded here.
 - A person who runs T3 follows the guide once and records the result here.
+
+### D1 review (2026-11-17)
+
+- **Codex, round 1** (of the first guide commit): one high finding, six medium, three low, all addressed in the next commit.
+  - (high) The guide presented MCP discovery in T3's sessions as guaranteed. It is now labelled unverified, the steps are scoped to Claude and manually configured Codex, and a per-provider check from a new thread is the last step. The README says the same.
+  - (medium) The manual setup now comes first, and `ledger install` is noted as coming with G8.
+  - (medium) The outside-agents section now names Copy MCP URL, OAuth and the access levels, and says a graph needs an imported transcript first.
+  - (medium) The store section sticks to what T3 documents: the default path and `--base-dir`, the V1 recovery query, and the V2 design without documented tables. The fork comparison is dropped.
+  - (medium) Permission modes are described as provider-dependent approval, and the ledger's own boundary is stated.
+  - (medium) This eval now says what the test checks and what is still owed.
+  - (low) Prerequisites, `PORT`, shell labels and PowerShell forms are added. The claim about every provider taking MCP servers is removed. The session-file paths are leads to check.
+  - D3 stays deferred, as the review advised. Its row now says to pin one T3 release, build a test database from synthetic threads, and consider T3's thread-reading MCP tool as a source.
