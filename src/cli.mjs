@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { constants, open } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { handoffMarkdown } from './handoff.mjs';
@@ -83,13 +84,13 @@ const knownImportProblems = new Set([
   'Transcript must be JSONL text.',
 ]);
 
-/** One import request. Returns { session }, { refused } or { lost } when the outcome is unknown. */
+/** One import request. Returns { session }, { refused }, or { lost, reached } when the outcome is unknown. */
 async function postImport(port, request, maxBytes) {
   const origin = `http://127.0.0.1:${port}`;
   const body = JSON.stringify(request);
   if (Buffer.byteLength(body) > maxBytes) return { refused: 'This T3 thread is larger than the 8 MiB import limit.' };
   let response;
-  let data;
+  let text;
   try {
     response = await fetch(origin + '/api/import', {
       method: 'POST',
@@ -98,9 +99,16 @@ async function postImport(port, request, maxBytes) {
       redirect: 'error',
       signal: AbortSignal.timeout(30000),
     });
-    data = await response.json().catch(() => null);
+    // Reading the body is part of the exchange: a drop here leaves the outcome unknown.
+    text = await response.text();
   } catch {
-    return { lost: true };
+    return { lost: true, reached: response !== undefined };
+  }
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    // Handled below as an unexpected response.
   }
   if (response.status === 413) return { refused: 'This T3 thread is larger than the 8 MiB import limit.' };
   if (response.status === 400) {
@@ -108,9 +116,11 @@ async function postImport(port, request, maxBytes) {
     return { refused: knownImportProblems.has(problem) ? problem : 'Context Ledger refused this T3 thread.' };
   }
   if (!response.ok) return { refused: `Context Ledger returned HTTP ${response.status}.` };
+  // The store names a session by this hash (src/store.mjs). It keeps the source of the first
+  // import of the same transcript, so the source is not compared.
+  const expectedId = createHash('sha256').update(`${request.provider}\0`).update(request.transcript).digest('hex');
   const session = data?.session;
-  if (typeof session?.id !== 'string' || !/^[a-f0-9]{64}$/u.test(session.id)
-    || session.provider !== request.provider || session.source !== request.source) {
+  if (session?.id !== expectedId || session.provider !== request.provider || typeof session.source !== 'string') {
     return { refused: 'Context Ledger returned an unexpected response.' };
   }
   return { session };
@@ -154,7 +164,7 @@ async function importT3(args) {
       const request = copy.importRequest(thread);
       const result = request.refusal ? { refused: request.refusal } : await postImport(port, request, maxImportBytes);
       if (result.lost) {
-        if (!answered) throw new Error(unreachable);
+        if (!answered && !result.reached) throw new Error(unreachable);
         // The server may have stored it before the connection dropped. Importing again is
         // safe: the same thread gives the same session.
         unknown.push({ thread: thread.id, unknown: 'The connection to Context Ledger was lost; this thread may not be imported.' });

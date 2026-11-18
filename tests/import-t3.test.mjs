@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -591,6 +592,12 @@ async function fakeLedger(t, replies) {
     seen.push(body);
     const reply = replies[seen.length - 1];
     if (reply === 'drop') return request.socket.destroy();
+    if (reply === 'drop-body') {
+      // The headers say success, then the connection ends inside the body.
+      response.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': '1000' });
+      response.write('{"session":');
+      return setTimeout(() => request.socket.destroy(), 50);
+    }
     response.writeHead(reply.status, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify(typeof reply.body === 'function' ? reply.body(body) : reply.body));
   });
@@ -602,7 +609,13 @@ async function fakeLedger(t, replies) {
   return { port: server.address().port, seen };
 }
 
-const sessionFor = body => ({ session: { id: 'c'.repeat(64), provider: body.provider, source: body.source, title: 'x', messageCount: 1 } });
+// What the store answers: the session ID is the hash of provider and transcript (src/store.mjs).
+const sessionFor = body => ({
+  session: {
+    id: createHash('sha256').update(`${body.provider}\0`).update(body.transcript).digest('hex'),
+    provider: body.provider, source: body.source, title: 'x', messageCount: 1,
+  },
+});
 
 test('the CLI prints only its own sentences for server errors and checks what the server returns', async t => {
   const path = buildCopy(join(workspace(t), 'copy.sqlite'), [thread('thread-1', { messages: conversation })]);
@@ -614,7 +627,7 @@ test('the CLI prints only its own sentences for server errors and checks what th
     [{ status: 500, body: { error: echo } }, 'Context Ledger returned HTTP 500.'],
     [{ status: 200, body: { session: { id: 'not-an-id', provider: 'claude', source: 't3-thread-1.jsonl' } } }, 'Context Ledger returned an unexpected response.'],
     [{ status: 200, body: body => ({ session: { ...sessionFor(body).session, provider: 'codex' } }) }, 'Context Ledger returned an unexpected response.'],
-    [{ status: 200, body: body => ({ session: { ...sessionFor(body).session, source: 'other.jsonl' } }) }, 'Context Ledger returned an unexpected response.'],
+    [{ status: 200, body: body => ({ session: { ...sessionFor(body).session, id: 'c'.repeat(64) } }) }, 'Context Ledger returned an unexpected response.'],
   ];
   for (const [reply, message] of cases) {
     const { port } = await fakeLedger(t, [reply]);
@@ -643,4 +656,55 @@ test('a dropped connection keeps the imports already confirmed and marks the res
     { thread: 'thread-b', unknown: 'The connection to Context Ledger was lost; this thread may not be imported.' },
     { thread: 'thread-c', unknown: 'Not tried after the connection was lost.' },
   ]);
+});
+
+// Review round 2 (Codex, of b039917).
+
+test('an unimported assistant row without a run does not block an attributable thread', t => {
+  const path = buildCopy(join(workspace(t), 'copy.sqlite'), [thread('thread-1', {
+    messages: [
+      ...conversation,
+      { role: 'assistant', text: 'still typing', streaming: true, run: null },
+      { role: 'assistant', text: '  ', run: null },
+    ],
+  })]);
+  const [request] = requestsFor(path);
+  assert.equal(request.provider, 'claude');
+});
+
+test('a primary key over more than the pinned column is refused', t => {
+  const path = buildCopy(join(workspace(t), 'copy.sqlite'), [thread('thread-1', { messages: conversation })], {
+    mutate: `
+      ALTER TABLE orchestration_v2_projection_messages RENAME TO old_messages;
+      CREATE TABLE orchestration_v2_projection_messages (
+        message_id TEXT, thread_id TEXT NOT NULL, run_id TEXT, node_id TEXT, role TEXT NOT NULL,
+        streaming INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, payload_json TEXT NOT NULL,
+        search_text TEXT, PRIMARY KEY (message_id, thread_id)
+      );
+      INSERT INTO orchestration_v2_projection_messages SELECT * FROM old_messages;
+      DROP TABLE old_messages;`,
+  });
+  assert.throws(() => openT3Copy(path), { message: /layout is not supported/u });
+});
+
+test('a session the store already held under another source name is accepted', async t => {
+  const path = buildCopy(join(workspace(t), 'copy.sqlite'), [thread('thread-1', { messages: conversation })]);
+  const { port } = await fakeLedger(t, [{ status: 200, body: body => ({ session: { ...sessionFor(body).session, source: 'renamed.jsonl' } }) }]);
+  const result = await cli(port, path, '--thread', 'thread-1');
+  assert.deepEqual(JSON.parse(result.stdout).imported.map(item => item.session.source), ['renamed.jsonl']);
+});
+
+test('a connection that drops inside a success body is unknown, not refused', async t => {
+  const path = buildCopy(join(workspace(t), 'copy.sqlite'), [
+    thread('thread-a', { messages: conversation, minute: 1 }),
+    thread('thread-b', { messages: conversation, minute: 2 }),
+  ]);
+  const { port, seen } = await fakeLedger(t, ['drop-body']);
+  const error = await cli(port, path).then(() => assert.fail('expected exit 1'), failure => failure);
+  assert.equal(error.code, 1);
+  assert.equal(seen.length, 1);
+  const output = JSON.parse(error.stdout);
+  assert.deepEqual(output.imported, []);
+  assert.deepEqual(output.refused, []);
+  assert.deepEqual(output.unknown.map(item => item.thread), ['thread-a', 'thread-b']);
 });

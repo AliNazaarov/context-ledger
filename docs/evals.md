@@ -1402,6 +1402,7 @@ D3 imports T3 Code threads into the ledger from a copy of T3's database that the
   - `apps/server/src/orchestration-v2/messageSearchIndex.ts` and `Migrations/069_ThreadMessageSearch.test.ts` (which messages T3 itself counts as conversation)
   - `packages/contracts/src/orchestrationV2.ts` (`OrchestrationV2AppThread`, `OrchestrationV2Run`, `OrchestrationV2ProviderThread`, `OrchestrationV2ConversationMessage`), `packages/contracts/src/providerInstance.ts`, `packages/contracts/src/model.ts` (driver names) and `packages/contracts/src/baseSchemas.ts` (IDs)
   - `docs/user/thread-migration.md` and `.agents/skills/test-t3-app/references/sqlite-fixtures.md`
+  - `.repos/effect/packages/effect/src/sql/Migrator.ts` (the Effect copy T3 vendors: the SQLite form of `effect_sql_migrations`, `migration_id integer PRIMARY KEY NOT NULL`, `name VARCHAR(255) NOT NULL`)
 
 ### The layout at schema 96 (what the importer reads)
 
@@ -1431,7 +1432,7 @@ D3 imports T3 Code threads into the ledger from a copy of T3's database that the
 4. Messages inserted out of `created_at` order come back in T3's order, and ties break on `message_id`.
 5. A thread run by Cursor, one run by both Claude Code and Codex, one whose run points at a missing provider thread, and one with no run are each refused with their fixed sentence.
 6. A copy at schema 81 or 98, one with the wrong name at 96, one missing a required column, an empty SQLite file and a file that is not SQLite are each refused, and the message does not contain the path.
-7. A path `…/userdata/statev2.sqlite` is refused before it is opened. The copy's bytes are unchanged after an import.
+7. A path `…/userdata/statev2.sqlite` is refused before it is opened. The copy's bytes are unchanged after an import, and only empty SQLite side files appear beside it.
 8. Two threads with the same messages give two sessions. Importing the same copy twice gives the same session IDs.
 9. A deleted thread is not imported; `--thread` with an unknown or malformed ID is refused with a fixed sentence.
 10. The CLI posts each thread to `/api/import` on its loopback origin, prints escaped JSON, never prints text from a refused thread, and exits 1 when a thread is refused. `--list` needs no server.
@@ -1456,3 +1457,16 @@ The four suites pass. Codex reviews the change read-only against the pinned sour
   - (medium) The size check ran after the whole thread was built. The reader now iterates rows and counts the encoded request as it goes; a test hits exactly 8 MiB and one byte over with multibyte text, quotes, a backslash and a control character, and `--list` reports the same refusal.
   - (medium) Subagent and fork rules were not explicit, and this eval said generated notices are excluded while assistant rows bypass `createdBy`. Subagent threads are now refused; a fork imports only its own rows (T3 adds inherited history when it reads, in `ProjectionStore.ts`, `inheritedPrefix`); the eval now states T3's own rule, under which every finished assistant message counts.
   - (low) Session identity and lines belong to one snapshot. Documented, and a test checks that a grown thread is a new session whose earlier lines are unchanged.
+- **Codex, round 2** (read-only, of b039917): the server-error and size findings are fixed; the subagent, fork and notice rules are fixed as documented; the snapshot finding is documented (its test passes on the old code too, as Codex noted). Five new findings, fixed in the next commit with a regression test each except the last:
+  - (medium) A connection that dropped inside a success body was reported as a refusal and the batch went on. The body is now read inside the transport step, so that thread and the rest are listed as unknown.
+  - (medium) A transcript already stored under another source name came back with that name and was reported as refused. The CLI now checks the session ID against the store's own hash of provider and transcript, and the provider, instead of the source.
+  - (medium) A streaming or empty assistant row without a run refused a thread whose imported answers were all attributed. Only answers that are imported need an agent now.
+  - (medium) A primary key over `message_id` and another column passed the key check. The whole key must now be the one pinned column.
+  - (low) An error other than "not found" when checking for the `-wal` file counted as no file. It now refuses the copy as unreadable. No test: a permission error on that file cannot be made portably in a test.
+- **Not reviewed again:** the round 2 fixes (commit after b039917) have no third Codex round.
+
+### D3 results (2026-11-17)
+
+- Acceptance items 1 to 11 pass in `tests/import-t3.test.mjs` (25 tests, with the review regressions), on a schema-96 database built from the pinned table definitions with synthetic threads. No `.sqlite` file is committed.
+- Suites on Windows, Node 22.14: `npm run -s test:graph` 9/9; `node --test tests/*.test.mjs` 216 passed, 1 skipped, 0 failed (217); Playwright 13/13; `runtime/` Python 192 run, 50 skipped, OK.
+- **Still owed:** a person with T3 Code v0.1.10 installed makes synthetic Claude Code and Codex threads, quits T3, copies `statev2.sqlite`, and runs `--list` and an import on the copy, recording the result here. A human review of the read-only handling and the error text.

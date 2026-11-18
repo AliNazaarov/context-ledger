@@ -115,8 +115,10 @@ function hasSqliteHeader(path) {
 function hasPendingWal(path) {
   try {
     return statSync(path + '-wal').size > 0;
-  } catch {
-    return false;
+  } catch (error) {
+    // Only a missing file means no -wal; any other error is reported as an unreadable copy.
+    if (error.code === 'ENOENT') return false;
+    throw error;
   }
 }
 
@@ -125,11 +127,16 @@ function checkLayout(database) {
   const info = database.prepare('SELECT name, type, pk FROM pragma_table_info(?)');
   for (const [table, columns] of Object.entries(requiredColumns)) {
     if (kind.get(table)?.type !== 'table') throw new T3ImportError(unsupportedLayout);
-    const present = new Map(info.all(table).map(row => [row.name, row]));
-    for (const [column, [type, pk = 0]] of Object.entries(columns)) {
+    const rows = info.all(table);
+    const present = new Map(rows.map(row => [row.name, row]));
+    for (const [column, [type]] of Object.entries(columns)) {
       const row = present.get(column);
-      if (!row || row.type.toUpperCase() !== type || (pk === 1) !== (row.pk === 1)) throw new T3ImportError(unsupportedLayout);
+      if (!row || row.type.toUpperCase() !== type) throw new T3ImportError(unsupportedLayout);
     }
+    // The whole primary key must be the one pinned column, so its values are unique.
+    const key = rows.filter(row => row.pk > 0).map(row => row.name);
+    const pinnedKey = Object.entries(columns).filter(([, [, pk]]) => pk === 1).map(([column]) => column);
+    if (key.length !== 1 || key[0] !== pinnedKey[0]) throw new T3ImportError(unsupportedLayout);
   }
   const recorded = database.prepare('SELECT migration_id AS id, name FROM effect_sql_migrations ORDER BY migration_id').all();
   if (recorded.length !== migrationManifest.length
@@ -206,8 +213,9 @@ function reader(database) {
     WHERE thread_id = ?
   `);
   const providerThread = database.prepare('SELECT driver FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = ?');
-  const assistantRuns = database.prepare(`
-    SELECT DISTINCT run_id AS runId FROM orchestration_v2_projection_messages WHERE thread_id = ? AND role = 'assistant'
+  const assistantRows = database.prepare(`
+    SELECT run_id AS runId, role, streaming, payload_json AS payload FROM orchestration_v2_projection_messages
+    WHERE thread_id = ? AND role = 'assistant'
   `);
   const models = database.prepare(`
     SELECT DISTINCT json_extract(payload_json, '$.modelSelection.model') AS model
@@ -242,8 +250,17 @@ function reader(database) {
         else unknown = true;
       }
     }
-    for (const { runId } of assistantRuns.all(threadId)) {
-      if (runId === null || !(providerThreadsByRun.get(runId)?.size > 0)) unknown = true;
+    // Only answers that are imported need an agent; one that cannot be parsed counts, and
+    // refuses the thread later anyway.
+    for (const row of assistantRows.iterate(threadId)) {
+      let payload;
+      try {
+        payload = JSON.parse(row.payload);
+      } catch {
+        payload = { text: 'unreadable' };
+      }
+      if (!isConversation(row, payload)) continue;
+      if (row.runId === null || !(providerThreadsByRun.get(row.runId)?.size > 0)) unknown = true;
     }
     if (providerThreadsByRun.size === 0) return { refusal: refusals.noRun };
     if (unknown) return { refusal: refusals.unknownAgent };
