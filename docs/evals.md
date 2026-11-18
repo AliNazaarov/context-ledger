@@ -1603,3 +1603,10 @@ Both new checks were mutation-checked: without each, its test fails.
 - **Medium — fixed.** The NUL check refused too much. An extra field that the copy ignores, such as `meta` followed by an escaped NUL and `suffix`, failed the whole migration, though it had migrated before. Now a name with a NUL is refused only when its part before the NUL is `role`, `text` or `line`, a field that SQLite would read in its place. The fixed reason is now "a stored message has a role, text or line field name followed by a NUL character". The atomic test refuses such names for all three fields. A new test migrates a message with the extra names `meta` + NUL + `suffix`, NUL + `line` and `lines` + NUL, and gets the same row as before. With the fix undone (the ed38502 `src/migrate.mjs`), the new test fails. With no NUL check at all, the atomic test fails.
 
 **Suites (Windows, after the third Codex round):** `npm run -s test:graph` 9/9; node 222/223 (one skipped; this card has 18 tests); Playwright 13/13; Python runtime 192 run, OK (50 skipped). No raw control or format characters in `src/`, `tests/` or `evals/migration/`.
+
+**Codex review (read-only) of 2e38cd4, the fourth round, run by the coordinating session.** It found no high findings. The two it found are accepted as known limits for the human reviewer, with no code change:
+
+- **Medium — accepted.** A field name of `role`, `text` or `line` followed by a NUL is refused even when it comes after the real field, although SQLite and JavaScript would both read the first one. The store writes stored messages with `JSON.stringify` from known fields, so such names cannot occur in a ledger the store wrote. The refusal fails safe: the whole step rolls back and the error names the session.
+- **Low — accepted.** No test covers the case where the real field comes before its NUL alias. It would only pin the refusal described above.
+
+This closes P1c's review loop. A human review of the version 3 migration is still owed.
