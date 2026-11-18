@@ -244,3 +244,9 @@ Next steps:
 
 1. After this merges, rerun the failed `runtime (windows-latest, Python 3.13)` job on any open PR still red from this flake.
 2. H8 (Backlog): keep each model call inside the read deadline as a whole, not per socket read, and map a deadline-capped connect timeout to 504 instead of 503.
+
+## Current checkpoint — H8 model calls keep to the read deadline (2026-11-18)
+
+Branch `ruslan/h8-model-call-deadline`, from `main`. Each model call in `runtime/latent_pool/vllm_client.py` now keeps to its whole budget, not a timeout per socket read. One absolute deadline covers the call and its folded retry. A timer shuts the call's socket down at the deadline: the plain socket before it connects, and the TLS socket before its handshake. The name lookup is bounded, redirects are not followed, and every step checks the clock. A connect timeout capped by the deadline now returns 504, not 503, and `_Run.call` returns 504 for a reply or a 503 that lands after the read deadline. Codex reviewed it twice; every finding is fixed with a test (docs/evals.md, H8).
+
+Next owner: nothing is open on this card beyond review. Known limits are listed under H8 in docs/evals.md. Addresses are still tried one after another, and an abandoned lookup finishes on its own thread.

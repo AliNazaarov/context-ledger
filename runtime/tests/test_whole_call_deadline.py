@@ -6,7 +6,12 @@ late reply must never be used.
 """
 
 import json
+import os
+import shutil
 import socket
+import ssl
+import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -33,6 +38,7 @@ class TrickleServer:
         self.listener = socket.create_server(("127.0.0.1", 0))
         self.listener.settimeout(0.2)
         self.closing = False
+        self.finished = threading.Event()  # set once the last byte has gone out
         self.thread = threading.Thread(target=self._serve, daemon=True)
         self.thread.start()
 
@@ -86,9 +92,14 @@ class TrickleServer:
                     time.sleep(self.gap)
                 return
             if self.mode == "truncated400":
-                # Says 100 bytes, sends 10, and hangs up.
+                # A chunk that says 100 bytes, 10 of them, then a hang-up: reading the
+                # body raises IncompleteRead (a Content-Length body would read short).
                 conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n"
-                             b"Content-Length: 100\r\nConnection: close\r\n\r\n0123456789")
+                             b"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n64\r\n0123456789")
+                return
+            if self.mode == "redirect":
+                conn.sendall(b"HTTP/1.1 302 Found\r\nLocation: https://127.0.0.1:9/v1/chat/completions\r\n"
+                             b"Content-Length: 0\r\nConnection: close\r\n\r\n")
                 return
             if self.mode == "whole":
                 conn.sendall(headers + REPLY)
@@ -102,6 +113,8 @@ class TrickleServer:
                 if self.closing:
                     return
                 conn.sendall(slow[index:index + 1])
+                if index == len(slow) - 1:
+                    self.finished.set()
                 time.sleep(self.gap)
         except OSError:
             pass  # the client gave up, which is what these tests expect
@@ -184,11 +197,14 @@ class ReviewRoundOneTest(unittest.TestCase):
         server = TrickleServer("body", gap=0.02)  # about 1.4 s for the whole body
         try:
             client = VllmClient(server.url, "m", timeout=30)
+            # Each byte comes well inside the per-read timeout, so only the deadline
+            # check after the read can refuse the reply.
             with mock.patch("latent_pool.vllm_client.threading.Timer", _SilentTimer):
                 with self.assertRaises(ModelTimeout):
                     client.chat("system", "user", 16, timeout=0.3)
         finally:
             server.close()
+        self.assertTrue(server.finished.wait(2), "the whole reply was sent before it was refused")
 
     def test_a_slow_503_body_after_the_deadline_is_504(self):
         server = TrickleServer("error503")
@@ -215,19 +231,24 @@ class ReviewRoundOneTest(unittest.TestCase):
                          (502, "Model server returned HTTP 400."))
 
     def test_a_stalled_name_lookup_stops_at_the_deadline(self):
-        real = socket.getaddrinfo
+        release = threading.Event()
+        returned = threading.Event()
 
         def stalled(host, *args, **kwargs):
-            if host == "model.invalid":
-                time.sleep(3)
-            return real(host, *args, **kwargs)
+            release.wait(10)
+            returned.set()
+            raise socket.gaierror("synthetic resolver")
 
         client = VllmClient("http://model.invalid:8000/v1", "m", timeout=30)
         started = time.monotonic()
-        with mock.patch("latent_pool.vllm_client.socket.getaddrinfo", stalled):
+        with mock.patch("urllib.request.getproxies", lambda: {}), \
+                mock.patch("latent_pool.vllm_client.socket.getaddrinfo", stalled):
             with self.assertRaises(ModelTimeout):
                 client.chat("system", "user", 16, timeout=0.5)
-        self.assertLess(time.monotonic() - started, 1.5)
+            elapsed = time.monotonic() - started
+            release.set()
+            self.assertTrue(returned.wait(5), "the abandoned lookup finished")
+        self.assertLess(elapsed, 1.5)
 
     def test_a_stalled_tls_handshake_stops_at_the_deadline(self):
         listener = socket.create_server(("127.0.0.1", 0))
@@ -256,6 +277,151 @@ class ReviewRoundOneTest(unittest.TestCase):
             for conn in held:
                 conn.close()
             listener.close()
+
+
+class ReviewRoundTwoTest(unittest.TestCase):
+    """Codex review of 1ecfb27."""
+
+    @unittest.skipUnless(shutil.which("openssl"), "needs the openssl command to make a throwaway certificate")
+    def test_a_reply_trickled_over_tls_stops_at_the_deadline(self):
+        # wrap_socket moves the descriptor into the TLS socket and detaches the plain
+        # one, so the watch must hold the TLS socket. After a normal handshake the
+        # server trickles its reply a byte every 50 ms; each read is quick, so only the
+        # watch can stop the call. The certificate is made here and never committed.
+        with tempfile.TemporaryDirectory() as folder:
+            cert, key = os.path.join(folder, "cert.pem"), os.path.join(folder, "key.pem")
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key,
+                            "-out", cert, "-days", "1", "-subj", "/CN=127.0.0.1",
+                            "-addext", "subjectAltName=IP:127.0.0.1"],
+                           check=True, capture_output=True, timeout=60)
+            server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_tls.load_cert_chain(cert, key)
+            client_tls = ssl.create_default_context(cafile=cert)
+        listener = socket.create_server(("127.0.0.1", 0))
+        listener.settimeout(5)
+        stop = threading.Event()
+
+        def trickle():
+            try:
+                raw, _ = listener.accept()
+                conn = server_tls.wrap_socket(raw, server_side=True)
+            except OSError:
+                return
+            with conn:
+                try:
+                    data = b""
+                    while b"\r\n\r\n" not in data:
+                        data += conn.recv(65536)
+                    reply = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                             b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(REPLY)) + REPLY
+                    for index in range(len(reply)):
+                        if stop.is_set():
+                            return
+                        conn.sendall(reply[index:index + 1])
+                        time.sleep(0.05)
+                except OSError:
+                    pass
+
+        thread = threading.Thread(target=trickle, daemon=True)
+        thread.start()
+        try:
+            client = VllmClient(f"https://127.0.0.1:{listener.getsockname()[1]}/v1", "m", timeout=30)
+            started = time.monotonic()
+            with mock.patch("urllib.request.getproxies", lambda: {}), \
+                    mock.patch("latent_pool.vllm_client._tls_context", lambda: client_tls):
+                with self.assertRaises(ModelTimeout):
+                    client.chat("system", "user", 16, timeout=1)
+            self.assertLess(time.monotonic() - started, 2)
+        finally:
+            stop.set()
+            thread.join(10)
+            listener.close()
+
+    def test_a_redirect_is_reported_not_followed(self):
+        server = TrickleServer("redirect")
+        try:
+            run = run_with(VllmClient(server.url, "m", timeout=30), 5)
+            with self.assertRaises(ApiError) as caught:
+                run.call("reader", "user", 16)
+        finally:
+            server.close()
+        self.assertEqual((caught.exception.status, caught.exception.message),
+                         (502, "Model server returned HTTP 302."))
+
+    def test_an_address_whose_socket_cannot_be_made_is_skipped(self):
+        server = TrickleServer("whole")
+        port = int(server.url.rsplit(":", 1)[1].split("/")[0])
+        real_socket = socket.socket
+
+        def addresses(host, *args, **kwargs):
+            return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0)),
+                    (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+        def no_ipv6(family, *args, **kwargs):
+            if family == socket.AF_INET6:
+                raise OSError("synthetic: no IPv6 here")
+            return real_socket(family, *args, **kwargs)
+
+        try:
+            client = VllmClient(f"http://dual.invalid:{port}/v1", "m", timeout=30)
+            with mock.patch("urllib.request.getproxies", lambda: {}), \
+                    mock.patch("latent_pool.vllm_client.socket.getaddrinfo", addresses), \
+                    mock.patch("latent_pool.vllm_client._new_socket", no_ipv6):
+                result = client.chat("system", "user", 16, timeout=5)
+        finally:
+            server.close()
+        self.assertEqual(result.content, "ok")
+
+    def test_a_resolver_that_raises_something_odd_is_not_ready_not_a_timeout(self):
+        def broken(host, *args, **kwargs):
+            raise RuntimeError("synthetic resolver bug")
+
+        run = run_with(VllmClient("http://model.invalid:8000/v1", "m", timeout=30), 5)
+        with mock.patch("urllib.request.getproxies", lambda: {}), \
+                mock.patch("latent_pool.vllm_client.socket.getaddrinfo", broken):
+            with self.assertRaises(ApiError) as caught:
+                run.call("reader", "user", 16)
+        self.assertEqual((caught.exception.status, caught.exception.message), (503, NOT_READY))
+
+
+class _LateClient:
+    """A client that answers, or fails with `error`, only after `delay` seconds."""
+
+    timeout = 30
+
+    def __init__(self, delay, error=None):
+        self.delay = delay
+        self.error = error
+
+    def chat(self, *args, **kwargs):
+        time.sleep(self.delay)
+        if self.error is not None:
+            raise self.error
+        from latent_pool.vllm_client import ChatResult
+        return ChatResult("ok", "stop", 1, 1, 0, 1)
+
+
+class PoolDeadlineTest(unittest.TestCase):
+    """Codex review of 1ecfb27: the read's own deadline is checked after each call."""
+
+    def test_a_reply_that_lands_after_the_read_deadline_is_504(self):
+        run = run_with(_LateClient(0.3), 0.1)
+        with self.assertRaises(ApiError) as caught:
+            run.call("reader", "user", 16)
+        self.assertEqual((caught.exception.status, caught.exception.message), (504, DEADLINE))
+        self.assertEqual(run.calls, [])
+
+    def test_a_503_after_the_read_deadline_is_504(self):
+        run = run_with(_LateClient(0.3, ApiError(503, NOT_READY)), 0.1)
+        with self.assertRaises(ApiError) as caught:
+            run.call("reader", "user", 16)
+        self.assertEqual((caught.exception.status, caught.exception.message), (504, DEADLINE))
+
+    def test_a_prompt_503_stays_503(self):
+        run = run_with(_LateClient(0, ApiError(503, NOT_READY)), 5)
+        with self.assertRaises(ApiError) as caught:
+            run.call("reader", "user", 16)
+        self.assertEqual((caught.exception.status, caught.exception.message), (503, NOT_READY))
 
 
 class ConnectTimeoutTest(unittest.TestCase):

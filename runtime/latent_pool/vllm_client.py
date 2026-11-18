@@ -85,42 +85,74 @@ class _Watch:
         self._timer.cancel()
 
 
+# At most this many name lookups run at once. A lookup that outlives its call keeps
+# its slot until it ends, so a stalled resolver cannot pile up threads.
+_LOOKUPS = threading.BoundedSemaphore(4)
+
+
+def _numeric(host):
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            socket.inet_pton(family, host)
+            return True
+        except (OSError, ValueError):
+            pass
+    return False
+
+
 def _resolve(host, port, watch):
-    """getaddrinfo has no timeout, so it runs on a helper thread that the call waits
-    on only until its deadline. A lookup still running then finishes on its own."""
+    """getaddrinfo has no timeout. A numeric host (the usual 127.0.0.1) needs no
+    lookup; any other runs on a helper thread that the call waits on only until its
+    deadline, with at most _LOOKUPS of them at once."""
+    if _numeric(host):
+        return socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM, 0, socket.AI_NUMERICHOST)
+    if not _LOOKUPS.acquire(timeout=max(watch.left(), 0)):
+        raise socket.timeout("name lookup ran out of time")
     done = threading.Event()
     outcome = {}
 
     def lookup():
         try:
             outcome["addresses"] = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
-        except OSError as error:
+        except BaseException as error:  # handed to the caller, never left on the thread
             outcome["error"] = error
-        done.set()
+        finally:
+            _LOOKUPS.release()
+            done.set()
 
-    threading.Thread(target=lookup, daemon=True).start()
+    try:
+        threading.Thread(target=lookup, daemon=True).start()
+    except BaseException:
+        _LOOKUPS.release()
+        raise
     if not done.wait(max(watch.left(), 0)):
         raise socket.timeout("name lookup ran out of time")
     if "error" in outcome:
-        raise outcome["error"]
+        error = outcome["error"]
+        raise error if isinstance(error, OSError) else OSError(f"name lookup failed: {type(error).__name__}")
     return outcome["addresses"]
+
+
+# The socket constructor, a seam for tests.
+_new_socket = socket.socket
 
 
 def _connector(watch):
     """socket.create_connection kept to the call's deadline: the lookup is bounded,
     each address gets only what is left, and the socket is handed to the watch before
-    it connects, so the connect, a proxy's CONNECT reply and the TLS handshake can all
-    be cut off at the deadline."""
+    it connects, so the connect and a proxy's CONNECT reply can be cut off at the
+    deadline. Addresses are tried one after another, as socket.create_connection does."""
 
-    def create_connection(address, timeout=None, source_address=None, **kwargs):
+    def create_connection(address, timeout=None, source_address=None):
         host, port = address
         last = None
         for family, kind, proto, _, sockaddr in _resolve(host, port, watch):
             left = watch.left()
             if left <= 0:
                 raise socket.timeout("connect ran out of time")
-            sock = socket.socket(family, kind, proto)
+            sock = None
             try:
+                sock = _new_socket(family, kind, proto)
                 sock.settimeout(left if timeout is None else min(timeout, left))
                 if source_address:
                     sock.bind(source_address)
@@ -128,7 +160,8 @@ def _connector(watch):
                 sock.connect(sockaddr)
                 return sock
             except OSError as error:
-                sock.close()
+                if sock is not None:
+                    sock.close()
                 last = error
                 if watch.expired:
                     raise socket.timeout("connect ran out of time") from None
@@ -146,6 +179,31 @@ def _watched(connection_class, watch):
             self._create_connection = _connector(watch)
 
     return Watched
+
+
+def _watched_tls(watch):
+    """HTTPSConnection whose TLS socket is handed to the watch before the handshake.
+
+    wrap_socket moves the descriptor into a new SSLSocket and leaves the plain socket
+    detached, so the watch must hold the SSLSocket: it is attached first, and the
+    handshake then runs with only what is left of the deadline.
+    """
+
+    class WatchedTLS(_watched(http.client.HTTPSConnection, watch)):
+        def connect(self):
+            http.client.HTTPConnection.connect(self)
+            server_hostname = self._tunnel_host or self.host
+            sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname,
+                                             do_handshake_on_connect=False)
+            self.sock = sock
+            watch.attach(sock)
+            left = watch.left()
+            if left <= 0:
+                raise socket.timeout("TLS handshake ran out of time")
+            sock.settimeout(left if self.timeout is None else min(self.timeout, left))
+            sock.do_handshake()
+
+    return WatchedTLS
 
 
 class _WatchedHTTPHandler(urllib.request.HTTPHandler):
@@ -170,25 +228,33 @@ def _tls_context():
 
 
 class _WatchedHTTPSHandler(urllib.request.HTTPSHandler):
+    """Always installed, so no https hop of a call (a proxy, say) leaves the watch.
+    The TLS context is made only when a call first uses https."""
+
     def __init__(self, watch):
-        super().__init__(context=_tls_context())
+        urllib.request.AbstractHTTPHandler.__init__(self)
         self.watch = watch
 
     def https_open(self, req):
-        return self.do_open(_watched(http.client.HTTPSConnection, self.watch), req,
-                            context=self._context)
+        return self.do_open(_watched_tls(self.watch), req, context=_tls_context())
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A model server has no reason to redirect, and a followed redirect would be a
+    second call inside the first one's budget. A 3xx is reported as it is."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 def _open(request, timeout, watch):
     """urlopen, with every socket of the call kept to watch (the seam tests patch).
 
-    Plain http gets no TLS context. Proxies come from the environment as with
-    urlopen; an opener installed with install_opener() is not used.
+    Proxies come from the environment as with urlopen; redirects are not followed;
+    an opener installed with install_opener() is not used.
     """
-    handlers = [_WatchedHTTPHandler(watch)]
-    if request.type == "https":
-        handlers.append(_WatchedHTTPSHandler(watch))
-    return urllib.request.build_opener(*handlers).open(request, timeout=timeout)
+    opener = urllib.request.build_opener(_WatchedHTTPHandler(watch), _WatchedHTTPSHandler(watch), _NoRedirect())
+    return opener.open(request, timeout=timeout)
 
 
 def _is_timeout(error):
