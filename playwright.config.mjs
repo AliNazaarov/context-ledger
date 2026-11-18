@@ -6,6 +6,8 @@ const baseURL = `http://127.0.0.1:${port}`;
 // Set once in the runner and inherited by the workers, which read the server's token
 // file next to this database (tests/e2e/fixtures.mjs).
 const database = process.env.CONTEXT_LEDGER_E2E_DB ??= resolve(`.context-ledger/e2e-${process.pid}.sqlite`);
+// The token file is per port (<database>.<port>.token), so the workers need the port too.
+process.env.CONTEXT_LEDGER_E2E_PORT = String(port);
 
 export default defineConfig({
   testDir: './tests/e2e',

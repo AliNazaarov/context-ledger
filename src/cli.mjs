@@ -67,7 +67,8 @@ async function readGraphPacket(packetPath) {
 }
 
 // Fixed sentences: they never name the token or the file's path.
-const noToken = 'Cannot read the Context Ledger access token. Start the ledger with npm start, and run this with the same CONTEXT_LEDGER_DB as the ledger.';
+const noToken = 'Cannot read the Context Ledger access token. Start the ledger with npm start, and run this with the same PORT and CONTEXT_LEDGER_DB as the ledger.';
+const exposedToken = 'The Context Ledger access token file can be read by other users, so it was not used. Restart the ledger to write a private one.';
 const refusedToken = 'Context Ledger refused the access token. Check that PORT and CONTEXT_LEDGER_DB match the running ledger.';
 const tokenForOtherPort = other => `The Context Ledger access token is for the ledger on port ${other}, so it was not sent. Set PORT to ${other}, or use the CONTEXT_LEDGER_DB of the ledger on this port.`;
 
@@ -78,11 +79,12 @@ async function main() {
   const origin = `http://127.0.0.1:${port}`;
   // The token goes only to the port its file names. Without it the request still goes
   // out, so a ledger that is not running gives the "Cannot reach" message.
-  const { token, otherPort } = await clientToken(port);
+  const { token, otherPort, exposed } = await clientToken(port);
   const headers = token === undefined ? {} : { Authorization: `Bearer ${token}` };
+  const withoutToken = otherPort !== undefined ? tokenForOtherPort(otherPort) : exposed ? exposedToken : noToken;
   // A graph packet is not sent where the token does not go: the listener on this port
   // is not known to be the ledger.
-  if (packetPath !== undefined && token === undefined) throw new Error(otherPort !== undefined ? tokenForOtherPort(otherPort) : noToken);
+  if (packetPath !== undefined && token === undefined) throw new Error(withoutToken);
   const write = packetPath === undefined ? (login ? { method: 'POST' } : {}) : {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: origin },
@@ -99,7 +101,7 @@ async function main() {
   } catch {
     throw new Error(`Cannot reach Context Ledger on port ${port}. Start it with npm start.`);
   }
-  if (response.status === 401) throw new Error(token !== undefined ? refusedToken : otherPort !== undefined ? tokenForOtherPort(otherPort) : noToken);
+  if (response.status === 401) throw new Error(token !== undefined ? refusedToken : withoutToken);
   if (login) {
     const data = response.ok ? await response.json().catch(() => null) : null;
     // Print only a link of the expected shape, so nothing else reaches the terminal.

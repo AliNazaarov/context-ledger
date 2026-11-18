@@ -3,12 +3,16 @@
 // adapter read it and send it as a bearer token, but only to that port; the browser
 // signs in with a one-time code and then holds a session cookie. The server keeps
 // only SHA-256 digests; the bearer check compares digests in constant time, and codes
-// and sessions are looked up by their digests.
+// and sessions are looked up by their digests. Each port has its own file, so servers
+// on different ports and one database do not replace each other's token.
+import { execFile, execFileSync } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { closeSync, constants, fstatSync, mkdirSync, openSync, readSync, rmSync, writeSync } from 'node:fs';
-import { open } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { closeSync, constants, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, writeSync } from 'node:fs';
+import { mkdtemp, open, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 const secretBytes = 32;
 const secretPattern = /^[A-Za-z0-9_-]{43}$/u;
@@ -20,14 +24,17 @@ const maxTokenFileBytes = 256;
 
 const defaultDatabase = fileURLToPath(new URL('../.context-ledger/ledger.sqlite', import.meta.url));
 
-/** The token file of a database: the database path with `.token` added. */
-export function tokenFileFor(database) {
-  return resolve(database) + '.token';
+const validPort = port => Number.isInteger(port) && port >= 1 && port <= 65535;
+
+/** The token file of the ledger on this port: the database path with `.<port>.token` added. */
+export function tokenFileFor(database, port) {
+  if (!validPort(port)) throw new Error('Invalid port.');
+  return `${resolve(database)}.${port}.token`;
 }
 
 /** Where a client looks: CONTEXT_LEDGER_DB as given, else the repository's default database. */
-export function clientTokenFile(env = process.env) {
-  return tokenFileFor(env.CONTEXT_LEDGER_DB ?? defaultDatabase);
+export function clientTokenFile(port, env = process.env) {
+  return tokenFileFor(env.CONTEXT_LEDGER_DB ?? defaultDatabase, port);
 }
 
 const newSecret = () => randomBytes(secretBytes).toString('base64url');
@@ -37,36 +44,133 @@ const digestKey = text => digest(text).toString('hex');
 /** A fresh random token of 32 bytes, base64url. */
 export const newToken = newSecret;
 
-const validPort = port => Number.isInteger(port) && port >= 1 && port <= 65535;
+// Windows ignores file modes: a new file takes its folder's inherited ACL, which outside
+// the user profile often lets other users read it. The writer replaces that ACL with one
+// entry for the current user's SID, and readers refuse a file whose ACL allows anyone
+// else. Both read the ACL as SDDL (icacls /save), which does not depend on the display
+// language, and run the System32 tools directly, without a shell.
+const windows = process.platform === 'win32';
+const system32 = () => join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
+const toolOptions = { windowsHide: true, timeout: 10_000 };
+const runTool = promisify(execFile);
+// libuv's UV_FS_O_EXLOCK: open with share mode 0, so no other process can open the new
+// file (and keep a handle that outlives the ACL change) before it is restricted.
+const exclusiveLock = constants.UV_FS_O_EXLOCK ?? 0x10000000;
+const byteOrderMark = String.fromCodePoint(0xfeff);
+const sidPattern = /^S-1-[0-9]+(?:-[0-9]+)+$/u;
+
+/** The SID in `whoami /user /fo csv /nh` output (its last quoted field), or undefined. */
+function parseSid(output) {
+  const sid = /"([^"]*)"\s*$/u.exec(String(output))?.[1];
+  return sid !== undefined && sidPattern.test(sid) ? sid : undefined;
+}
+
+/**
+ * True when `icacls /save` output gives a DACL whose every allow entry is for this SID.
+ * Deny entries are harmless. A NULL DACL (anyone), a conditional or object entry, or
+ * output in any other shape is false.
+ */
+export function onlyOwnerAllowed(saved, sid) {
+  const text = String(saved).startsWith(byteOrderMark) ? String(saved).slice(1) : String(saved);
+  const line = text.split(/\r?\n/u)[1] ?? '';
+  const dacl = /^D:[A-Z]*((?:\([^()]*\))*)(?:S:.*)?$/u.exec(line);
+  if (!dacl || !sidPattern.test(sid)) return false;
+  const entries = [...dacl[1].matchAll(/\(([^()]*)\)/gu)].map(entry => entry[1].split(';'));
+  return entries.every(fields => fields[0] === 'D' || (fields[0] === 'A' && fields.length === 6 && fields[5] === sid));
+}
+
+let sidLookup;
+/** The current user's SID, looked up once per process (a failed lookup is retried). */
+function currentSid() {
+  sidLookup ??= runTool(join(system32(), 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], toolOptions).then(({ stdout }) => {
+    const sid = parseSid(stdout);
+    if (!sid) throw new Error('No user SID.');
+    return sid;
+  });
+  return sidLookup.catch(error => {
+    sidLookup = undefined;
+    throw error;
+  });
+}
+
+function currentSidSync() {
+  const sid = parseSid(execFileSync(join(system32(), 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { ...toolOptions, stdio: ['ignore', 'pipe', 'ignore'] }));
+  if (!sid) throw new Error('No user SID.');
+  return sid;
+}
+
+/** A file's DACL as `icacls /save` writes it (UTF-16), saved to a private temporary folder. */
+async function savedAcl(path) {
+  const folder = await mkdtemp(join(tmpdir(), 'ledger-acl-'));
+  try {
+    const saved = join(folder, 'acl');
+    await runTool(join(system32(), 'icacls.exe'), [path, '/save', saved], toolOptions);
+    return (await readFile(saved)).toString('utf16le');
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+}
+
+function savedAclSync(path) {
+  const folder = mkdtempSync(join(tmpdir(), 'ledger-acl-'));
+  try {
+    const saved = join(folder, 'acl');
+    execFileSync(join(system32(), 'icacls.exe'), [path, '/save', saved], { ...toolOptions, stdio: 'ignore' });
+    return readFileSync(saved).toString('utf16le');
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+/**
+ * On Windows, replaces a file's ACL with full control for the current user only (no
+ * inherited entries) and checks the result; throws if either step fails. Elsewhere it
+ * does nothing: the file's mode is what counts there.
+ */
+export function restrictToOwner(path) {
+  if (!windows) return;
+  const sid = currentSidSync();
+  execFileSync(join(system32(), 'icacls.exe'), [path, '/inheritance:r', '/grant:r', `*${sid}:F`], { ...toolOptions, stdio: 'ignore' });
+  if (!onlyOwnerAllowed(savedAclSync(path), sid)) throw new Error('The token file is not private.');
+}
 
 /**
  * Writes a token file for a server listening on this port. An existing file (or link)
  * at the path is removed first and the new one is created exclusively, so a file or
  * link put there in between makes this fail instead of writing through it. Mode 0600
- * applies on POSIX; on Windows the file takes its folder's ACL. The folder is trusted:
- * a folder other users can write to, or a link in the folder path, is not checked.
- * Returns the file's identity ({ dev, ino } as bigints, from the open descriptor: on
- * Windows only a descriptor's stat names the volume) so readers can refuse the file.
+ * applies on POSIX. On Windows the empty file is opened with an exclusive lock, its ACL
+ * is replaced with one for the current user only and checked, and only then is the
+ * token written; if that fails, the file is removed and this throws. The folder is
+ * trusted: a folder other users can write to, or a link in the folder path, is not
+ * checked. Returns the file's identity ({ dev, ino } as bigints, from the open
+ * descriptor: on Windows only a descriptor's stat names the volume) so readers can
+ * refuse the file.
  */
 export function writeTokenFile(path, token, port) {
   if (!secretPattern.test(token) || !validPort(port)) throw new Error('Invalid token record.');
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   rmSync(path, { force: true });
-  const descriptor = openSync(path, 'wx', 0o600);
+  const flags = windows ? constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | exclusiveLock : 'wx';
+  const descriptor = openSync(path, flags, 0o600);
+  let identity;
   try {
+    restrictToOwner(path);
     writeSync(descriptor, JSON.stringify({ port, token }) + '\n');
     const { dev, ino } = fstatSync(descriptor, { bigint: true });
-    return { dev, ino };
+    identity = { dev, ino };
   } finally {
     closeSync(descriptor);
+    // A file that could not be made private, or not written whole, is not left behind.
+    if (identity === undefined) rmSync(path, { force: true });
   }
+  return identity;
 }
 
 /**
  * Removes the token file if it still holds this server's token (another start may have
  * replaced it). The read is bounded, non-blocking and refuses links and non-regular
  * files, so a FIFO put there cannot hang the stop. A start that replaces the file
- * between this read and the removal loses its file; run one server per database.
+ * between this read and the removal loses its file; run one server per database and port.
  */
 export function removeTokenFile(path, isOwnToken) {
   let descriptor;
@@ -92,7 +196,9 @@ export function removeTokenFile(path, isOwnToken) {
 /**
  * Reads a token file: { port, token }, or undefined when the file is missing, is not a
  * regular file (a FIFO cannot block the read), is malformed, or on POSIX is a link,
- * belongs to another user or can be read or written by group or others.
+ * belongs to another user or can be read or written by group or others. On Windows a
+ * file whose ACL allows anyone but the current user gives { exposed: true } and is not
+ * read; a file whose ACL cannot be read gives undefined.
  */
 export async function readTokenFile(path) {
   let file;
@@ -101,6 +207,7 @@ export async function readTokenFile(path) {
     const info = await file.stat();
     if (!info.isFile() || info.size > maxTokenFileBytes) return undefined;
     if (typeof process.getuid === 'function' && (info.uid !== process.getuid() || (info.mode & 0o077) !== 0)) return undefined;
+    if (windows && !onlyOwnerAllowed(await savedAcl(path), await currentSid())) return { exposed: true };
     const buffer = Buffer.alloc(maxTokenFileBytes + 1);
     const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
     if (bytesRead > maxTokenFileBytes) return undefined;
@@ -115,13 +222,17 @@ export async function readTokenFile(path) {
 }
 
 /**
- * What a client sends to the ledger on this port: { token } when the file names that
- * port, { otherPort } when it names another (the token is then not sent, so a wrong
- * PORT never hands it to another listener), or {} when there is no readable file.
+ * What a client sends to the ledger on this port, from that port's token file: { token }
+ * when the file names that port, { otherPort } when it names another (a file copied or
+ * renamed; the token is then not sent, so it never goes to another listener),
+ * { exposed: true } when the file is readable by other users (Windows ACL), or {} when
+ * there is no readable file.
  */
 export async function clientToken(port, env = process.env) {
-  const record = await readTokenFile(clientTokenFile(env));
+  if (!validPort(port)) return {};
+  const record = await readTokenFile(clientTokenFile(port, env));
   if (!record) return {};
+  if (record.exposed) return { exposed: true };
   return record.port === port ? { token: record.token } : { otherPort: record.port };
 }
 

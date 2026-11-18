@@ -8,7 +8,9 @@ export { expect };
 
 export async function ledgerToken() {
   const database = process.env.CONTEXT_LEDGER_E2E_DB;
-  const token = database && (await readTokenFile(tokenFileFor(database)))?.token;
+  // The token file is per port; playwright.config.mjs sets both.
+  const port = Number(process.env.CONTEXT_LEDGER_E2E_PORT);
+  const token = database && (await readTokenFile(tokenFileFor(database, port)))?.token;
   if (!token) throw new Error('The e2e ledger wrote no readable token file.');
   return token;
 }

@@ -16,8 +16,8 @@ async function startServer(database) {
   let output = '';
   for await (const chunk of child.stdout) {
     output += chunk;
-    const match = output.match(/listening at (http:\/\/127\.0\.0\.1:\d+)/);
-    if (match) return { origin: match[1], headers: bearer(await ledgerToken(database)), stop: async () => { child.kill(); await once(child, 'exit'); } };
+    const match = output.match(/listening at (http:\/\/127\.0\.0\.1:(\d+))/);
+    if (match) return { origin: match[1], headers: bearer(await ledgerToken(database, Number(match[2]))), stop: async () => { child.kill(); await once(child, 'exit'); } };
   }
   throw new Error('Server exited before listening: ' + output);
 }

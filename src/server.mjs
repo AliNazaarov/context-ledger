@@ -84,16 +84,17 @@ const port = Number(process.env.PORT ?? 4317);
 const database = process.env.CONTEXT_LEDGER_DB ?? '.context-ledger/ledger.sqlite';
 const store = openStore(database);
 
-// A fresh API token at each start, in a file next to the database (ADR-10), written
-// only once the port is ours: a second server that cannot listen never replaces the
-// first one's token. Only the CLI and the MCP adapter read the file; the browser signs
-// in with a one-time code. Requests before the file is written get 503.
-const tokenFile = database === ':memory:' ? undefined : tokenFileFor(database);
+// A fresh API token at each start, in a file next to the database named for the port
+// (ADR-10; <database>.<port>.token), written only once the port is ours: a second
+// server that cannot listen never replaces the first one's token, and a server on
+// another port writes its own file. Only the CLI and the MCP adapter read the file; the
+// browser signs in with a one-time code. Requests before the file is written get 503.
 const tokenFailure = 'Cannot write the access token file next to the database. Set CONTEXT_LEDGER_DB to a file in a folder you own.';
-if (!tokenFile) {
+if (database === ':memory:') {
   console.error(tokenFailure);
   process.exit(1);
 }
+let tokenFile;
 let auth;
 // The token file's identity, so a latent read refuses it under any name (a hard link).
 let tokenIdentity;
@@ -272,6 +273,7 @@ server.listen(port, '127.0.0.1', () => {
   // The plain token lives only in this callback and in the file; auth keeps its digest.
   const token = newToken();
   try {
+    tokenFile = tokenFileFor(database, localPort);
     tokenIdentity = writeTokenFile(tokenFile, token, localPort);
   } catch {
     console.error(tokenFailure);

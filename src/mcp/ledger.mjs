@@ -22,14 +22,15 @@ export function validLedgerMessage(message) {
 }
 
 // Fixed sentences: they never name the token or the file's path.
-export const noToken = 'Cannot read the Context Ledger access token. Start the ledger with npm start, and give this MCP server the same CONTEXT_LEDGER_DB as the ledger (an absolute path).';
+export const noToken = 'Cannot read the Context Ledger access token. Start the ledger with npm start, and give this MCP server the same PORT and CONTEXT_LEDGER_DB as the ledger (an absolute path).';
+export const exposedToken = 'The Context Ledger access token file can be read by other users, so it was not used. Restart the ledger to write a private one.';
 export const refusedToken = 'Context Ledger refused the access token. Check that PORT and CONTEXT_LEDGER_DB match the running ledger.';
 export const tokenForOtherPort = other => `The Context Ledger access token is for the ledger on port ${other}, so it was not sent. Set PORT to ${other} for this MCP server, or give it the CONTEXT_LEDGER_DB of the ledger on this port.`;
 
 export async function ledger(path, { body, notFound, timeoutMs = 5000 } = {}) {
   // The token goes only to the port its file names. Without it the request still goes
   // out, so a ledger that is not running gives the "Cannot reach" message.
-  const { token, otherPort } = await clientToken(port);
+  const { token, otherPort, exposed } = await clientToken(port);
   const init = { redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers: {} };
   if (token !== undefined) init.headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) {
@@ -53,7 +54,7 @@ export async function ledger(path, { body, notFound, timeoutMs = 5000 } = {}) {
   }
   if (response.status === 401) {
     await response.body?.cancel().catch(() => {});
-    throw new ToolError(token !== undefined ? refusedToken : otherPort !== undefined ? tokenForOtherPort(otherPort) : noToken);
+    throw new ToolError(token !== undefined ? refusedToken : otherPort !== undefined ? tokenForOtherPort(otherPort) : exposed ? exposedToken : noToken);
   }
   if (response.status === 404 && notFound) {
     await response.body?.cancel().catch(() => {});

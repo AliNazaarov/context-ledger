@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
+import { restrictToOwner, tokenFileFor } from '../src/token.mjs';
 
 const execute = promisify(execFile);
 const graphId = 'a'.repeat(64);
@@ -44,7 +45,9 @@ test('graph CLI publishes raw JSON to its local origin and reads the response as
   t.after(() => new Promise(resolve => server.close(resolve)));
   const port = server.address().port;
   // P1e: a publish goes only where the token file says the ledger is.
-  await writeFile(join(directory, 'ledger.sqlite.token'), JSON.stringify({ port, token: 'G'.repeat(43) }) + '\n', { mode: 0o600 });
+  const tokenFile = tokenFileFor(join(directory, 'ledger.sqlite'), port);
+  await writeFile(tokenFile, JSON.stringify({ port, token: 'G'.repeat(43) }) + '\n', { mode: 0o600 });
+  restrictToOwner(tokenFile);
   const cli = (...args) => execute(process.execPath, ['src/cli.mjs', 'graph', ...args], {
     env: { ...process.env, PORT: String(port), CONTEXT_LEDGER_DB: join(directory, 'ledger.sqlite') },
   });

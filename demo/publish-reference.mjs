@@ -12,14 +12,16 @@ const port = Number(process.env.PORT ?? 4317);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT.');
 const origin = `http://127.0.0.1:${port}`;
 // Only for the port the token file names; without it nothing is sent.
-const { token, otherPort } = await clientToken(port);
+const { token, otherPort, exposed } = await clientToken(port);
 const auth = token === undefined ? {} : { Authorization: `Bearer ${token}` };
 
 async function api(path, body) {
   if (token === undefined) {
-    throw new Error(otherPort === undefined
-      ? 'Cannot read the ledger\'s access token: start it with npm start, with the same CONTEXT_LEDGER_DB as this script.'
-      : `The ledger's access token is for port ${otherPort}: run this with PORT=${otherPort}.`);
+    throw new Error(otherPort !== undefined
+      ? `The ledger's access token is for port ${otherPort}: run this with PORT=${otherPort}.`
+      : exposed
+        ? 'The ledger\'s access token file can be read by other users, so it was not used: restart the ledger to write a private one.'
+        : 'Cannot read the ledger\'s access token: start it with npm start, with the same PORT and CONTEXT_LEDGER_DB as this script.');
   }
   const init = body === undefined ? { headers: auth } : {
     method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin, ...auth }, body: JSON.stringify(body),

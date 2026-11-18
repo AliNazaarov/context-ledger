@@ -35,7 +35,7 @@ async function startServer(env) {
   for await (const chunk of child.stdout) {
     output += chunk;
     const match = output.match(/listening at http:\/\/127\.0\.0\.1:(\d+)/);
-    if (match) return { port: Number(match[1]), headers: bearer(await ledgerToken(env.CONTEXT_LEDGER_DB)), stop: async () => { child.kill(); await once(child, 'exit'); } };
+    if (match) return { port: Number(match[1]), headers: bearer(await ledgerToken(env.CONTEXT_LEDGER_DB, Number(match[1]))), stop: async () => { child.kill(); await once(child, 'exit'); } };
   }
   throw new Error('Server exited before listening: ' + output);
 }
@@ -375,7 +375,7 @@ test('LATENT_URL and LATENT_ROOT are read on each request, and unexpected errors
   const nextLine = () => (lines.length ? Promise.resolve(lines.shift()) : new Promise(resolve => waiting.push(resolve)));
   const port = Number((await nextLine()).match(/listening at http:\/\/127\.0\.0\.1:(\d+)/)[1]);
   assert.match(await nextLine(), /^Sign in to the browser app/u);
-  const auth = bearer(await ledgerToken(join(directory, 'ledger.sqlite')));
+  const auth = bearer(await ledgerToken(join(directory, 'ledger.sqlite'), port));
   const send = async message => {
     child.stdin.write(JSON.stringify(message) + '\n');
     assert.equal(await nextLine(), 'ok');

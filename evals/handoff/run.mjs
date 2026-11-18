@@ -96,7 +96,7 @@ async function startLedger(database) {
     for await (const chunk of child.stdout) {
       output += chunk;
       const match = output.match(/listening at (http:\/\/127\.0\.0\.1:(\d+))/u);
-      if (match) return { origin: match[1], port: Number(match[2]), database, token: (await readTokenFile(tokenFileFor(database)))?.token, stop };
+      if (match) return { origin: match[1], port: Number(match[2]), database, token: (await readTokenFile(tokenFileFor(database, Number(match[2]))))?.token, stop };
     }
   } finally {
     clearTimeout(timer);

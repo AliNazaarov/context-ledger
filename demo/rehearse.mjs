@@ -140,7 +140,7 @@ async function startLedger(database) {
     for await (const chunk of child.stdout) {
       output += chunk;
       if (/listening at/u.test(output)) {
-        token = (await readTokenFile(tokenFileFor(database)))?.token;
+        token = (await readTokenFile(tokenFileFor(database, port)))?.token;
         return { stop };
       }
     }
