@@ -30,7 +30,8 @@ const insertRows = 'INSERT INTO messages (session_id, seq, line, role, text_json
 const notAnArray = 'its stored messages are not a JSON array';
 const notAMessage = 'a stored message is not an object with a user or assistant role, a string text and a line from 1 to 2^53 - 1';
 const repeatedField = 'a stored message has the same field twice';
-const nulName = 'a stored message has a field name that holds a NUL character';
+const nulName = 'a stored message has a role, text or line field name followed by a NUL character';
+const readFields = new Set(['role', 'text', 'line']);
 const tooDeep = 'its stored messages are nested more than 1,000 levels deep';
 const maxDepth = 1000;
 const sameLine = 'two stored messages have the same line';
@@ -61,8 +62,10 @@ const parseArray = (decoder, bytes) => {
  * reads the first, so a repeat is refused rather than resolved either way. The raw token
  * shows a line such as 1.0 or 1.00000000000000001 that JavaScript would read as 1
  * (Codex review of 5a80f16). Only members of the array's own elements are looked at.
- * A name that holds a NUL is flagged too: SQLite compares names only up to a NUL, so
- * "line\u0000x" would be its line. The deepest nesting is returned as well, since SQLite
+ * A name that holds a NUL is flagged too when its part before the NUL is a field the copy
+ * reads (role, text or line): SQLite compares names only up to a NUL, so "line\u0000x"
+ * would be its line. Any other such name is an extra field and is ignored, as before
+ * (Codex review of ed38502). The deepest nesting is returned as well, since SQLite
  * refuses JSON nested more than 1,000 levels deep and JSON.parse does not (Codex review
  * of 2f44b8a).
  */
@@ -87,7 +90,8 @@ function scanMembers(source) {
         const literal = source.slice(at, close + 1);
         const name = literal.includes('\\') ? JSON.parse(literal) : literal.slice(1, -1);
         if (element.names.has(name)) element.repeated = true;
-        if (name.includes(String.fromCodePoint(0))) element.nulName = true;
+        const nul = name.indexOf(String.fromCodePoint(0));
+        if (nul >= 0 && readFields.has(name.slice(0, nul))) element.nulName = true;
         element.names.add(name);
         if (name === 'line') {
           let from = next + 1;

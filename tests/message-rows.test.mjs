@@ -90,7 +90,7 @@ const notAnArray = 'its stored messages are not a JSON array';
 const notAMessage = 'a stored message is not an object with a user or assistant role, a string text and a line from 1 to 2^53 - 1';
 const sameLine = 'two stored messages have the same line';
 const repeatedField = 'a stored message has the same field twice';
-const nulName = 'a stored message has a field name that holds a NUL character';
+const nulName = 'a stored message has a role, text or line field name followed by a NUL character';
 const tooDeep = 'its stored messages are nested more than 1,000 levels deep';
 // A turn whose meta value nests arrays so that the whole stored value is depth levels deep.
 const nested = depth => `[{"role": "user", "text": "Deep", "line": 1, "meta": ${'['.repeat(depth - 2)}${']'.repeat(depth - 2)}}]`;
@@ -415,6 +415,9 @@ test('a session whose stored messages cannot be copied fails the step, names the
     // Codex review of 2f44b8a: SQLite compares names only up to a NUL, so this name would be
     // its line, and SQLite refuses JSON nested more than 1,000 levels deep.
     ['a NUL in a field name', '[{"role": "user", "text": "turn", "line\\u0000suffix": 9, "l\\u0069ne": 1}]', nulName],
+    // Codex review of ed38502: the same for the other fields the copy reads.
+    ['a NUL after role', '[{"role\\u0000x": "assistant", "role": "user", "text": "turn", "line": 1}]', nulName],
+    ['a NUL after text', '[{"role": "user", "text\\u0000": "other", "text": "turn", "line": 1}]', nulName],
     ['1,001 levels', nested(1001), tooDeep],
   ];
   for (const [index, [name, messages, reason]] of variants.entries()) {
@@ -468,6 +471,20 @@ test('a stored value 1,000 levels deep migrates, as SQLite reads it', async t =>
   const store = openStore(fixture.path);
   keep(() => store.close());
   assert.deepEqual(store.get(fixture.ali.id).messages, [{ role: 'user', text: 'Deep', line: 1, key: 'l:1' }]);
+});
+
+test('an extra field whose name holds a NUL is ignored, as before', async t => {
+  // Codex review of ed38502: only a NUL name that SQLite would read as role, text or line
+  // is refused. Others, such as meta and a NUL, or a NUL and then line, migrate as before.
+  const { directory, keep } = await scratchDirectory(t, 'ledger-p1c-nul-extra-');
+  const fixture = await oldLedger(directory, 2);
+  const setup = new DatabaseSync(fixture.path);
+  const stored = '[{"role": "user", "text": "turn", "line": 1, "meta\\u0000suffix": 9, "\\u0000line": 7, "lines\\u0000": 8}]';
+  setup.prepare('UPDATE sessions SET messages = ? WHERE id = ?').run(stored, fixture.ali.id);
+  setup.close();
+  const store = openStore(fixture.path);
+  keep(() => store.close());
+  assert.deepEqual(store.get(fixture.ali.id).messages, [{ role: 'user', text: 'turn', line: 1, key: 'l:1' }]);
 });
 
 test('repeated names inside a text, nested objects and escaped quotes are not repeated fields', async t => {
