@@ -5,7 +5,7 @@ import {
   createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign, verify,
 } from 'node:crypto';
 import { constants } from 'node:fs';
-import { link, lstat, mkdir, open, readdir, rmdir, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, readdir, realpath, rmdir, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { terminalLabel } from './text.mjs';
 
@@ -107,6 +107,11 @@ export async function generateSigningKey(path) {
   let file;
   try {
     file = await open(staging, 'wx', 0o600);
+  } catch {
+    throw new Error('Cannot write the signing key file.');
+  }
+  // Only a staging file this call created is ever removed.
+  try {
     await file.writeFile(privateKey.export({ type: 'pkcs8', format: 'pem' }));
     await file.sync();
     await file.close();
@@ -114,6 +119,11 @@ export async function generateSigningKey(path) {
     await link(staging, path);
   } catch (error) {
     if (error.code === 'EEXIST') throw new Error('A signing key already exists. It was not replaced.');
+    if (['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV', 'EMLINK'].includes(error.code)) {
+      throw new Error('Cannot save the signing key: the file system refused a hard link, which keygen ' +
+        'needs to save a key without replacing one (FAT and exFAT have none). Put CONTEXT_LEDGER_DB ' +
+        'on an NTFS, APFS or ext4 volume.');
+    }
     throw new Error('Cannot write the signing key file.');
   } finally {
     await file?.close().catch(() => {});
@@ -210,8 +220,18 @@ export function buildBundle({ sessionId, markdown, privateKey, now = new Date() 
 
 /** Write a built bundle into a new folder; never overwrite a folder or a file. */
 export async function writeBundle(outDir, bundle) {
+  // Resolve the existing parent once, so a symlink and '..' in the path cannot make the
+  // folder that is created and the folder that is written to differ.
+  let target;
   try {
-    await mkdir(outDir, { mode: 0o700 });
+    target = join(await realpath(dirname(outDir)), basename(outDir));
+  } catch {
+    throw new Error('The parent of the output folder does not exist.');
+  }
+  let folder;
+  try {
+    await mkdir(target, { mode: 0o700 });
+    folder = await lstat(target, { bigint: true });
   } catch (error) {
     if (error.code === 'EEXIST') throw new Error('The output folder already exists. Choose a new folder.');
     if (error.code === 'ENOENT') throw new Error('The parent of the output folder does not exist.');
@@ -220,10 +240,10 @@ export async function writeBundle(outDir, bundle) {
   const written = [];
   try {
     for (const { name, data } of bundle.files) {
-      const path = join(outDir, name);
+      const path = join(target, name);
       const file = await open(path, 'wx', 0o644);
-      written.push(path);
       try {
+        written.push({ path, ino: (await file.stat({ bigint: true })).ino });
         await file.writeFile(data);
         await file.sync();
       } finally {
@@ -231,11 +251,22 @@ export async function writeBundle(outDir, bundle) {
       }
     }
   } catch {
-    // Remove only what this call created. A run killed midway can still leave a partial
-    // folder; verify refuses it, and the sender deletes it and signs again.
-    for (const path of written) await unlink(path).catch(() => {});
-    await rmdir(outDir).catch(() => {});
+    // Best effort: remove only the files and the folder this call created, and only while
+    // they are still the same files. A run killed midway can still leave a partial folder;
+    // verify refuses it, and the sender deletes it and signs again.
+    for (const { path, ino } of written) {
+      if (await sameFile(path, ino)) await unlink(path).catch(() => {});
+    }
+    if (await sameFile(target, folder.ino)) await rmdir(target).catch(() => {});
     throw new Error('Cannot write the bundle files.');
+  }
+}
+
+async function sameFile(path, ino) {
+  try {
+    return (await lstat(path, { bigint: true })).ino === ino;
+  } catch {
+    return false;
   }
 }
 
@@ -280,15 +311,17 @@ function checkManifest(manifest) {
   }
 }
 
-async function hashFile(path, opened) {
+// Reads at most one byte past the signed size, so an inflated file is refused quickly.
+async function hashFile(path, opened, signedBytes) {
   const file = await open(path, readFlags);
   try {
     const stat = await file.stat({ bigint: true });
     if (!stat.isFile()) return;
     opened.set(basename(path), stat);
+    if (stat.size !== BigInt(signedBytes)) return { bytes: -1 };
     const hash = createHash('sha256');
     let bytes = 0;
-    for await (const chunk of file.createReadStream({ autoClose: false })) {
+    for await (const chunk of file.createReadStream({ autoClose: false, start: 0, end: signedBytes })) {
       hash.update(chunk);
       bytes += chunk.length;
     }
@@ -301,15 +334,20 @@ async function hashFile(path, opened) {
 /**
  * Check a bundle folder. Returns { problems, files, fingerprint, createdAt, session };
  * the bundle is good only when problems is empty. Every problem is a fixed message,
- * plus an escaped file name where one is named.
+ * plus an escaped file name where one is named. `hooks` (afterList, afterRead) exist
+ * only so tests can change the folder at fixed points.
  */
-export async function verifyBundle(dir, { fingerprint } = {}) {
+export async function verifyBundle(folder, { fingerprint } = {}, hooks = {}) {
   const problems = [];
   const result = { problems };
   const expected = fingerprint === undefined ? undefined : normalizeFingerprint(fingerprint);
 
+  let dir;
   let entries;
   try {
+    // Resolve the folder once: join() would otherwise fold 'link/..' differently from
+    // the operating system, and the files read could come from another folder.
+    dir = await realpath(folder);
     entries = await readdir(dir, { withFileTypes: true });
   } catch {
     problems.push('Cannot read the bundle folder.');
@@ -325,6 +363,7 @@ export async function verifyBundle(dir, { fingerprint } = {}) {
     if (!present.has(name)) problems.push('Missing file: ' + name);
   }
   if (envelopeFiles.some(name => !present.get(name)?.isFile())) return result;
+  await hooks.afterList?.(dir);
 
   let manifestBytes;
   let signature;
@@ -397,7 +436,7 @@ export async function verifyBundle(dir, { fingerprint } = {}) {
     if (!present.get(entry.name).isFile()) continue;
     let actual;
     try {
-      actual = await hashFile(join(dir, entry.name), opened);
+      actual = await hashFile(join(dir, entry.name), opened, entry.bytes);
     } catch {
       actual = undefined;
     }
@@ -405,6 +444,7 @@ export async function verifyBundle(dir, { fingerprint } = {}) {
       problems.push('File changed: ' + entry.name);
     }
   }
+  await hooks.afterRead?.(dir);
   if (problems.length === 0 && !(await unchangedSince(dir, entries, opened))) {
     problems.push('The bundle folder changed while it was being verified.');
   }

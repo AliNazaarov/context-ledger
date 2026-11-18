@@ -82,8 +82,8 @@ function flipByte(path, index) {
   writeFileSync(path, bytes);
 }
 
-async function problemsOf(dir, options) {
-  return (await verifyBundle(dir, options)).problems;
+async function problemsOf(dir, options, hooks) {
+  return (await verifyBundle(dir, options, hooks)).problems;
 }
 
 // --- RFC 8785 ---------------------------------------------------------------------
@@ -200,7 +200,8 @@ test('a signing key file other users can read is refused on POSIX', { skip: proc
 });
 
 test('the default key file name is ignored by Git', () => {
-  for (const path of ['signing-key.pem', 'data/signing-key.pem', '.context-ledger/signing-key.pem']) {
+  for (const path of ['signing-key.pem', 'data/signing-key.pem', '.context-ledger/signing-key.pem',
+    'data/signing-key.pem.0123456789abcdef.tmp']) {
     const result = spawnSync('git', ['check-ignore', '-q', path]);
     if (result.error) return;
     assert.equal(result.status, 0, path);
@@ -620,4 +621,87 @@ test('terminal messages escape joiners in names and never quote parser or respon
   const broken = await run(['handoff', sessionId], { PORT: String(server.address().port) });
   assert.equal(broken.code, 1);
   assert.equal(broken.stderr, 'Context Ledger returned a response that is not JSON.\n');
+});
+
+// --- Codex review, round 2 -------------------------------------------------------------
+
+test('verify and --sign resolve a symlink before .. in the folder path', { skip: process.platform === 'win32' }, async t => {
+  const context = await signedBundle(t);
+  // base/link points to base/other/sub, so the OS reads base/link/../bundle as base/other/bundle.
+  const base = join(context.folder, 'base');
+  mkdirSync(join(base, 'other', 'sub'), { recursive: true });
+  cpSync(context.bundle, join(base, 'bundle'), { recursive: true });
+  cpSync(context.bundle, join(base, 'other', 'bundle'), { recursive: true });
+  flipByte(join(base, 'other', 'bundle', 'handoff.md'));
+  symlinkSync(join(base, 'other', 'sub'), join(base, 'link'));
+  const tricky = base + '/link/../bundle';
+  assert.deepEqual(await problemsOf(tricky), ['File changed: handoff.md']);
+
+  const signed = await run(['handoff', sessionId, '--sign', base + '/link/../fresh'], context.env);
+  assert.equal(signed.code, 0, signed.stderr);
+  assert.ok(existsSync(join(base, 'other', 'fresh', 'handoff.md')), 'written where the OS resolves the path');
+  assert.ok(!existsSync(join(base, 'fresh')));
+  assert.deepEqual(await problemsOf(join(base, 'other', 'fresh')), []);
+});
+
+test('verify notices a folder that changes after it is listed or read', async t => {
+  const context = await signedBundle(t);
+  const changed = ['The bundle folder changed while it was being verified.'];
+  const added = copyOf(context);
+  assert.deepEqual(await problemsOf(added, {}, {
+    afterList: dir => writeFileSync(join(dir, 'late.txt'), 'synthetic'),
+  }), changed);
+
+  const replaced = copyOf(context);
+  assert.deepEqual(await problemsOf(replaced, {}, {
+    afterRead: dir => {
+      const bytes = readFileSync(join(dir, 'handoff.md'));
+      unlinkSync(join(dir, 'handoff.md'));
+      writeFileSync(join(dir, 'handoff.md'), bytes);
+    },
+  }), changed, 'a new file with the same bytes is still a different file');
+
+  const edited = copyOf(context);
+  assert.deepEqual(await problemsOf(edited, {}, {
+    afterRead: dir => flipByte(join(dir, 'handoff.md')),
+  }), changed);
+
+  const untouched = copyOf(context);
+  assert.deepEqual(await problemsOf(untouched, {}, { afterList: () => {}, afterRead: () => {} }), []);
+
+  if (process.platform !== 'win32') {
+    const outside = join(context.folder, 'outside.md');
+    writeFileSync(outside, readFileSync(join(context.bundle, 'handoff.md')));
+    const linked = copyOf(context);
+    assert.deepEqual(await problemsOf(linked, {}, {
+      afterList: dir => {
+        unlinkSync(join(dir, 'handoff.md'));
+        symlinkSync(outside, join(dir, 'handoff.md'));
+      },
+    }), ['File changed: handoff.md'], 'O_NOFOLLOW refuses a symlink swapped in after listing');
+
+    const fifo = copyOf(context);
+    assert.deepEqual(await problemsOf(fifo, {}, {
+      afterList: dir => {
+        unlinkSync(join(dir, 'manifest.sig'));
+        execFileSync('mkfifo', [join(dir, 'manifest.sig')]);
+      },
+    }), ['Cannot read the bundle files.'], 'O_NONBLOCK keeps a FIFO swapped in from blocking');
+  }
+});
+
+test('an inflated hand-off is refused on its size', async t => {
+  const context = await signedBundle(t);
+  const inflated = copyOf(context, target => appendFileSync(join(target, 'handoff.md'), Buffer.alloc(4 * 1024 * 1024)));
+  assert.deepEqual(await problemsOf(inflated), ['File changed: handoff.md']);
+});
+
+test('without pipefail, a missing PEM gives the empty-input hash, which no fingerprint matches', { skip: opensslMissing }, async t => {
+  const context = await signedBundle(t);
+  const [fingerprintCommand] = recipeCommands();
+  const missing = copyOf(context, target => unlinkSync(join(target, 'public-key.pem')));
+  const result = runPipeline(fingerprintCommand, missing);
+  const printed = result.stdout.match(/= ?([0-9a-f]{64})/)[1];
+  assert.equal(printed, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+  assert.notEqual(printed, normalizeFingerprint(context.fingerprint));
 });

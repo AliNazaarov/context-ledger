@@ -16,6 +16,7 @@ Signing does not redact anything. The bundle holds the same Markdown as `npm run
 
    - On Linux and macOS the key file is created with mode 0600, and signing refuses a key file that other users can read.
    - On Windows the file has no POSIX mode, and the ledger does not check or change its access list. It takes the access list of its folder, which for a folder in your user profile normally means only you (and administrators) can read it. Keep the ledger data folder out of shared or synced folders, and check it with `icacls .context-ledger\signing-key.pem` if other accounts use the machine. Anyone who can read the key can sign bundles that pass your fingerprint.
+   - `keygen` writes the key to a temporary file (`signing-key.pem.<random>.tmp`) and then hard-links it into place, so it can never replace a key or leave half a key under the real name. That needs a file system with hard links (NTFS, APFS, ext4 and the like; not FAT or exFAT). If `keygen` is killed midway, a `.tmp` file holding a private key can stay behind: delete it. Git ignores both names.
    - The key is not encrypted with a passphrase yet (design section 6; card P4b). Anyone who can read the file can sign as you, so back it up like any other private key.
 
 2. Give the fingerprint to the people who will receive your hand-offs through a channel other than the bundle itself: in person, on a call, or in a message they already trust. The fingerprint is what proves the bundle came from you; the key inside the bundle cannot prove that on its own.
@@ -26,7 +27,7 @@ Signing does not redact anything. The bundle holds the same Markdown as `npm run
    npm run ledger -- handoff <session-id> --sign <new-folder>
    ```
 
-   The folder must not exist yet; nothing is ever overwritten. If a write fails, the files this run created are removed again. A run that is killed midway can leave a partial folder, which `verify` refuses: delete it and sign again. Send the whole folder (for example as a zip).
+   The folder must not exist yet; nothing is ever overwritten. If a write fails, the files this run created are removed again (best effort: a file or folder that something else put in their place is left alone). A run that is killed midway can leave a partial folder, which `verify` refuses: delete it and sign again. Send the whole folder (for example as a zip).
 
 ## What is in the folder
 
@@ -63,7 +64,7 @@ openssl pkeyutl -verify -pubin -inkey public-key.pem -rawin -in manifest.json -s
 openssl dgst -sha256 handoff.md
 ```
 
-1. The first command prints the key fingerprint (for example `SHA2-256(stdin)= fd788b7d...`). It must equal the fingerprint the sender gave you, ignoring spaces. If it does not, stop: the bundle was not signed by that sender.
+1. The first command prints the key fingerprint (for example `SHA2-256(stdin)= fd788b7d...`). It must equal the fingerprint the sender gave you, ignoring spaces. If it does not, stop: the bundle was not signed by that sender. If `openssl pkey` prints an error (say `public-key.pem` is missing), most shells still run the second half of the pipe and print the hash of empty input, `e3b0c442...b855`, which never matches a real fingerprint.
 2. The second must print `Signature Verified Successfully`. It proves that `manifest.json` is exactly what the key holder signed.
 3. The third prints the SHA-256 of `handoff.md`. It must equal the `sha256` given for `handoff.md` in the `files` list of `manifest.json`. Do the same for any other file the list names.
 4. Open `manifest.json` in a text editor. Check that `format` is `context-ledger-signed-handoff`, `version` is 1, and `files` lists exactly one entry, `handoff.md`, whose `bytes` matches the file's size. Check that the folder holds exactly four regular files with these exact names (`handoff.md`, `manifest.json`, `manifest.sig`, `public-key.pem`), and no symlink or subfolder. A file that is not listed is not covered by the signature.
