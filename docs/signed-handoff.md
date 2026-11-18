@@ -27,7 +27,7 @@ Signing does not redact anything. The bundle holds the same Markdown as `npm run
    npm run ledger -- handoff <session-id> --sign <new-folder>
    ```
 
-   The folder must not exist yet; nothing is ever overwritten. If a write fails, the files this run created are removed again (best effort: a file or folder that something else put in their place is left alone). A run that is killed midway can leave a partial folder, which `verify` refuses: delete it and sign again. Send the whole folder (for example as a zip).
+   The folder must not exist yet; nothing is ever overwritten. If a write fails, the files this run created are removed again (best effort: it checks that each file and the folder are still the ones it created, but a process that can rename entries in the parent folder could race that check, so sign into a folder only you can write). Signing and `verify` need a path they can resolve; on Windows an SMB share that hides one of the parent folders is refused. A run that is killed midway can leave a partial folder, which `verify` refuses: delete it and sign again. Send the whole folder (for example as a zip).
 
 ## What is in the folder
 

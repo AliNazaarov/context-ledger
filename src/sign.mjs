@@ -112,19 +112,23 @@ export async function generateSigningKey(path) {
   }
   // Only a staging file this call created is ever removed.
   try {
-    await file.writeFile(privateKey.export({ type: 'pkcs8', format: 'pem' }));
-    await file.sync();
-    await file.close();
-    file = undefined;
-    await link(staging, path);
-  } catch (error) {
-    if (error.code === 'EEXIST') throw new Error('A signing key already exists. It was not replaced.');
-    if (['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV', 'EMLINK'].includes(error.code)) {
-      throw new Error('Cannot save the signing key: the file system refused a hard link, which keygen ' +
-        'needs to save a key without replacing one (FAT and exFAT have none). Put CONTEXT_LEDGER_DB ' +
-        'on an NTFS, APFS or ext4 volume.');
+    try {
+      await file.writeFile(privateKey.export({ type: 'pkcs8', format: 'pem' }));
+      await file.sync();
+      await file.close();
+      file = undefined;
+    } catch {
+      throw new Error('Cannot write the signing key file.');
     }
-    throw new Error('Cannot write the signing key file.');
+    try {
+      await link(staging, path);
+    } catch (error) {
+      if (error.code === 'EEXIST') throw new Error('A signing key already exists. It was not replaced.');
+      // EPERM is also how Windows reports access denied, so the message names both causes.
+      throw new Error('Cannot save the signing key: the hard link that puts it in place without ' +
+        'replacing a key was refused. Check your permissions on the ledger data folder; FAT and exFAT ' +
+        'volumes have no hard links, so use an NTFS, APFS or ext4 volume for CONTEXT_LEDGER_DB.');
+    }
   } finally {
     await file?.close().catch(() => {});
     await unlink(staging).catch(() => {});
@@ -225,8 +229,10 @@ export async function writeBundle(outDir, bundle) {
   let target;
   try {
     target = join(await realpath(dirname(outDir)), basename(outDir));
-  } catch {
-    throw new Error('The parent of the output folder does not exist.');
+  } catch (error) {
+    if (error.code === 'ENOENT') throw new Error('The parent of the output folder does not exist.');
+    // On Windows this can also fail on an SMB share that hides an ancestor folder.
+    throw new Error('Cannot resolve the path of the output folder. Sign into a local folder.');
   }
   let folder;
   try {
@@ -243,7 +249,7 @@ export async function writeBundle(outDir, bundle) {
       const path = join(target, name);
       const file = await open(path, 'wx', 0o644);
       try {
-        written.push({ path, ino: (await file.stat({ bigint: true })).ino });
+        written.push({ path, identity: await file.stat({ bigint: true }) });
         await file.writeFile(data);
         await file.sync();
       } finally {
@@ -252,19 +258,22 @@ export async function writeBundle(outDir, bundle) {
     }
   } catch {
     // Best effort: remove only the files and the folder this call created, and only while
-    // they are still the same files. A run killed midway can still leave a partial folder;
+    // they still look like the same files. A writer that can replace entries in the parent
+    // folder can still race this, so sign into a folder only you can write. A run killed midway can still leave a partial folder;
     // verify refuses it, and the sender deletes it and signs again.
-    for (const { path, ino } of written) {
-      if (await sameFile(path, ino)) await unlink(path).catch(() => {});
+    for (const { path, identity } of written) {
+      if (await sameFile(path, identity)) await unlink(path).catch(() => {});
     }
-    if (await sameFile(target, folder.ino)) await rmdir(target).catch(() => {});
+    if (await sameFile(target, folder)) await rmdir(target).catch(() => {});
     throw new Error('Cannot write the bundle files.');
   }
 }
 
-async function sameFile(path, ino) {
+// Same inode, and on POSIX the same device (Windows lstat reports dev 0, see unchangedSince).
+async function sameFile(path, before) {
   try {
-    return (await lstat(path, { bigint: true })).ino === ino;
+    const now = await lstat(path, { bigint: true });
+    return now.ino === before.ino && (process.platform === 'win32' || now.dev === before.dev);
   } catch {
     return false;
   }
@@ -350,7 +359,8 @@ export async function verifyBundle(folder, { fingerprint } = {}, hooks = {}) {
     dir = await realpath(folder);
     entries = await readdir(dir, { withFileTypes: true });
   } catch {
-    problems.push('Cannot read the bundle folder.');
+    // On Windows realpath can also fail on an SMB share that hides an ancestor folder.
+    problems.push('Cannot read the bundle folder. Verify a local copy of it.');
     return result;
   }
   const present = new Map(entries.map(entry => [entry.name, entry]));

@@ -655,8 +655,9 @@ test('verify notices a folder that changes after it is listed or read', async t 
   const replaced = copyOf(context);
   assert.deepEqual(await problemsOf(replaced, {}, {
     afterRead: dir => {
+      // Move the original aside (outside the folder) first, so its inode cannot be reused.
       const bytes = readFileSync(join(dir, 'handoff.md'));
-      unlinkSync(join(dir, 'handoff.md'));
+      renameSync(join(dir, 'handoff.md'), join(context.folder, 'aside-handoff.md'));
       writeFileSync(join(dir, 'handoff.md'), bytes);
     },
   }), changed, 'a new file with the same bytes is still a different file');

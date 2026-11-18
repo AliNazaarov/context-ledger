@@ -1424,3 +1424,38 @@ First slice of P4, following ADR-9 of the design (`origin/ruslan/p1-design`, `do
 | Escaped output | A file name from the folder that holds a bidi override or a control character is printed escaped, never raw. Messages are fixed strings plus escaped names. |
 | OpenSSL recipe | `docs/signed-handoff.md` shows how a client checks a bundle with OpenSSL 3 alone: the fingerprint, the signature (`openssl pkeyutl -verify -rawin`) and the file hash. A test runs those exact commands when `openssl` is on PATH and skips otherwise: they accept the real bundle, give the same fingerprint as `ledger keygen`, and refuse a manifest with one changed byte. |
 | No secrets committed | No private key, `.sqlite` or `.env` file is added; `src/` and `tests/` hold no raw control or format characters other than tab, newline and carriage return. No new dependency. |
+
+**Results — P4a (2026-11-17, Windows):** all eight rows met locally. The code is in `src/sign.mjs` and `src/cli.mjs`, the tests in `tests/sign.test.mjs` (29 tests), the client guide in `docs/signed-handoff.md`. A human security review is still owed before merge.
+
+- **JCS subset:** pass. The section 3.2.2 and 3.2.3 examples and 24 Appendix B numbers match byte for byte; NaN, both infinities, lone surrogates in strings and keys, `undefined`, functions, dates, `bigint`, symbols and array holes are refused.
+- **Key generation:** pass. One PKCS#8 Ed25519 key, stdout is exactly 16 groups of 4 hex digits, a second run exits 1 and leaves the key byte-identical. The fingerprint is SHA-256 of the SPKI DER bytes rather than of the raw 32-byte key, so that the OpenSSL recipe needs nothing but `openssl`. The 0600 mode and the refusal of a key other users can read are POSIX tests that skip on Windows and run in CI on Ubuntu.
+- **Signed bundle:** pass. Exactly four files; `handoff.md` equals what `ledger handoff` prints; the manifest is canonical with no trailing newline; `manifest.sig` is 64 bytes and verifies. An existing folder (empty or not), a missing key, `--sign` with no or an empty value, and an unknown option all exit 1 without writing.
+- **Verify passes:** pass, with the warning without `--fingerprint`, and with none for the fingerprint written with spaces, colons or no separators, in either case.
+- **Verify fails closed:** pass for every case in the row, plus (from the reviews) a re-signed manifest with the right hash and the wrong size, a reformatted PEM of the same key, a 65-byte signature, a version 1 manifest that does not list exactly `handoff.md`, a case-only rename, and a folder changed after it was listed or read.
+- **Escaped output:** pass. Bidi overrides, ZWNJ and ZWJ (and on POSIX BEL and ESC) in file names are printed as `\u` escapes; option and response parser errors are replaced by fixed messages.
+- **OpenSSL recipe:** pass with OpenSSL 3.2.4 (Git for Windows). The test reads the commands from the marked block in `docs/signed-handoff.md`. It checks that every stage succeeds on the real bundle and gives the keygen fingerprint and the manifest hash, and that the signature step refuses a changed manifest byte and a 65-byte signature. It also checks the steps a client must not skip: a changed hand-off still passes the signature step and only the hash step catches it, and a bundle re-signed with another key passes the signature step and only the fingerprint step catches it.
+- **No secrets committed:** pass. Keys are made in temporary folders; `signing-key.pem*` is Git-ignored (a test runs `git check-ignore`); no new dependency; the raw-character check covers the P4a files.
+- **Codex review** (`codex exec --sandbox read-only`), three rounds:
+  - Round 1 (of 4ec3c5a), eight findings. Fixed in ed2a509, each with a regression test unless noted:
+    - (medium) Files could change between listing and reading. Bundle files are now opened without following symlinks or blocking on a FIFO (POSIX), and verify lists the folder again at the end and checks each file is still the one it read. The docs say to verify a private copy for a strong guarantee.
+    - (medium) The OpenSSL recipe checks less than `verify`. The docs now state exactly what it covers and the manual checks, and the test checks every stage and the negative cases above.
+    - (medium) On Windows the key's confidentiality rests on the folder's inherited access list. Not fixed in code: documented, and moved to P4b with the passphrase-encrypted key. Codex (round 2) judged this acceptable for a first slice if the human security reviewer accepts it.
+    - (low) A manifest without `handoff.md` was accepted. Version 1 now requires exactly that one file.
+    - (low) NTFS alternate data streams are not covered. Documented.
+    - (low) An interrupted write could leave a partial key or folder. `keygen` now stages the key and hard-links it into place; a failed bundle write removes what it created.
+    - (low) Names kept ZWNJ and ZWJ raw, and some parser errors quoted input. A strict `terminalLabel` escapes them, and the errors are fixed messages.
+    - (low) Three mutations survived the tests. The wrong-size, reformatted-PEM and 65-byte-signature tests now catch them.
+  - Round 2 (of ed2a509), seven findings. Fixed in ab576b0:
+    - (medium) `join()` folded `link/..` differently from the OS, so verify could read another folder than the one named. verify and `--sign` now resolve the path with `realpath` once (POSIX test).
+    - (medium) A killed `keygen` could leave a `.tmp` private key that Git did not ignore. Now ignored and documented.
+    - (low) Cleanup could remove a file put in its place. It now checks the inode first; documented as best effort. No regression test: the race needs a second writer.
+    - (low) A file system without hard links got a generic error. The message now names the requirement. No regression test: it needs a FAT or exFAT volume.
+    - (low) An inflated hand-off was read to the end. Its size is now compared first.
+    - (low) The race tests set the folder up before listing. Test hooks now change it after listing and after reading.
+    - (low) The recipe's fingerprint step without pipefail. Documented, and a test pins the empty-input hash.
+  - Round 3 (of ab576b0): one medium and five lows, of which three needed a change. Fixed in the final commit:
+    - (medium) `realpath` can fail on a Windows SMB share that hides an ancestor folder, and `--sign` then said the parent did not exist. The messages now say the path could not be resolved and to use a local folder; a fallback for such shares is not built.
+    - (low) Cleanup compared only the inode. It now compares the device too on POSIX, and the docs no longer promise that a replacement is left alone. No regression test: the race needs a second writer.
+    - (low) The hard-link message covered write errors and blamed the file system for `EPERM`, which Windows also uses for access denied. It now covers only `link()` and names both causes.
+    - The other findings were confirmations (the Git ignore rule, the hash bound, the hooks, the empty-input digest). The same-bytes replacement test now moves the original out of the folder first, so Linux cannot reuse its inode.
+- **Suites (Windows, this branch):** node 218/221 (3 skipped: the two POSIX-only P4a tests and one existing skip), against 191/192 on `main`; the 29 P4a tests are 27 pass and 2 POSIX skips. Graph check 9/9. Playwright 13/13 (through the shared lock). Python runtime 198 run, 50 skipped, OK. The POSIX tests (key mode, symlink and FIFO swaps, `link/..`) run in CI on Ubuntu.
