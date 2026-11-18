@@ -235,3 +235,7 @@ Next steps:
 2. G10: a person checks the 82 labels in `evals/handoff/labelled.json`, then live runs (`node evals/handoff/run.mjs --agent claude --model M --runs 10`, the same for codex, then `--summary`). Check token and cost parsing on the first live Claude run.
 3. Still owed from earlier: Ali's review of the runtime changes from cycle 9, the human review of PR #8's schema migration, and Ali's decision on `VLLM_NGRAM=1` (cycle 11).
 4. PR #3 (Ali's draft M0 benchmark, based on `feature/semantic-graph`) was left open: it is Ali's and conflicts with its base.
+
+## Current checkpoint — P1 design landed, implementation split (2026-11-17)
+
+Branch `ruslan/p1-design`. `docs/architecture.md` comes from `product/v1` unchanged except for its links, a status note, and a new section 11 on where `main` has moved. It stays a proposal until P1's owner approves the PR. The board splits P1's implementation into P1a (storage engine decision, which needs the owner), P1b (projects), P1c (message rows and stable keys), P1d (delete and retention) and P1e (loopback token). P1 was "In progress" for "Claude Code workflows" with no commit since 2026-11-07; the G6 review recommended this split.
