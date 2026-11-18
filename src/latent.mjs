@@ -265,10 +265,14 @@ function anchorSpan(span, lines, getIndex) {
 
 const numberPattern =/(?<![\w.])\d+(?:\.\d+)?(?![\w])/gu;
 const identifierPattern = /\b(?:[A-Za-z]+_[A-Za-z0-9_]*|[a-z]+[A-Z][A-Za-z0-9]*)\b/gu;
-// A number must stand alone: 4317 is not in 4317.5 (G7 review), but it is in "port 4317.".
-const hasToken = (text, token) => new RegExp(`(?<![\\w.])${token.replace(/\./gu, '\\.')}(?![\\w]|\\.\\d)`, 'u').test(text);
-// A code name must stand alone too: retryCount is not in retryCounter (G7 review).
-const hasIdentifier = (text, identifier) => new RegExp(`(?<![\\w$])${identifier}(?![\\w$])`, 'u').test(text);
+// A number must stand alone, in any script: 4317 is not in 4317.5 or in 4317 followed by
+// an Arabic-Indic digit (G7 review), but it is in "port 4317.".
+const hasToken = (text, token) =>
+  new RegExp(`(?<![\\p{L}\\p{N}_.])${token.replace(/\./gu, '\\.')}(?![\\p{L}\\p{N}_]|\\.\\p{N})`, 'u').test(text);
+// A code name must stand alone too: retryCount is not in retryCounter or retryCount
+// followed by an accented letter (G7 review).
+const hasIdentifier = (text, identifier) =>
+  new RegExp(`(?<![\\p{L}\\p{N}_$])${identifier}(?![\\p{L}\\p{N}_$])`, 'u').test(text);
 // A quoted string literal in a label: 'orbit-mail', "EUR", `shipped`. The quote must not
 // touch a letter or digit, so apostrophes inside words ("user's", "isn't") open nothing.
 const literalPattern = /(?<![\p{L}\p{N}])(['"`])([^'"`\n]{1,120})\1(?![\p{L}\p{N}])/gu;
@@ -311,7 +315,8 @@ export function isGrounded(label, citedText) {
   const words = (label.toLowerCase().match(/[a-z]{3,}/gu) ?? []).filter(word => !stopWords.has(word));
   // G7 review: a label in another script (Han, Cyrillic) has no [a-z] words. Each run of
   // its letters counts as a word, matched by any two letters in a row (one for a
-  // one-letter run), so an all-Han label cannot pass on unrelated English.
+  // one-letter run), so an all-Han label cannot pass on unrelated English. A pair must
+  // hold a non-ASCII letter: "café" must not pass on the "ca" of "cache" (review round 2).
   const foreign = (label.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter(run => /\P{ASCII}/u.test(run));
   // Nothing to compare (only short or common words): no evidence either way, kept.
   if (!words.length && !foreign.length) return true;
@@ -322,7 +327,10 @@ export function isGrounded(label, citedText) {
     || foreign.some(run => {
       const letters = Array.from(run);
       if (letters.length === 1) return cited.includes(run);
-      return letters.slice(1).some((letter, index) => cited.includes(letters[index] + letter));
+      return letters.slice(1).some((letter, index) => {
+        const pair = letters[index] + letter;
+        return /\P{ASCII}/u.test(pair) && cited.includes(pair);
+      });
     });
 }
 

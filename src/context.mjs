@@ -73,7 +73,7 @@ export function contextText(graph, session, { lookupGraph } = {}) {
     ...[...targets].sort(compareBy(1)).map(([graphId, name]) => `linked graph ${name}: ${graphId}`),
     // Card G7. In the last section, so the first inferred node cannot move the stable prefix.
     ...(graph.inferredNodeIds?.length
-      ? ["inferred: the cited lines do not hold the numbers, names or words of these labels, so the labels are the words of the agent, not quotes; read the lines before relying on them"]
+      ? ['inferred: the check found too little of these labels in their cited lines to mark them quoted; read the lines before relying on them']
       : []),
     `session: ${packet.sessionId}`,
     `graph: ${graph.id}`,

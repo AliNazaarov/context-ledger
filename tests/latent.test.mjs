@@ -469,3 +469,14 @@ test('G7 review: numbers and code names stand alone, and labels in other scripts
   assert.equal(isGrounded('端口固定', '端口保持不变'), true);
   assert.equal(isGrounded('It is used', 'anything'), true, 'nothing to compare still keeps a latent finding');
 });
+
+test('G7 review round 2: other-script pairs need a non-ASCII letter, and boundaries are Unicode-aware', async () => {
+  const { isGrounded } = await import('../src/latent.mjs');
+  const arabicFive = String.fromCodePoint(0x0665);
+  assert.equal(isGrounded('café', 'The cache is disabled'), false);
+  assert.equal(isGrounded('café', 'The café opens at nine'), true);
+  assert.equal(isGrounded('Use retryCount', 'reset retryCounté'), false);
+  assert.equal(isGrounded('Use port 4317', `port 4317${arabicFive}`), false);
+  assert.equal(isGrounded('Use port 4317', 'port 4317.'), true);
+  assert.equal(isGrounded('Use retryCount', 'this.retryCount = 3'), true);
+});
