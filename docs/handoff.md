@@ -261,6 +261,6 @@ PR #47 now detects only well-defined key formats (provider keys, JWTs, PEM priva
 
 ## Current checkpoint — P4c free-text secret detection (2026-11-18)
 
-Branch `ruslan/p4c-free-text-secrets`, stacked on P4b (#47). After an `Authorization: Bearer` header, or a secret-like name followed by `:` or `=`, the rest of that line is redacted, unless the whole value is a placeholder. On the corpus this misses nothing and flags 5% of benign keyed lines.
+Branch `ruslan/p4c-free-text-secrets`, stacked on P4b (#47). After an `Authorization: Bearer` header, or a secret-like name followed by `:` or `=`, the rest of that line is redacted, unless the whole value is a placeholder. On the corpus this misses nothing and flags 2 of 23 benign keyed lines (8.7%). Codex reviewed it twice; every finding is fixed with a test (docs/evals.md).
 
 Next owner: the budget (zero misses, at most 10% false alarms) and the line-tail approach are proposals. The user approves them before the PR leaves draft.

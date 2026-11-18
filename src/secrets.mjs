@@ -122,7 +122,9 @@ const nameKeywords = 'password|passwd|pwd|passphrase|secret|client[ _-]?secret|a
  */
 const freeTextLeads = [
   // Only spaces and tabs may sit inside a lead, so a lead never runs onto the next line.
-  { kind: 'bearer-token', lead: /\bAuthorization["']?[ \t]*:[ \t]*["']?[ \t]*Bearer[ \t]+/giu },
+  // The padding after an opening quote is consumed only when the quote is there, so long
+  // runs of spaces before a non-Bearer value do not backtrack.
+  { kind: 'bearer-token', lead: /\bAuthorization["']?[ \t]*:[ \t]*(?:["'][ \t]*)?Bearer[ \t]+/giu },
   { kind: 'assigned-secret', lead: new RegExp(`\\b(?:[A-Za-z0-9]{1,32}[_.-])?(?:${nameKeywords})\\b["']?[ \\t]*[:=][ \\t]*`, 'giu') },
 ];
 
@@ -136,12 +138,23 @@ function isPlaceholder(value) {
     || /^(?:changeme|change[_-]?me|placeholder|redacted|null|none|nil|undefined|true|false|required|optional)$/iu.test(value)
     || /^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|\([A-Za-z_][A-Za-z0-9_]*\)|[A-Za-z_][A-Za-z0-9_]*)$/u.test(value)
     || /^%[A-Za-z_][A-Za-z0-9_]*%$/u.test(value)
-    // An angle-bracket stand-in names what goes there, such as <your-key-here>.
-    || /^<(?=[A-Za-z0-9 _-]{0,48}>$)[A-Za-z0-9 _-]*(?:key|token|secret|password|here|value)[A-Za-z0-9 _-]*>$/iu.test(value)
+    || isAngleStandIn(value)
     || /^(?:process\.env|import\.meta\.env|os\.environ)\.[A-Za-z_][A-Za-z0-9_]*$/u.test(value)
     || /^\[REDACTED [a-z-]{1,32}\]$/u.test(value)
     || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)
     || /^[0-9a-f]{40}$/iu.test(value);
+}
+
+// Whole words that mark an angle-bracket stand-in, such as <your-key-here>.
+const standInWords = new Set(['key', 'token', 'secret', 'password', 'here', 'value']);
+
+/**
+ * An angle-bracket stand-in names what goes there with a whole word, split by spaces,
+ * underscores or hyphens: <your-key-here> is one, <monkey9> is not.
+ */
+function isAngleStandIn(value) {
+  if (!/^<[A-Za-z0-9 _-]{1,48}>$/u.test(value)) return false;
+  return value.slice(1, -1).split(/[ _-]/u).some(word => standInWords.has(word.toLowerCase()));
 }
 
 /** The end of the line that from lies on: the next LF, CR or Unicode line or paragraph separator. */
@@ -151,14 +164,23 @@ function lineEndFrom(text, from) {
 }
 
 /**
- * The value as judged for a placeholder. Inside a quote it runs to the closing quote; a
- * bare value loses only trailing spaces and a trailing comma or semicolon. A backward scan,
- * so long runs of spaces cost nothing.
+ * The value as judged for a placeholder. Inside a quote it runs to the closing quote on the
+ * same line, past backslash-escaped quotes. The quoted part is the whole value only when
+ * nothing but spaces and tabs come before a delimiter (, ; ) ] }) or the line end;
+ * otherwise, as in the shell value "changeme"synthetic9, the rest of the line is judged
+ * and so is never a placeholder. A bare value loses only trailing spaces and a trailing
+ * comma or semicolon. Every scan stops at end, and the trim is a backward scan, so long
+ * runs of spaces cost nothing.
  */
 function judgedValue(text, start, end, quote) {
   if (quote) {
-    const close = text.indexOf(quote, start);
-    return text.slice(start, close === -1 || close > end ? end : close);
+    let close = start;
+    while (close < end && text[close] !== quote) close += text[close] === '\\' ? 2 : 1;
+    if (close >= end) return text.slice(start, end);
+    let after = close + 1;
+    while (after < end && (text[after] === ' ' || text[after] === '\t')) after += 1;
+    if (after < end && !',;)]}'.includes(text[after])) return text.slice(start, end);
+    return text.slice(start, close);
   }
   let stop = end;
   while (stop > start && /[ \t,;]/u.test(text[stop - 1])) stop -= 1;
@@ -170,13 +192,17 @@ function lineTails(text) {
   const found = [];
   for (const rule of freeTextLeads) {
     const pattern = new RegExp(rule.lead.source, rule.lead.flags);
+    // Leads come in order, so the line end found for one is reused for later leads on the
+    // same line: rejected leads never rescan the line.
+    let lineEnd = -1;
     for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
       let start = match.index + match[0].length;
       // An opening quote stays visible; the value starts after it. A quote just before
       // Bearer opens the value too, as in "Authorization": "Bearer ...".
       let quote = /["'`]/u.test(text[start] ?? '') ? text[start] : (rule.kind === 'bearer-token' ? (match[0].match(/(["'])[ \t]*Bearer/iu)?.[1] ?? '') : '');
       if (/["'`]/u.test(text[start] ?? '')) start += 1;
-      const end = lineEndFrom(text, start);
+      if (start > lineEnd) lineEnd = lineEndFrom(text, start);
+      const end = lineEnd;
       const value = judgedValue(text, start, end, quote);
       if (!value || isPlaceholder(value)) continue;
       found.push({ kind: rule.kind, start, end, prefix: 0 });

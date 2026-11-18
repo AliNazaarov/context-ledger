@@ -1551,9 +1551,9 @@ P4b was narrowed to key formats with a fixed shape, because seven review rounds 
 
 ### P4c results (2026-11-18)
 
-- **Corpus:** `tests/secrets-free-text.test.mjs` has 34 secret lines, including every input earlier P4b review rounds and P4c round 1 reported as missed, plus 21 benign keyed lines and 13 benign plain lines. The test pins the exact list of false alarms and checks that no four-character fragment of any secret survives in the rendered text.
+- **Corpus:** `tests/secrets-free-text.test.mjs` has 38 secret lines, including every input earlier P4b review rounds and P4c rounds 1 and 2 reported as missed, plus 23 benign keyed lines and 13 benign plain lines. The test pins the exact list of false alarms and checks that the rendered text is exactly the line with each covered span replaced by its marker.
 - **Misses:** 0. No character of any secret is visible after redaction.
-- **False alarms:** 2 of 21 benign keyed lines (9.5%), both code under a secret-like name: `token = getToken()` and `apiKey = config.apiKey`. No plain line is flagged. (The first count, 1 of 20, was wrong: it stripped the closing bracket from a redaction marker and so mis-judged it, and it left out `apiKey = config.apiKey`. Review round 1.)
+- **False alarms:** 2 of 23 benign keyed lines (8.7%; 2 of 21 before round 2 added two benign fixtures), both code under a secret-like name: `token = getToken()` and `apiKey = config.apiKey`. No plain line is flagged. (The first count, 1 of 20, was wrong: it stripped the closing bracket from a redaction marker and so mis-judged it, and it left out `apiKey = config.apiKey`. Review round 1.)
 - **Line structure:** line breaks survive and the other lines are unchanged. Each speed case runs well under a second.
 - **Tests changed on purpose:** the P4b tests that asserted the narrowed scope now assert P4c's behaviour:
   - `password: hunter2` and short bearer values are now redacted;
@@ -1569,3 +1569,11 @@ P4b was narrowed to key formats with a fixed shape, because seven review rounds 
   - (medium) `api key`, and more than eight spaces or tabs before `=`, were missed. Both are found now; quote-split names stay out of scope.
   - (medium) The false-alarm count was wrong (see above), the corpus lacked the escaped-quote case and a benign fixture, and the rendered-output check could pass with a fragment showing. All fixed.
   - (low) The empty report said "No known key formats found" although both checks ran. It now says "No findings from the checks below", and the scope line names the leads and the placeholder exception.
+- **Codex, round 2** (of d6c39db): two high, two medium and two low findings, fixed with tests:
+  - (high) A quoted placeholder followed by more text, such as the shell value `password="changeme"synthetic9`, hid the whole value, and an escaped quote was taken as the closing one. The closing quote is now found on the same line past backslash escapes, and the quoted part counts as the whole value only when a delimiter (`, ; ) ] }`) or the line end follows it.
+  - (high) The angle-bracket exemption matched a keyword inside any word, so `password=<monkey9>` stayed visible. It now needs a whole word (key, token, secret, password, value or here) split by spaces, underscores or hyphens.
+  - (medium) The bearer lead backtracked on long padding before a non-Bearer value (343 ms for 32,000 spaces). The padding after the optional quote is now consumed only with the quote: under 1 ms for 128,000.
+  - (medium) Rejected leads each rescanned the rest of the line (4.07 s for 8,000 `token=""`). The line end is now reused for later leads on the same line: 4 ms for 8,000 and 7 ms for 32,000. Both cases are in the timing test.
+  - (low) The rendered-output check could miss a short leak. It now compares the exact rendered string.
+  - (low) Line preservation was tested for LF and CRLF only. It now covers lone CR, U+2028 and U+2029, each with empty bearer and assignment leads before the separator.
+  - Noted, not changed: U+0085 (NEL) is not a line end, so a value before it is redacted along with the text after it on the same physical line. That over-redacts and never leaks.

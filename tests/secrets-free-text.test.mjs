@@ -46,6 +46,11 @@ const secretLines = [
   [`token${repeat('\t', 9)}= abc9def`, 'abc9def'],
   [`password = "esc${backslash}"aped9"`, `esc${backslash}"aped9`],
   [`password=pw1${String.fromCodePoint(0x2028)}after`, 'pw1'],
+  // Review round 2 (of d6c39db).
+  ['password="changeme"synthetic9', 'changeme"synthetic9'],
+  [`password="changeme${backslash}"synthetic9"`, `changeme${backslash}"synthetic9`],
+  ['password=<monkey9>', '<monkey9>'],
+  ['password=<tokenizer>', '<tokenizer>'],
 ];
 
 // Benign lines with a secret-like name and : or =. At most 10% may be flagged.
@@ -71,6 +76,9 @@ const benignKeyed = [
   'token: "${GITHUB_TOKEN}"',
   'token = getToken()',
   'apiKey = config.apiKey',
+  // Review round 2: a quoted placeholder followed by a delimiter is still a placeholder.
+  '{"password": "changeme", "user": "demo"}',
+  'secret: <your_secret_here>',
 ];
 
 // The benign keyed lines expected to be flagged: code under a secret-like name.
@@ -106,16 +114,29 @@ function hidden(line, secret) {
 test('P4c budget: no character of any secret in the corpus is left visible', () => {
   const missed = secretLines.filter(([line, secret]) => !hidden(line, secret)).map(([line]) => line);
   assert.deepEqual(missed, []);
-  // And the rendered text shows no fragment of them: no run of four characters survives.
-  for (const [line, secret] of secretLines) {
-    // The redaction markers themselves are not part of the value.
-    const out = redactText(line).replace(/\[REDACTED [a-z-]+\]/gu, '');
-    for (let at = 0; at + 4 <= secret.length; at += 1) {
-      const piece = secret.slice(at, at + 4);
-      if (!line.replace(secret, '').includes(piece)) assert.ok(!out.includes(piece), `${line}: ${piece}`);
-    }
-  }
+  // And the rendered text is exactly the line with each covered span replaced by its
+  // marker: nothing of a covered span, however short, is left visible.
+  for (const [line] of secretLines) assert.equal(redactText(line), rendered(line), line);
 });
+
+// The expected rendering, built from the scanner's spans independently of redactText.
+function rendered(line) {
+  const spans = findSecrets(line).map(({ kind, start, end }) => ({ kind, start, end })).sort((a, b) => a.start - b.start);
+  const merged = [];
+  for (const span of spans) {
+    const last = merged.at(-1);
+    if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
+    else merged.push({ ...span });
+  }
+  let out = '';
+  let at = 0;
+  for (const span of merged) {
+    out += `${line.slice(at, span.start)}[REDACTED `;
+    out += `${span.kind}]`;
+    at = span.end;
+  }
+  return out + line.slice(at);
+}
 
 test('P4c budget: at most 10% of benign keyed lines, and no plain line, are flagged', () => {
   const flagged = benignKeyed.filter(line => findSecrets(line).length);
@@ -134,6 +155,12 @@ test('P4c: line breaks survive and other lines are unchanged byte for byte', () 
     assert.equal(out[1], 'password=[REDACTED assigned-secret]');
     assert.equal(out[3], 'Authorization: Bearer [REDACTED bearer-token]');
   }
+  // Review round 2: every documented line separator, with an empty lead before it.
+  for (const separator of ['\n', '\r\n', '\r', String.fromCodePoint(0x2028), String.fromCodePoint(0x2029)]) {
+    const text = ['password=pw1', 'prose one', 'password=', 'prose two', 'Authorization: Bearer ', 'prose three'].join(separator);
+    const expected = ['password=[REDACTED assigned-secret]', 'prose one', 'password=', 'prose two', 'Authorization: Bearer ', 'prose three'].join(separator);
+    assert.equal(redactText(text), expected, JSON.stringify(separator));
+  }
 });
 
 test('P4c: a 1 MiB transcript and 40,000 nested names scan in under a second each', () => {
@@ -141,7 +168,10 @@ test('P4c: a 1 MiB transcript and 40,000 nested names scan in under a second eac
   const big = chunk.repeat(Math.ceil((1024 * 1024) / chunk.length));
   const names = `token=${'token='.repeat(40000)}Zt4Wq8Lm2Np6`;
   const spaces = `password=a${' '.repeat(64000)}b`;
-  for (const text of [big, names, spaces]) {
+  // Review round 2: rejected quoted leads, and long padding before a non-Bearer value.
+  const rejected = 'token="" '.repeat(8000);
+  const padded = `Authorization:${' '.repeat(64000)}Basic synthetic9`;
+  for (const text of [big, names, spaces, rejected, padded]) {
     const started = performance.now();
     findSecrets(text);
     assert.ok(performance.now() - started < 1000, `${text.length} characters took too long`);
