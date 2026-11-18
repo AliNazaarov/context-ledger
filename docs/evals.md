@@ -1537,7 +1537,7 @@ P4b was narrowed to key formats with a fixed shape, because seven review rounds 
 
 **What is flagged:** a lead whose line tail starts with a value. Not flagged: an empty tail, a pure number, or a placeholder that fills the whole value (`${TOKEN}`, `<your-key>`, `changeme`, `xxxx`, `[REDACTED <kind>]`, `process.env.NAME`, a UUID or a 40-character commit hash). A tail with anything after such a placeholder is still flagged.
 
-**Budget, on a labelled synthetic corpus built at test time:**
+**Proposed budget (the user approves it, and the line-tail approach, before this leaves draft), on a labelled synthetic corpus built at test time:**
 
 - **Misses: zero.** For every secret line, no character of the secret is left visible after redaction. The corpus covers bare, quoted, JSON, single-quoted and curl forms; escapes (`\/`, `\u` forms, an escaped quote, a backslash in a bare value); trailing punctuation; parentheses; long values; and short passwords. It includes every input earlier P4b review rounds reported as missed.
 - **False alarms:** at most 10% of the benign lines that contain a secret-like name followed by `:` or `=` (config keys holding placeholders, numbers, code), and none of the benign lines without one (prose, hashes, UUIDs, ordinary code).
@@ -1548,3 +1548,15 @@ P4b was narrowed to key formats with a fixed shape, because seven review rounds 
 
 - `node --test tests/*.test.mjs` passes, with the corpus and the budget checks in `tests/secrets-free-text.test.mjs`. The P4b key-format tests still pass unchanged.
 - No new dependency. `ledger redact` reports these findings like the others, with no preview.
+
+### P4c results (2026-11-18)
+
+- **Corpus:** `tests/secrets-free-text.test.mjs` has 26 secret lines, including every input earlier P4b review rounds reported as missed, plus 20 benign keyed lines and 10 benign plain lines.
+- **Misses:** 0. No character of any secret is visible after redaction.
+- **False alarms:** 1 of 20 benign keyed lines (5%), `token = getToken()`. No plain line is flagged.
+- **Line structure:** line breaks survive and the other lines are unchanged. Each speed case runs well under a second.
+- **Tests changed on purpose:** the P4b tests that asserted the narrowed scope now assert P4c's behaviour:
+  - `password: hunter2` and short bearer values are now redacted;
+  - code under a secret-like name is over-redacted;
+  - a line tail merges with a key format on the same line, with no prefix shown.
+- **Report wording:** the `ledger redact` scope line now says what is checked: key formats, and the rest of a line after a bearer header or a secret-like name.

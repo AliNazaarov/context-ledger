@@ -107,10 +107,66 @@ const simpleRules = [
  */
 const valueRules = [
   { kind: 'aws-secret-access-key', lead: /\baws_secret_access_key\b["']?\s{0,8}[:=]\s{0,8}/giu, cls: /[A-Za-z0-9/+=]/u, accept: value => /^[A-Za-z0-9/+=]{40}$/u.test(value) },
-  // Card P4b, narrowed on 2026-11-18 at the user's choice: free-text guesses (a bearer
-  // header's value, or any value after a name such as password=) are out of scope here.
-  // Seven review rounds showed each fix to them opening a new gap; they move to card P4c.
+  // Free-text values (a bearer header's value, or any value after a name such as
+  // password=) are handled by lineTails below (card P4c), not here.
 ];
+
+// Card P4c: names whose value is treated as a secret.
+const nameKeywords = 'password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key|access[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token';
+
+/**
+ * Card P4c: free-text leads. After one of these, the rest of the line is the value: the
+ * scanner never guesses where a free-text value ends inside the line, so no fragment of it
+ * can be left visible. The cost, other text on that line being redacted too, is bounded by
+ * the false-alarm budget in docs/evals.md.
+ */
+const freeTextLeads = [
+  { kind: 'bearer-token', lead: /\bAuthorization["']?\s{0,8}:\s{0,8}["']?\s{0,8}Bearer\s{1,8}/giu },
+  { kind: 'assigned-secret', lead: new RegExp(`\\b(?:[A-Za-z0-9]{1,32}[_.-])?(?:${nameKeywords})\\b["']?\\s{0,8}[:=]\\s{0,8}`, 'giu') },
+];
+
+/**
+ * A value that is only a stand-in for a secret, judged on the whole value (trailing quotes
+ * and closing punctuation removed). Anything more than the stand-in is still a secret.
+ */
+function isPlaceholder(value) {
+  return /^[0-9]+$/u.test(value)
+    || /^(?:x+|\*+|\.+|#+|-+)$/iu.test(value)
+    || /^(?:changeme|change[_-]?me|placeholder|redacted|null|none|nil|undefined|true|false|required|optional)$/iu.test(value)
+    || /^\$[{(]?[A-Za-z_][A-Za-z0-9_]*[})]?$/u.test(value)
+    || /^%[A-Za-z_][A-Za-z0-9_]*%$/u.test(value)
+    || /^<[A-Za-z][A-Za-z0-9 _-]{0,48}>$/u.test(value)
+    || /^(?:process\.env|import\.meta\.env|os\.environ)\.[A-Za-z_][A-Za-z0-9_]*$/u.test(value)
+    || /^\[REDACTED [a-z-]{1,32}\]$/u.test(value)
+    || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)
+    || /^[0-9a-f]{40}$/iu.test(value);
+}
+
+/** The end of the line that from lies on: the next LF or CR, or the end of the text. */
+function lineEndFrom(text, from) {
+  for (let at = from; at < text.length; at += 1) if (text[at] === '\n' || text[at] === '\r') return at;
+  return text.length;
+}
+
+/** Card P4c: one span per free-text lead, from the value's start to the end of its line. */
+function lineTails(text) {
+  const found = [];
+  for (const rule of freeTextLeads) {
+    const pattern = new RegExp(rule.lead.source, rule.lead.flags);
+    for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+      let start = match.index + match[0].length;
+      // An opening quote stays visible; the value starts after it.
+      if (text[start] === '"' || text[start] === "'" || text[start] === '`') start += 1;
+      const end = lineEndFrom(text, start);
+      const value = text.slice(start, end).replace(/[\s"'`,;)\]}]+$/u, '');
+      if (!value || isPlaceholder(value)) continue;
+      found.push({ kind: rule.kind, start, end, prefix: 0 });
+      // The rest of the line is already covered, so the next lead is looked for after it.
+      pattern.lastIndex = Math.max(pattern.lastIndex, end);
+    }
+  }
+  return found;
+}
 
 /** JSON Web Tokens: two base64url segments that start eyJ and a signature that may be empty. */
 function jwts(text) {
@@ -233,6 +289,7 @@ function candidates(text) {
       // A rejected value is not skipped: a real secret may sit inside it, after its own name.
     }
   });
+  for (const candidate of lineTails(text)) all.push({ ...candidate, rank: 2 + simpleRules.length + valueRules.length });
   return all;
 }
 
