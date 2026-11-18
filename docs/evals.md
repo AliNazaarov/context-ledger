@@ -1456,7 +1456,7 @@ All fixtures are synthetic. The fake credentials are put together at test time f
 
 ### P4b results (2026-11-17)
 
-- `tests/secrets.test.mjs` has 30 tests. Fake credentials are assembled at run time. Running the scanner over every committed file finds no provider-format credential; its only hits are generic `Authorization: Bearer` examples in the test text, such as `Bearer abcdefgh12345`.
+- `tests/secrets.test.mjs` has 33 tests. Fake credentials are assembled at run time. Running the scanner over every committed file finds no provider-format credential; its only hits are in `tests/secrets.test.mjs`: 17 secret-looking values under names such as `password` and 5 generic `Authorization: Bearer` examples (such as `Bearer abcdefgh12345`), all synthetic test text.
 - **Codex, round 1** (of 742b071): three high, four medium and three low findings, all fixed with tests:
   - (high) Overlapping matches kept only one span, so part of an enclosing bearer value could stay visible. Overlaps now merge into one span, and the prefix is hidden unless the labelled match begins it.
   - (high) Length caps could leave the tail of a long value: private keys over 16 KiB, long bearer values, quoted passwords with spaces. Values are now extended by a linear scan to their real end.
@@ -1495,4 +1495,9 @@ All fixtures are synthetic. The fake credentials are put together at test time f
   - (medium) Trimming a key line's trailing padding used an unanchored pattern, which is slow on long runs of spaces. It now walks back from the line end. The span ends with the END marker, so padding after it is kept.
   - (low) The nested-name tests could pass with the old skipping. A rejected outer AWS value now keeps the real one inside it, and the 40,000-name case pins its exact span.
   - (low) The exact-output CLI test now also requires an empty stderr.
+- **Codex, round 5** (of the round 4 fixes, run by the coordinating session): two high and two low findings, fixed with tests:
+  - (high) A whole header in quotes, as in curl's `-H "Authorization: Bearer …"`, was not treated as a string, so an escaped slash stopped the value early. A quote just before the header now counts too.
+  - (high) Bare values were checked after decoding escapes, so a short password with a backslash fell under the length limit. A bare value is now checked as written; only values in a string are decoded.
+  - (low) Padding after a BEGIN marker was taken even when prose followed on the same line. It is now taken only when a line break follows.
+  - (low) The fixture audit now names the 17 secret-looking values under names in the test file, beside the generic bearer examples.
 - **Not reviewed again:** round 4's fixes. Each round found new edge cases: this is a heuristic scanner over free text, not a guarantee. The PR asks for a human security review before merge (AGENTS.md section 4.4), and the report tells people that values are not shown, not that every secret was found.

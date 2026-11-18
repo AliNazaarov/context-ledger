@@ -176,8 +176,11 @@ function privateKeys(text) {
   const begin = /-----BEGIN ((?:[A-Z0-9]{1,16} ){0,3})PRIVATE KEY-----/gu;
   for (let match = begin.exec(text); match; match = begin.exec(text)) {
     const endLine = `-----END ${match[1]}PRIVATE KEY-----`;
-    // Spaces or tabs may follow the BEGIN marker on its line.
-    let end = runEnd(text, match.index + match[0].length, /[ \t]/u);
+    // Spaces or tabs after the BEGIN marker belong to it only when a line break follows them;
+    // otherwise prose on the same line is left as it was.
+    const markerEnd = match.index + match[0].length;
+    const padded = runEnd(text, markerEnd, /[ \t]/u);
+    let end = padded === text.length || text[padded] === '\n' || text[padded] === '\r' ? padded : markerEnd;
     let blankAllowed = false;
     while (end < text.length) {
       const lineStart = text[end] === '\r' && text[end + 1] === '\n' ? end + 2 : text[end] === '\n' ? end + 1 : -1;
@@ -233,14 +236,19 @@ function candidates(text) {
       let start = match.index + match[0].length;
       let end;
       const quote = text[start];
+      // Whether the value sits inside a string, so its escapes are decoded before it is
+      // checked. A bare value is checked exactly as written.
+      let inString = false;
       if (quote === '"' || quote === "'" || quote === '`') {
         start += 1;
         end = quotedEnd(text, start, quote);
+        inString = true;
       } else {
         const cls = rule.cls ?? unquoted;
         // Escapes count only inside a string: a bearer value after a quoted header such as
-        // "Authorization": "Bearer …". A bare value ends at its first character outside cls.
-        const inString = /["']\s{0,8}Bearer\s{1,8}$/iu.test(match[0]);
+        // "Authorization": "Bearer …", or inside a quoted whole header such as curl's
+        // -H "Authorization: Bearer …". A bare value ends at its first character outside cls.
+        inString = /["']\s{0,8}Bearer\s{1,8}$/iu.test(match[0]) || /["'`]/u.test(text[match.index - 1] ?? '');
         // Reuse the end of the run this start lies in, so nested names in one long run do
         // not each scan its rest again.
         if (cached && cached.cls === cls && cached.inString === inString && start >= cached.from && start < cached.end) end = cached.end;
@@ -250,7 +258,7 @@ function candidates(text) {
         }
       }
       const value = text.slice(start, end);
-      if (value && rule.accept(decoded(value))) {
+      if (value && rule.accept(inString ? decoded(value) : value)) {
         all.push({ kind: rule.kind, start, end, rank: 2 + simpleRules.length + index, prefix: 0 });
         pattern.lastIndex = Math.max(pattern.lastIndex, end);
       }

@@ -600,3 +600,36 @@ test('P4b review 4: long runs of spaces inside a key block stay fast', () => {
     assert.ok(performance.now() - started < 1000, `${size} spaces took too long`);
   }
 });
+
+// Review round 5 regressions.
+
+test('P4b review 5: a quoted curl header is read as a string, in both quote styles', () => {
+  const backslash = String.fromCodePoint(92);
+  const value = `abc${backslash}/def12345xyz`;
+  for (const quote of ['"', String.fromCodePoint(39)]) {
+    const text = `curl -H ${quote}Authorization: Bearer ${value}${quote} https://example.test`;
+    const [finding, extra] = findSecrets(text);
+    assert.equal(extra, undefined, quote);
+    assert.equal(finding.kind, 'bearer-token');
+    assert.equal(text.slice(finding.start, finding.end), value, quote);
+    assert.equal(redactText(text), `curl -H ${quote}Authorization: Bearer [REDACTED bearer-token]${quote} https://example.test`);
+  }
+});
+
+test('P4b review 5: a bare value is checked as written, not decoded', () => {
+  const backslash = String.fromCodePoint(92);
+  // Eight characters as written; decoding the backslash would leave seven.
+  const value = `ab${backslash}c1234`;
+  assert.equal(value.length, 8);
+  const text = `password=${value} ok`;
+  const [finding] = findSecrets(text);
+  assert.equal(text.slice(finding.start, finding.end), value);
+  assert.equal(redactText(text), 'password=[REDACTED assigned-secret] ok');
+});
+
+test('P4b review 5: padding after a BEGIN marker is kept when prose follows on its line', () => {
+  const text = `-----BEGIN ${pemType}-----   and some prose\nnext line`;
+  assert.equal(redactText(text), '[REDACTED private-key]   and some prose\nnext line');
+  const lineBreak = `-----BEGIN ${pemType}-----  \n${body('q1W2', 16)}\n-----END ${pemType}-----`;
+  assert.equal(redactText(`${lineBreak}\nafter`), '[REDACTED private-key]\nafter');
+});
