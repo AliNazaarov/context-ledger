@@ -1391,7 +1391,7 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
 
 The card asked Codex for a read-only review of the product and evals at cycle 4. Cycle 4 is long past, so on the user's instruction Codex ran it read-only on the state of `main` and the open PRs on 2026-11-17, from Claude Code. The full review is [docs/reviews/g6-2026-11-17.md](reviews/g6-2026-11-17.md).
 
-- **What is proven:** import, search, cited hand-offs, graph publication and validation, rooms, MCP paging and the security checks on the loopback server all have passing evals on synthetic data.
+- **What the evals support:** import, search and hand-offs that keep source lines; typed graphs with valid citations and the two-party room rules; and MCP discovery and paging in real clients. All of it is on synthetic data. M2b transfer is shown for one trained small-model pair only.
 - **What is not yet proven:** the hand-off savings rest on synthetic data, and the cycle 7 figures on six early facts. G10's live runs are still owed. The latent team results show no advantage over random vectors (cycles 13 and 14).
 - **Main user risks:** a real citation can support a wrong label; local transcript text reaches the agent through `session_read` and the latent fallback; party names in rooms are not verified.
 - **Recommended next cycle:** run G10 live on Claude Code and Codex with human-checked labels and a pass rule written first (at least 10 paired runs, 90% of facts carried, 30% fewer median input tokens). Hold the "3× faster, 5× fewer tokens" claim until then.
