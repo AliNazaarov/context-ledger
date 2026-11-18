@@ -106,7 +106,7 @@ async function main() {
       if (Number.isSafeInteger(graphs) && graphs > 0) {
         throw new Error(`Session is cited by ${graphs} ${graphs === 1 ? 'graph' : 'graphs'}, so it was not deleted.`);
       }
-      if (problem?.journalMode !== undefined) {
+      if (problem?.journalMode === 'wal' || problem?.journalMode === 'persist') {
         throw new Error('The ledger database does not use the default rollback journal, so the session was not deleted.');
       }
     }

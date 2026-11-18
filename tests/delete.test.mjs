@@ -257,11 +257,13 @@ test('without secure_delete SQLite keeps deleted text in the file, which is why 
   assert.ok((await readFile(path)).toString('latin1').includes('Zephyrine plain delete.'));
 });
 
-async function startServer(t) {
+async function startServer(t, prepare) {
   // One after hook, so the server stops before its database file is removed.
   const directory = await mkdtemp(join(tmpdir(), 'ledger-delete-server-'));
+  const path = join(directory, 'ledger.sqlite');
+  prepare?.(path);
   const child = spawn(process.execPath, ['src/server.mjs'], {
-    cwd: root, env: { ...process.env, PORT: '0', CONTEXT_LEDGER_DB: join(directory, 'ledger.sqlite') }, stdio: ['ignore', 'pipe', 'inherit'],
+    cwd: root, env: { ...process.env, PORT: '0', CONTEXT_LEDGER_DB: path }, stdio: ['ignore', 'pipe', 'inherit'],
   });
   t.after(async () => {
     try {
@@ -318,6 +320,36 @@ test('ledger delete deletes through the server, and refuses cited and unknown se
   // A DELETE without the Origin, as a page on another site or a plain client sends it, is refused.
   const bare = await fetch(`${origin}/api/sessions/${cited.id}`, { method: 'DELETE' });
   assert.deepEqual([bare.status, await bare.json()], [403, { error: 'Deleting a session requires the same origin.' }]);
+
+  // A list cursor on a session deleted over HTTP is refused; a new listing works.
+  const { session: anchor } = await post('/api/import', { provider: 'claude', source: 'anchor.jsonl', transcript: transcript('A synthetic anchor note.') });
+  const page = await (await fetch(`${origin}/api/sessions?limit=1`)).json();
+  assert.equal(page.next, anchor.id);
+  assert.equal((await cli(port, 'delete', anchor.id)).stdout, `Deleted session ${anchor.id}.\n`);
+  const stale = await fetch(`${origin}/api/sessions?limit=1&after=${anchor.id}`);
+  assert.deepEqual([stale.status, await stale.json()], [400, { error: 'Unknown cursor.' }]);
+  const fresh = await (await fetch(`${origin}/api/sessions?limit=10`)).json();
+  assert.deepEqual(fresh.sessions.map(row => row.id), [cited.id]);
+});
+
+test('a server on a WAL database answers a delete with 409 and the journal mode', async t => {
+  const port = await startServer(t, path => {
+    openStore(path).close();
+    const setup = new DatabaseSync(path);
+    setup.prepare('PRAGMA journal_mode = wal').get();
+    setup.close();
+  });
+  const origin = `http://127.0.0.1:${port}`;
+  const imported = await fetch(`${origin}/api/import`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ provider: 'claude', source: 'wal.jsonl', transcript: transcript('A synthetic WAL server note.') }) });
+  const { session } = await imported.json();
+  const refused = await fetch(`${origin}/api/sessions/${session.id}`, { method: 'DELETE', headers: { Origin: origin } });
+  assert.deepEqual([refused.status, await refused.json()], [409, {
+    error: 'This ledger database uses journal mode wal, so a delete could leave copies of the transcript in the file. Deleting needs the default rollback journal.',
+    journalMode: 'wal',
+  }]);
+  await cliFails(port, ['delete', session.id], 'The ledger database does not use the default rollback journal, so the session was not deleted.');
+  assert.equal((await fetch(`${origin}/api/sessions/${session.id}`)).status, 200);
 });
 
 test('ledger delete sends one DELETE with the local Origin, and prints only fixed text', async t => {
@@ -356,8 +388,12 @@ test('ledger delete sends one DELETE with the local Origin, and prints only fixe
   await cliFails(port, ['delete', id], 'Context Ledger returned HTTP 403.');
   reply = { status: 404, body: { error: hostile } };
   await cliFails(port, ['delete', id], 'Session not found.');
-  reply = { status: 409, body: { error: hostile, journalMode: hostile } };
+  reply = { status: 409, body: { error: hostile, journalMode: 'wal' } };
   await cliFails(port, ['delete', id], 'The ledger database does not use the default rollback journal, so the session was not deleted.');
+  for (const journalMode of [hostile, 'delete', null, 3]) {
+    reply = { status: 409, body: { error: hostile, journalMode } };
+    await cliFails(port, ['delete', id], 'Context Ledger returned HTTP 409.');
+  }
   reply = { status: 200, body: { deleted: 'd'.repeat(64) } };
   await cliFails(port, ['delete', id], 'Context Ledger returned an unexpected response.');
   // A body that is not JSON: the parse error would quote it, so it is not printed.
@@ -385,7 +421,7 @@ test('the MCP adapter has no way to delete', async () => {
 
 test('the files this card changes hold no raw control or format characters', async () => {
   const files = ['src/errors.mjs', 'src/store.mjs', 'src/server.mjs', 'src/cli.mjs', 'tests/delete.test.mjs', 'tests/routes.test.mjs',
-    'tests/e2e/delete.spec.mjs', 'public/app.js', 'public/index.html'];
+    'tests/e2e/delete.spec.mjs', 'public/app.js', 'public/index.html', 'public/styles.css'];
   for (const file of files) {
     assert.ok(existsSync(join(root, file)), file);
     const text = await readFile(join(root, file), 'utf8');
