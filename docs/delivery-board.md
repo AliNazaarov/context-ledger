@@ -12,7 +12,7 @@ Claim a card before working on it (AGENTS.md section 2). States: Backlog, Ready,
 | P4 Redaction and signed export (wave 4) | Unassigned | — | Secret scanner, redaction diff, Ed25519 signing, `ledger verify` | Backlog (after P2) |
 | P5 Packaging and launch (wave 5) | Unassigned | — | npx install, cross-OS CI, license key, docs | Backlog |
 | I1 Large-file streaming import | Unassigned | — | Real data: 16% of Claude Code sessions exceed the 8 MiB HTTP limit; import from a file path with streaming | Ready (after P1) |
-| I2 Tolerant JSONL parsing | Claude Code (for Ruslan) | `ruslan/i2-tolerant-jsonl` | Real data: one corrupt line rejects a whole session; skip and count bad lines instead. Parser only, so it does not wait for P1 (G6 review) | In review |
+| I2 Tolerant JSONL parsing | Claude Code (for Ruslan) | PR #33, `ruslan/i2-tolerant-jsonl` | Real data: one corrupt line rejects a whole session; skip and count bad lines instead. Parser only, so it does not wait for P1 (G6 review) | In review |
 | I3 Codex agent-to-agent messages | Unassigned | — | Real data: `response_item/agent_message` records (author/recipient) are dropped | Ready (after P1) |
 | G6 Product review for cycle 4 | Codex | — | Read-only product and eval review | Ready |
 | C10 Bounded MCP results and discovery | Claude Code (for Ruslan) | PR #8, `ruslan/mcp-paging-discovery` | Paging under one bound, `graph_list` and `room_list`, schema version 1; round 3 test gaps; lowercase party guidance | Done (merged 2026-11-12, with no GitHub review recorded; the human review of the schema migration is still owed) |
