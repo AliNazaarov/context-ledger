@@ -204,7 +204,9 @@ function partyColumn(party) {
   list.className = 'party-nodes';
   renderRows(list, party.nodes, node => {
     const item = document.createElement('li');
-    const detail = [node.kind, node.status, node.to && `to ${node.to}`].filter(Boolean).join(' · ');
+    // Card G7: quoted or inferred, from the cited lines; nothing for a graph stored before G7.
+    const detail = [node.kind, node.grounding, node.status, node.to && `to ${node.to}`].filter(Boolean).join(' · ');
+    if (node.grounding) item.dataset.grounding = node.grounding;
     item.append(textElement('span', detail, 'node-kind'), labelElement(node.label));
     return item;
   });

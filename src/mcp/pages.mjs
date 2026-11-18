@@ -43,8 +43,9 @@ export const listShape = (data, key) => isObject(data) && Array.isArray(data[key
 export const arrayOrAbsent = value => value === undefined || Array.isArray(value);
 // The derived state comes first, so the first page of a paged graph_publish result
 // carries the derived ID lists (ready actions, current choices, open questions) it promises.
+// The G7 marks hold one ID per node, so they are paged too rather than repeated on every page.
 export const graphSections = [['readyActionIds'], ['currentDecisionIds'], ['openQuestionIds'],
-  ['packet', 'nodes'], ['packet', 'edges'], ['packet', 'links']];
+  ['quotedNodeIds'], ['inferredNodeIds'], ['packet', 'nodes'], ['packet', 'edges'], ['packet', 'links']];
 // Item numbers must not move between calls. Every room section but agreedProposalIds has
 // a length fixed by the two graph snapshots; that one changes with people's choices, so
 // it comes last, where a change cannot shift the numbers of any other item.

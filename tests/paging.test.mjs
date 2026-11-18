@@ -69,6 +69,8 @@ function bigGraph(id, party, sessionId) {
   return {
     id, packet: { version: 2, sessionId, party, nodes, edges, links },
     readyActionIds: nodes.slice(50).map(node => node.id), currentDecisionIds: [], openQuestionIds: [],
+    // Card G7: one mark per node, paged like the other ID lists.
+    quotedNodeIds: nodes.slice(0, 70).map(node => node.id), inferredNodeIds: nodes.slice(70).map(node => node.id),
   };
 }
 
@@ -136,13 +138,16 @@ test('graph_read, graph_publish, room_read and room_open page at the schema limi
   assert.ok(graphPages.pages.length >= 8, `${graphPages.pages.length} graph pages`);
   assert.deepEqual(mergePages('graph', graphPages.pages), leo);
   const [firstGraph] = graphPages.pages;
-  assert.equal(firstGraph.page.totalItems, 100 + 300 + 100 + 50);
+  assert.equal(firstGraph.page.totalItems, 100 + 300 + 100 + 50 + 100);
   // Derived state first, so a paged graph_publish result carries it on its first page.
   assert.deepEqual(firstGraph.page.sections, { readyActionIds: [1, 50], currentDecisionIds: null, openQuestionIds: null,
-    'packet.nodes': [51, 150], 'packet.edges': [151, 450], 'packet.links': [451, 550] });
+    quotedNodeIds: [51, 120], inferredNodeIds: [121, 150],
+    'packet.nodes': [151, 250], 'packet.edges': [251, 550], 'packet.links': [551, 650] });
+  // No page repeats a whole mark list in its head.
+  assert.ok(graphPages.pages.every(page => (page.graph.quotedNodeIds?.length ?? 0) < 70 || page.page.fromItem <= 51));
   assert.equal(firstGraph.graph.packet.party, 'leo', 'the head repeats on every page');
   assert.equal(graphPages.pages.at(-1).graph.packet.sessionId, leo.packet.sessionId);
-  assert.match(firstGraph.more.note, new RegExp(`^Items ${firstGraph.more.fromItem} to 550 remain\\. Call graph_read again with this graphId and fromItem ${firstGraph.more.fromItem}\\.$`));
+  assert.match(firstGraph.more.note, new RegExp(`^Items ${firstGraph.more.fromItem} to 650 remain\\. Call graph_read again with this graphId and fromItem ${firstGraph.more.fromItem}\\.$`));
 
   const published = await client.call(100, 'graph_publish', { packet: { version: 2 } });
   const publishPage = JSON.parse(pageText(published));
@@ -156,10 +161,10 @@ test('graph_read, graph_publish, room_read and room_open page at the schema limi
   assert.deepEqual(publishPage.graph.currentDecisionIds, []);
   assert.deepEqual(publishPage.graph.openQuestionIds, []);
 
-  const past = JSON.parse(pageText(await client.call(101, 'graph_read', { graphId: leo.id, fromItem: 551 })));
+  const past = JSON.parse(pageText(await client.call(101, 'graph_read', { graphId: leo.id, fromItem: 651 })));
   assert.equal(past.more, undefined);
-  assert.equal(past.page.note, 'No items at or after 551; there are 550.');
-  assert.equal(past.page.toItem, 550);
+  assert.equal(past.page.note, 'No items at or after 651; there are 650.');
+  assert.equal(past.page.toItem, 650);
 
   const roomPages = await walkJson(client, 200, 'room_read', { roomId: room.id });
   assert.deepEqual(mergePages('room', roomPages.pages), room);

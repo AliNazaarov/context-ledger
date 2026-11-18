@@ -24,6 +24,11 @@ test('two people open a room, confirm a match, reject a conflict and see it afte
   await expect(page.getByRole('region', { name: 'Party ali' })).toContainText('No work on Sunday');
   await expect(page.getByRole('region', { name: 'Party leo' })).toContainText('Pair on the MCP adapter');
   await expect(page.getByRole('region', { name: 'Party ali' })).toContainText(label);
+  // Card G7: the planted label's "=1" is not in its cited line, so it is inferred.
+  const aliNodes = page.getByRole('region', { name: 'Party ali' }).locator('.party-nodes > li');
+  await expect(aliNodes.filter({ hasText: label }).locator('.node-kind')).toHaveText('offer · inferred');
+  await expect(aliNodes.filter({ hasText: 'No work on Sunday' }).locator('.node-kind')).toHaveText('constraint · quoted');
+  await expect(aliNodes.filter({ hasText: label })).toHaveAttribute('data-grounding', 'inferred');
   expect(await page.evaluate(() => window.__pwned)).toBeUndefined();
 
   const match = page.locator('#room-proposals > li', { hasText: 'matches' });

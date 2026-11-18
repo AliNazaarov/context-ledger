@@ -235,3 +235,18 @@ Next steps:
 2. G10: a person checks the 82 labels in `evals/handoff/labelled.json`, then live runs (`node evals/handoff/run.mjs --agent claude --model M --runs 10`, the same for codex, then `--summary`). Check token and cost parsing on the first live Claude run.
 3. Still owed from earlier: Ali's review of the runtime changes from cycle 9, the human review of PR #8's schema migration, and Ali's decision on `VLLM_NGRAM=1` (cycle 11).
 4. PR #3 (Ali's draft M0 benchmark, based on `feature/semantic-graph`) was left open: it is Ali's and conflicts with its base.
+
+## Current checkpoint — G7 quoted or inferred nodes (2026-11-17)
+
+Branch `ruslan/g7-quoted-nodes`. When a graph is published, each node is marked quoted or inferred from the transcript lines it cites, with the floor the latent findings already use (`isGrounded` in `src/latent.mjs`). The eval and results are in the G7 section of [the eval log](evals.md).
+
+- **Stored:** the graph payload gains `quotedNodeIds` and `inferredNodeIds` beside the other derived lists (`src/grounding.mjs`, `src/store.mjs`). The packet and its ID do not change, and there is no schema version change.
+- **Graphs from before G7** have no marks, and every reader shows them as unmarked rather than inferred. Publishing the same packet again adds the marks to the existing row; its ID, row and creation time stay.
+- **`context_for`:** an inferred node's citation ends `, inferred`, and the briefing says once what that means. A graph with only quoted nodes reads exactly as before, so its cached prefix does not change.
+- **Browser:** the room view shows "quoted" or "inferred" beside each node's kind (`public/app.js`); the room API puts `grounding` on each node.
+- **MCP paging:** the two lists are paged sections of `graph_read` and `graph_publish`, after the other derived lists, so a large graph's pages stay under the bound.
+
+Next steps:
+
+1. The console (U1, PR #22) reads a `grounding` field on nodes. Once both are merged, point its `nodeMark` at the graph's `quotedNodeIds` and `inferredNodeIds`.
+2. The mark is a floor, like the latent check: a label that only shares one content word with its line is quoted. A stricter check (all content words, or an exact quote field on the node) would be a new card with its own eval.
