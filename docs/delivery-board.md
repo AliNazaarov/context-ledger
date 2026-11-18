@@ -35,6 +35,6 @@ Claim a card before working on it (AGENTS.md section 2). States: Backlog, Ready,
 | U2 Brand and mascot | Unassigned | — | Original character, palette and type for the console and video; take Capy's warmth as a reference only, no copied assets or look | Backlog |
 | U3 60-second demo video | Unassigned | — | Script and record install, two agents, graph growing, click-through to a cited line; synthetic transcripts only | Backlog (after U1, G8) |
 | D1 T3 Code integration | Unassigned | — | Guide for adding the ledger as an outside MCP server in T3 Code, plus an explicit, user-chosen importer for T3's thread store | Backlog |
-| D2 Capy integration guide | Claude Code (for Ruslan) | `ruslan/d2-capy-guide` | Guide for adding the ledger as an MCP server for a Capy organization | In review |
+| D2 Capy integration guide | Claude Code (for Ruslan) | PR #27, `ruslan/d2-capy-guide` | Guide for adding the ledger as an MCP server for a Capy organization | In review |
 
 Cards marked "after P1" depend on the new storage layer; build them on `product/v1` once P1 is Done. Cards G7 to G12 come from a read of the public Graphify repository (2026-11-12): ideas only, no code copied. Cards U1 to U3, D1 and D2 come from [the console direction](product-direction-console.md) and [the T3 Code and Capy research](competitive-t3code-capy.md) (2026-11-16).
