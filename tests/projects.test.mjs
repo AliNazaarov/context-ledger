@@ -76,6 +76,9 @@ const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const claude = text => JSON.stringify({ type: 'user', message: { role: 'user', content: text } });
 const codex = text => JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });
 const userVersion = database => database.prepare('PRAGMA user_version').get().user_version;
+// The P1b tests were written at version 2; P1c (version 3) makes them relative to the current version.
+const newerVersion = schemaVersion + 1;
+const newerMessage = new RegExp(`written by a newer Context Ledger \\(schema ${newerVersion}\\)`, 'u');
 const columns = database => database.prepare('PRAGMA table_info(sessions)').all().map(column => column.name);
 const schema = database => database.prepare('SELECT type, name, sql FROM sqlite_master ORDER BY type, name').all().map(row => ({ ...row }));
 const plain = rows => rows.map(row => ({ ...row }));
@@ -151,9 +154,9 @@ test('a version 1 ledger becomes version 2 in place and every session joins the 
   keep(() => closed || store.close());
   const check = new DatabaseSync(fixture.path);
   keep(() => check.close());
-  assert.equal(schemaVersion, 2);
+  assert.ok(schemaVersion >= 2);
   assert.equal(defaultProject, 'default');
-  assert.equal(userVersion(check), 2);
+  assert.equal(userVersion(check), schemaVersion);
   assert.deepEqual(rows(check, 'PRAGMA table_info(projects)').map(({ name, type, notnull, pk }) => ({ name, type, notnull, pk })), [
     { name: 'id', type: 'TEXT', notnull: 1, pk: 1 },
     { name: 'slug', type: 'TEXT', notnull: 1, pk: 0 },
@@ -194,7 +197,7 @@ test('a version 1 ledger becomes version 2 in place and every session joins the 
   openStore(fixture.path).close();
   assert.deepEqual(schema(check), shape);
   assert.deepEqual({ sessions: rows(check, 'SELECT * FROM sessions ORDER BY rowid'), projects: rows(check, 'SELECT * FROM projects') }, contents);
-  assert.equal(userVersion(check), 2);
+  assert.equal(userVersion(check), schemaVersion);
 
   // The 19f6522 insert names no project; the trigger puts the session in the default one.
   const older = new DatabaseSync(fixture.path);
@@ -211,7 +214,7 @@ test('an unversioned ledger goes straight to version 2', async t => {
   keep(() => store.close());
   const check = new DatabaseSync(fixture.path);
   keep(() => check.close());
-  assert.equal(userVersion(check), 2);
+  assert.equal(userVersion(check), schemaVersion);
   assert.deepEqual(rows(check, 'PRAGMA table_info(graphs)').map(column => column.name), ['id', 'session_id', 'payload', 'created_at', 'party']);
   assert.deepEqual(projectRows(check).map(project => project.slug), ['default']);
   assert.equal(check.prepare('SELECT count(*) AS n FROM sessions WHERE project_id IS NULL').get().n, 0);
@@ -232,7 +235,7 @@ test('the version 2 step is safe to repeat, atomic, and newer files are refused 
   partial.close();
   openStore(repeated).close();
   const afterRepeat = new DatabaseSync(repeated);
-  assert.equal(userVersion(afterRepeat), 2);
+  assert.equal(userVersion(afterRepeat), schemaVersion);
   assert.deepEqual(projectRows(afterRepeat), [{ id: 'a'.repeat(32), slug: 'default', name: 'Default' }]);
   assert.deepEqual(rows(afterRepeat, 'SELECT DISTINCT project_id FROM sessions'), [{ project_id: 'a'.repeat(32) }]);
   afterRepeat.close();
@@ -255,21 +258,21 @@ test('the version 2 step is safe to repeat, atomic, and newer files are refused 
   const newer = join(directory, 'newer.sqlite');
   await copyFile(path, newer);
   const bump = new DatabaseSync(newer);
-  bump.exec('PRAGMA user_version = 3');
+  bump.exec(`PRAGMA user_version = ${newerVersion}`);
   bump.close();
   const bytes = await readFile(newer);
   assert.throws(() => openStore(newer),
-    { message: 'This ledger database was written by a newer Context Ledger (schema 3). Use that version or another CONTEXT_LEDGER_DB.' });
+    { message: `This ledger database was written by a newer Context Ledger (schema ${newerVersion}). Use that version or another CONTEXT_LEDGER_DB.` });
   assert.ok((await readFile(newer)).equals(bytes), 'the newer file is unchanged');
 
   // Review round 1: a newer file whose schema no longer has the legacy tables gets no DDL
   // before it is refused (openStore used to create sessions, graphs and rooms first).
   const reshaped = join(directory, 'reshaped.sqlite');
   const future = new DatabaseSync(reshaped);
-  future.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY, text TEXT NOT NULL) STRICT; PRAGMA user_version = 3;');
+  future.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, text TEXT NOT NULL) STRICT; PRAGMA user_version = ${newerVersion};`);
   future.close();
   const reshapedBytes = await readFile(reshaped);
-  assert.throws(() => openStore(reshaped), /newer Context Ledger \(schema 3\)/u);
+  assert.throws(() => openStore(reshaped), newerMessage);
   // Compared with equals: a deepEqual diff of two database files can exhaust the heap.
   assert.ok((await readFile(reshaped)).equals(reshapedBytes), 'the reshaped file is unchanged');
   const reopened = new DatabaseSync(reshaped);
@@ -410,12 +413,12 @@ test('a file that a newer build upgrades while this one opens it gets no DDL', a
     openStore(process.env.LEDGER_FILE).close();`;
   const cases = [
     // A version 1 file needs the migration: the child rereads the version under the lock and refuses.
-    { version: 1, make: async () => (await oldLedger(directory, 1)).path, stderr: /written by a newer Context Ledger \(schema 3\)/u },
+    { version: 1, make: async () => (await oldLedger(directory, 1)).path, stderr: newerMessage },
     // A current file needs no lock and gets no DDL; the child then fails on the missing table.
-    { version: 2, make: async () => { const path = join(directory, 'current.sqlite'); openStore(path).close(); return path; }, stderr: /room_choices/u },
+    { version: schemaVersion, make: async () => { const path = join(directory, 'current.sqlite'); openStore(path).close(); return path; }, stderr: /room_choices/u },
     // Review round 4: an upgrade that keeps every table is refused by the check before openStore returns.
-    { version: 2, keepTables: true, make: async () => { const path = join(directory, 'compatible.sqlite'); openStore(path).close(); return path; },
-      stderr: /written by a newer Context Ledger \(schema 3\)/u },
+    { version: schemaVersion, keepTables: true, make: async () => { const path = join(directory, 'compatible.sqlite'); openStore(path).close(); return path; },
+      stderr: newerMessage },
   ];
   for (const [index, { version, keepTables = false, make, stderr: expected }] of cases.entries()) {
     const path = await make();
@@ -436,14 +439,14 @@ test('a file that a newer build upgrades while this one opens it gets no DDL', a
     ]);
     assert.equal(stdout, `read ${version}\n`);
     const holder = new DatabaseSync(path);
-    holder.exec(`BEGIN IMMEDIATE; ${keepTables ? '' : 'DROP TABLE room_choices;'} PRAGMA user_version = 3; COMMIT;`);
+    holder.exec(`BEGIN IMMEDIATE; ${keepTables ? '' : 'DROP TABLE room_choices;'} PRAGMA user_version = ${newerVersion}; COMMIT;`);
     await writeFile(release, '');
     const [code] = await exit;
     assert.equal(code, 1, `case ${index}: ${stderr}`);
     assert.match(stderr, expected, `case ${index}`);
     assert.deepEqual(rows(holder, "SELECT name FROM sqlite_master WHERE name = 'room_choices'"), keepTables ? [{ name: 'room_choices' }] : [],
       `case ${index}`);
-    assert.equal(userVersion(holder), 3);
+    assert.equal(userVersion(holder), newerVersion);
     holder.close();
   }
 });
@@ -507,13 +510,13 @@ test('an upgrade that keeps every table, committed after the last statement is p
   assert.equal(stdout, 'prepared\n');
   const holder = new DatabaseSync(path);
   keep(() => holder.close());
-  holder.exec('BEGIN IMMEDIATE; PRAGMA user_version = 3; COMMIT;');
+  holder.exec(`BEGIN IMMEDIATE; PRAGMA user_version = ${newerVersion}; COMMIT;`);
   await writeFile(release, '');
   const [code] = await exit;
   assert.equal(stdout, 'prepared\n', 'the store must not open');
   assert.equal(code, 1, stderr);
-  assert.match(stderr, /written by a newer Context Ledger \(schema 3\)/u);
-  assert.equal(userVersion(holder), 3);
+  assert.match(stderr, newerMessage);
+  assert.equal(userVersion(holder), newerVersion);
   assert.deepEqual(rows(holder, "SELECT name FROM sqlite_master WHERE name = 'room_choices'"), [{ name: 'room_choices' }]);
 });
 

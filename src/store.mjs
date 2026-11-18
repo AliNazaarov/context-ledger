@@ -14,6 +14,8 @@ export { InputError };
 const summaryColumns = 's.id, s.provider, s.source, s.title, s.message_count AS messageCount, p.slug AS project';
 const sessionRows = 'sessions s LEFT JOIN projects p ON p.id = s.project_id';
 const projectPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
+// A record UUID as Claude Code writes it. Anything else gets a line-hash key.
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const codexContextKinds = new Set([
   'agents_md.instructions',
   'environments.environment_context',
@@ -70,8 +72,19 @@ function messageAt(record, provider, line) {
   if (text?.trim()) return { role, text, line };
 }
 
-function parseTranscript(transcript, provider) {
+/** h: and 32 hex characters of sha256(session ID NUL line NUL the raw line), per docs/architecture.md section 4. */
+function lineKey(sessionId, line, rawLine) {
+  return 'h:' + createHash('sha256').update(`${sessionId}\0${line}\0`).update(rawLine).digest('hex').slice(0, 32);
+}
+
+/**
+ * The supported messages of a transcript, each with its stable key: u:<uuid> for the
+ * first Claude record with a given UUID, otherwise a line-hash key, so a turn without a
+ * UUID, or one that repeats a UUID, keeps its line and gets a key of its own.
+ */
+function parseTranscript(transcript, provider, sessionId) {
   const messages = [];
+  const uuids = new Set();
   for (const [index, rawLine] of transcript.split('\n').entries()) {
     const line = index + 1;
     const value = rawLine.trim();
@@ -84,7 +97,11 @@ function parseTranscript(transcript, provider) {
       throw new InputError(`Invalid JSONL at line ${line}.`);
     }
     const message = messageAt(record, provider, line);
-    if (message) messages.push(message);
+    if (!message) continue;
+    const uuid = provider === 'claude' ? record.uuid : undefined;
+    const fresh = typeof uuid === 'string' && uuidPattern.test(uuid) && !uuids.has(uuid);
+    if (fresh) uuids.add(uuid);
+    messages.push({ ...message, key: fresh ? 'u:' + uuid : lineKey(sessionId, line, rawLine) });
   }
 
   if (messages.length === 0) throw new InputError('No supported conversation messages found.');
@@ -177,14 +194,25 @@ export function openStore(path) {
   // on every new graph and room row, whichever build inserts it (src/migrate.mjs).
   const rooms = mountRooms(database, readGraph);
 
-  // Version 2 adds projects and sessions.project_id.
+  // Version 2 adds projects and sessions.project_id. Version 3 adds one messages row per
+  // turn; sessions.messages is still written for builds from before versions, never read.
   const insert = database.prepare(`
     INSERT INTO sessions (id, provider, source, title, message_count, messages, search_text, project_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (id) DO NOTHING
   `);
+  const insertMessage = database.prepare(`
+    INSERT INTO messages (session_id, seq, line, role, text, key) VALUES (?, ?, ?, ?, ?, ?)
+  `);
   const getSummary = database.prepare(`SELECT ${summaryColumns} FROM ${sessionRows} WHERE s.id = ?`);
-  const getDetail = database.prepare(`SELECT ${summaryColumns}, s.messages FROM ${sessionRows} WHERE s.id = ?`);
+  const selectMessages = database.prepare('SELECT role, text, line, key FROM messages WHERE session_id = ? ORDER BY seq');
+  const selectLines = database.prepare('SELECT line FROM messages WHERE session_id = ? ORDER BY seq');
+  // Plain objects, as the JSON column gave, so callers and tests see ordinary messages.
+  const readMessages = id => selectMessages.all(id).map(({ role, text, line, key }) => ({ role, text, line, key }));
+  const readDetail = id => {
+    const row = getSummary.get(id);
+    if (row) return { ...row, messages: readMessages(id) };
+  };
   const insertProject = database.prepare(`
     INSERT INTO projects (id, slug, name, created_at) VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     ON CONFLICT (slug) DO NOTHING
@@ -244,7 +272,7 @@ export function openStore(path) {
       const existing = getSummary.get(id);
       if (existing) return existing;
 
-      const messages = parseTranscript(transcript, provider);
+      const messages = parseTranscript(transcript, provider, id);
       const title = titleFor(messages);
       const searchText = [title, ...messages.map(message => message.text)].join('\n').toLowerCase();
       database.exec('BEGIN IMMEDIATE');
@@ -254,7 +282,13 @@ export function openStore(path) {
         const stored = getSummary.get(id);
         if (stored) return stored;
         insertProject.run(randomBytes(16).toString('hex'), project, project);
-        insert.run(id, provider, name, title, messages.length, JSON.stringify(messages), searchText, projectId.get(project).id);
+        // Rows first: the foreign key is deferred, and a session inserted with rows
+        // already in place is left alone by the trigger for older builds.
+        for (const [seq, message] of messages.entries()) {
+          insertMessage.run(id, seq, message.line, message.role, message.text, message.key);
+        }
+        const copy = messages.map(({ role, text, line }) => ({ role, text, line }));
+        insert.run(id, provider, name, title, messages.length, JSON.stringify(copy), searchText, projectId.get(project).id);
         database.exec('COMMIT');
         open = false;
       } finally {
@@ -289,9 +323,9 @@ export function openStore(path) {
       return { graphs, next };
     },
 
+    /** A summary and its messages in order, each with its stable key. */
     get(id) {
-      const row = getDetail.get(id);
-      if (row) return { ...row, messages: JSON.parse(row.messages) };
+      return readDetail(id);
     },
 
     publishGraph(packet) {
@@ -299,10 +333,9 @@ export function openStore(path) {
       if (typeof sessionId !== 'string' || !/^[a-f0-9]{64}$/u.test(sessionId)) {
         throw new InputError('Graph requires a valid transcript session ID.');
       }
-      const session = getDetail.get(sessionId);
-      if (!session) throw new InputError('Graph transcript session not found.');
+      if (!getSummary.get(sessionId)) throw new InputError('Graph transcript session not found.');
 
-      const sourceLines = JSON.parse(session.messages).map(message => message.line);
+      const sourceLines = selectLines.all(sessionId).map(row => row.line);
       const options = { lookupGraph: id => readGraph(id) };
       validateGraph(packet, sourceLines, options);
       // Derive from the canonical form so derived ID lists follow its order.
@@ -326,8 +359,7 @@ export function openStore(path) {
     getGraphContext(id) {
       const graph = readGraph(id);
       if (!graph) return;
-      const row = getDetail.get(graph.packet.sessionId);
-      return graphContext(graph, { ...row, messages: JSON.parse(row.messages) }, { lookupGraph: readGraph });
+      return graphContext(graph, readDetail(graph.packet.sessionId), { lookupGraph: readGraph });
     },
   };
 }

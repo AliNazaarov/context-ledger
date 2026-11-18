@@ -1,6 +1,6 @@
 // Schema versions of ledger.sqlite, kept in PRAGMA user_version. A file written before
 // versions existed is version 0 and is upgraded in place when a store opens it.
-export const schemaVersion = 2;
+export const schemaVersion = 3;
 
 const userVersion = database => database.prepare('PRAGMA user_version').get().user_version;
 const columns = (database, table) => new Set(database.prepare(`PRAGMA table_info(${table})`).all().map(column => column.name));
@@ -12,6 +12,29 @@ const now = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
 /** The slug of the project that sessions without one belong to. */
 export const defaultProject = 'default';
+
+// Rows for one session's stored JSON messages, keyed by line: the JSON keeps neither raw
+// lines nor record UUIDs, so u: and h: keys cannot be derived from it (docs/evals.md, P1c).
+const legacyRows = (sessionId, messages, from = '') => `
+  SELECT ${sessionId}, m.key, json_extract(m.value, '$.line'), json_extract(m.value, '$.role'),
+    json_extract(m.value, '$.text'), 'l:' || json_extract(m.value, '$.line')
+  FROM ${from}json_each(${messages}) m`;
+const insertRows = 'INSERT INTO messages (session_id, seq, line, role, text, key)';
+// The stored messages of a session that version 3 cannot copy: not a JSON array of
+// { role, text, line } objects with a user or assistant role and a positive integer line.
+const unreadableMessages = `
+  SELECT count(*) AS n FROM sessions s
+  WHERE CASE WHEN json_valid(s.messages) THEN json_type(s.messages) <> 'array' OR EXISTS (
+    SELECT 1 FROM json_each(s.messages) m
+    WHERE m.type <> 'object'
+      OR coalesce(json_type(m.value, '$.role'), '') <> 'text' OR json_extract(m.value, '$.role') NOT IN ('user', 'assistant')
+      OR coalesce(json_type(m.value, '$.text'), '') <> 'text'
+      OR coalesce(json_type(m.value, '$.line'), '') <> 'integer' OR json_extract(m.value, '$.line') < 1
+  ) ELSE 1 END`;
+const unmatchedSessions = `
+  SELECT count(*) AS n FROM sessions s
+  WHERE json_array_length(s.messages) <> (SELECT count(*) FROM messages r WHERE r.session_id = s.id)`;
+const migrationFailed = 'A stored session has messages that cannot be moved to schema version 3. The file was not changed.';
 
 const refuseNewer = version => {
   if (version > schemaVersion) {
@@ -28,14 +51,20 @@ export function refuseNewerSchema(database) {
 /**
  * Version 1 adds created_at and party to graphs and created_at to rooms, with indexes
  * for listing. Version 2 adds projects and puts every session in one: existing
- * sessions go to the default project, which the step creates. Every step checks the
- * schema itself, so it is safe to repeat and does not depend on the order in which
- * other branches add their own steps.
+ * sessions go to the default project, which the step creates. Version 3 adds one
+ * messages row per turn: each session's JSON messages are copied in order with l:<line>
+ * keys, and the step fails unless every session gets one row per stored message.
+ * Every step checks the schema itself, so it is safe to repeat and does not depend on
+ * the order in which other branches add their own steps.
  *
  * The triggers stamp new rows from any insert path, including an older build that
  * opens a migrated file: graphs and rooms get created_at, and a session inserted
  * without a project joins the default one. SQLite cannot add a NOT NULL column with a
  * foreign key, so sessions.project_id stays nullable and the trigger fills it.
+ * sessions.messages stays as a copy that this build writes and never reads, so a build
+ * from before versions (which never reads user_version) keeps working on the file; the
+ * sessions_messages trigger gives a session it inserts its rows. The import writes its
+ * rows before the session, which is why messages.session_id is a deferred foreign key.
  * Recreate the triggers if graphs, rooms or sessions is ever rebuilt.
  *
  * bootstrap creates the tables of the oldest schema (CREATE TABLE IF NOT EXISTS). It
@@ -97,6 +126,34 @@ export function migrate(database, bootstrap = () => {}) {
           UPDATE sessions SET project_id = ${defaultId} WHERE rowid = NEW.rowid;
         END;
         PRAGMA user_version = 2;
+      `);
+    }
+    if (version < 3) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS messages (
+          id INTEGER PRIMARY KEY,
+          session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+          seq INTEGER NOT NULL,
+          line INTEGER NOT NULL,
+          role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+          text TEXT NOT NULL,
+          key TEXT NOT NULL,
+          UNIQUE (session_id, key),
+          UNIQUE (session_id, seq)
+        ) STRICT;
+      `);
+      if (database.prepare(unreadableMessages).get().n > 0) throw new Error(migrationFailed);
+      // A session that already has rows (a step run before) keeps them.
+      database.exec(`${insertRows} ${legacyRows('s.id', 's.messages', 'sessions s, ')}
+        WHERE NOT EXISTS (SELECT 1 FROM messages r WHERE r.session_id = s.id)
+        ORDER BY s.rowid, m.key`);
+      if (database.prepare(unmatchedSessions).get().n > 0) throw new Error(migrationFailed);
+      database.exec(`
+        CREATE TRIGGER IF NOT EXISTS sessions_messages AFTER INSERT ON sessions
+        WHEN NOT EXISTS (SELECT 1 FROM messages WHERE session_id = NEW.id) BEGIN
+          ${insertRows} ${legacyRows('NEW.id', 'NEW.messages')} ORDER BY m.key;
+        END;
+        PRAGMA user_version = 3;
       `);
     }
     database.exec('COMMIT');
