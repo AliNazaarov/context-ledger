@@ -1405,3 +1405,18 @@ When an agent publishes a graph, each node is marked **quoted** or **inferred**.
 - The four suites pass (`npm run -s test:graph`, `node --test tests/*.test.mjs`, `npx playwright test`, and the Python runtime checks).
 - No new runtime dependency and no schema version change.
 - Codex reviews the change read-only; findings are fixed with tests or recorded here.
+
+### G7 results (2026-11-17)
+
+- **Built:** `src/grounding.mjs` marks each node at publish time with `isGrounded` from `src/latent.mjs`. A node is quoted only with positive evidence. The payload gains `quotedNodeIds` and `inferredNodeIds`; the packet and graph ID do not change. Graphs stored before G7 get their marks when the same packet is published again (`ON CONFLICT DO UPDATE` only when the stored payload has none; ID, row, `created_at` and `party` unchanged). `context_for` ends an inferred node's citation with `, inferred` and explains the mark once, in the state section. The room API puts `grounding` on each node, and the room view shows it beside the kind. MCP paging pages the two lists after the links.
+- **Tests:** `tests/grounding.test.mjs` (11), three new `isGrounded` cases in `tests/latent.test.mjs`, the room spec (one new test, three new assertions), and the graph paging test with marks.
+- **Codex review, round 1** (of 983b8a4). Five findings, all fixed in e9d625f:
+  - (medium) The mark lists were paged before the nodes, so a backfill renumbered items under a client part way through reading. They are paged last now.
+  - (medium) The floor was too loose: `4317` matched `4317.5`, `retryCount` matched `retryCounter`, and an all-Han label passed on unrelated English. Numbers and code names must now stand alone, other scripts match by letter pairs, and a label with nothing to compare is inferred.
+  - (medium) The legend sat above the stable sections, so the first inferred action moved the cached prefix. It is in the state section now, and a test checks the prefix.
+  - (low) The all-quoted test only checked that "inferred" was absent. It now compares the whole briefing with main's output byte for byte.
+  - (low) There was no browser test for unmarked nodes, and the room paging fixture had no marks. Both are added.
+- **Round 2** (of e9d625f): all five fixes hold. Three more findings, fixed in 6137a8c: `café` passed on the `ca` of `cache` (a letter pair must now hold a non-ASCII letter); number and name boundaries ignored accented letters and Arabic-Indic digits; and the legend overstated what "inferred" means.
+- **Round 3** (of 6137a8c): those fixes hold, and Codex found nothing looser than `main` for ASCII labels, in either G7 or the latent check. Two more Unicode cases were fixed in the next commit: a Unicode suffix on the label's own token (`4317٥`, `retryCounté`), and combining marks (a name followed by U+0301, and Devanagari vowel signs). A new test also caught a regression from round 2, which the same commit fixes: a cited `$retry_limit` had stopped matching `retry_limit`.
+  - Accepted, not changed: the header line "Labels are quoted data from the source" stays, even when some nodes are inferred. Changing it when the first inferred node appears would move the cached prefix (round 1, third finding). Changing it for every briefing would break the byte-for-byte promise for all-quoted graphs. The state section's legend says what inferred means.
+- **Suites (Windows):** `npm run -s test:graph` 9/9; node 204/205 (one skipped), was 191/192 on `main`; Playwright 14/14 (one new); Python runtime 192 run, 50 skipped, OK.
