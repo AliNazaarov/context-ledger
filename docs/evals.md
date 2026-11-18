@@ -1386,3 +1386,26 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## G9 — Scoped context with a budget (defined 2026-11-17, before the code)
+
+`context_for` takes two new optional arguments. `question` is a short text of up to 500 characters. `budget` is a whole number of estimated tokens, from 50 to 100,000, and it needs a question. With a question, the briefing keeps only the nodes that match it, plus the nodes one edge away from those matches. Edges are kept only when both ends are shown, and links only when their local end is shown. The state lists are cut down to the nodes shown. With a budget, nodes are dropped until the briefing's estimate (ceil of characters / 4, the meter's own estimate) fits: neighbours go first, then matches with the fewest matched words. Without either argument, `context_for` is exactly what it was.
+
+A node matches when one of the question's words is in its label, its ID, its kind or the party it is addressed to. Words of three or more letters count, except common ones ("the", "what", "which"). Words of four or more letters compare by their first four letters, so "decided" finds a decision, and a three-letter word must start a word. Text in other scripts matches by any two letters in a row.
+
+The briefing's state section ends with a scope line: how many nodes matched, how many are shown as neighbours, how many were left out for the budget, and the budget itself. The question is not echoed back. When nothing matches, the briefing shows no nodes and says so, so the agent can ask again or call without a question.
+
+### What is tested (synthetic transcripts only)
+
+- A question naming one decision returns that decision, the decision it supersedes (one edge away) and no unrelated node. The edge between them is shown, and the meter counts the scoped text.
+- A question that matches nothing returns the header, an empty node list and the "nothing matched" scope line.
+- A budget smaller than the full scoped briefing drops neighbours before matches, and the result's estimate is within the budget. A budget too small for even one node returns the header and the scope line, and nothing is cut mid-line.
+- The question and budget are checked at the API and in the MCP adapter: an empty or oversized question, a budget outside 50 to 100,000 or not a whole number, a budget without a question, and a repeated parameter are refused with fixed messages that echo nothing.
+- The scope line never contains the question text, even one holding control or bidi characters.
+- Paging: a scoped briefing too long for one page pages by `fromLine`. Later pages come from the same scoped briefing, cached under the graph ID, question and budget, and the continuation note says to repeat the question and budget.
+- `context_for` without the new arguments is byte for byte what it was, so the existing paging and briefing tests pass unchanged.
+
+### Acceptance
+
+- The four suites pass, with no new runtime dependency.
+- Codex reviews the change read-only; findings are fixed with tests or recorded here.
