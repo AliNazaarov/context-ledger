@@ -9,7 +9,7 @@ test('D2: the Capy guide matches the code and the README', () => {
   const guide = read('docs/integrations/capy.md');
   const readme = read('README.md');
   // Capy keys: a lowercase letter, then lowercase letters, digits or hyphens.
-  const key = guide.match(/\| Key \| `([^`]+)`/u)?.[1];
+  const key = guide.match(/\*\*Key\*\* `([^`]+)`/u)?.[1];
   assert.equal(key, 'context-ledger');
   assert.match(key, /^[a-z][a-z0-9-]*$/u);
   assert.ok(existsSync(new URL('../src/mcp.mjs', import.meta.url)), 'the guide points at src/mcp.mjs');
@@ -24,4 +24,16 @@ test('D2: the Capy guide matches the code and the README', () => {
   for (const link of links) assert.match(link, /^https:\/\/docs\.capy\.ai\//u, link);
   assert.match(guide, /Only you/u);
   assert.match(guide, /Not checked yet/u);
+  // Review round 1: the guide says first that tool output is stored in Capy's cloud.
+  assert.ok(guide.indexOf('## Read this first: what leaves your computer') > 0);
+  assert.ok(guide.indexOf('what leaves your computer') < guide.indexOf('## Steps'));
+  assert.match(guide, /stored in its cloud/u);
+  assert.match(readme, /^## Negotiation room$/mu, 'the README section on room decisions the guide links to');
+  assert.ok(guide.includes('../../README.md#negotiation-room'));
+  // The note for AGENTS.md names only tools the server has.
+  const note = guide.match(/```markdown\n([\s\S]*?)```/u)?.[1] ?? '';
+  const adapter = ['graphs', 'sessions'].map(file => read(`src/mcp/${file}.mjs`)).join('\n');
+  const named = note.match(/\b[a-z]+_[a-z_]+\b/gu) ?? [];
+  assert.ok(named.length >= 3);
+  for (const tool of named) assert.ok(adapter.includes(`'${tool}'`), tool);
 });

@@ -1393,10 +1393,11 @@ A guide, `docs/integrations/capy.md`, for adding Context Ledger as an MCP server
 
 ### What it must say
 
+- First, what leaves the computer: the ledger stays local, but Capy stores thread messages and tool output in its cloud, so whatever a tool returns is copied there and seen by the thread's audience. Start with synthetic data.
 - The ledger answers on loopback only, and Capy runs a STDIO server on the thread's own machine. The server therefore works only for threads on the computer that runs the ledger (desktop app or Dock CLI), not for cloud threads. The guide says so first, and advises against running the ledger on a cloud machine.
 - The exact form values (STDIO, key `context-ledger`, `node` plus the absolute path to `src/mcp.mjs`, `PORT` only when it differs, owner **Only you**, no sign-in), and why the owner is not Organization.
 - How to check the connection, and how to tell the agent to use the tools through Capy's instructions or `AGENTS.md`.
-- What the agent should not trust (labels are transcript data), and who else can reach the ledger through an "Only you" server.
+- What the agent should not trust (everything a tool returns), and who can reach the ledger: any process on that computer, teammates on a shared device, and members who message the thread. The browser check on room decisions does not prove a person clicked.
 - What was not checked: no run in a real Capy organization yet.
 
 ### What is tested
@@ -1408,3 +1409,12 @@ A guide, `docs/integrations/capy.md`, for adding Context Ledger as an MCP server
 - The four suites pass.
 - Codex reviews the guide read-only against Capy's documentation; findings are fixed or recorded here.
 - A person with a Capy organization follows it once and records the result here.
+
+### D2 review (2026-11-17)
+
+- **Codex, round 1** (of the first guide commit): ten findings, all fixed in the next commit.
+  - (high) The guide implied that transcript text stays on the computer. Capy stores tool output in its cloud. This now comes first, with a synthetic-data start.
+  - (high) "Agents cannot confirm proposals" overstated it. The guide now says the MCP server has no such tool, and that the browser check does not prove a person clicked.
+  - (high) "Only you" was presented as access control. It only decides which threads get the tools; any local process, a shared device and members who message the thread can reach the ledger.
+  - (medium) Missing: automatic offline moves and checkpoints, the Dock device choice, prerequisites and `npm ci`, a real check from a thread (Test only lists tools), split troubleshooting, a copyable `AGENTS.md` note, and the transcript and file-reading tools.
+  - (low) The key rule and the Name, Working directory and Also listens on fields; and the TOML import, now marked untried.
