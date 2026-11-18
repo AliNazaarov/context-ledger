@@ -1403,3 +1403,9 @@ ADR-003 picked better-sqlite3 because `node:sqlite` had no FTS5. P1a checks whet
   - (low) The evidence table now links the CI run and marks the public reports as unchecked. `doctor` tells users to rerun its check rather than naming a version.
   - (low) The two approval moments are now one: ADR-003's revision is accepted only with the P1a PR.
   - (low) §4's legacy-ID formula did not match the store. It now keeps `sessions.id` as it is.
+- **Codex, round 2** (of 92fda47): one high, two medium and two low findings, all fixed in the document:
+  - (high) §6's purge still cascaded into FTS rows, which no longer happens without triggers. The store now removes each message from the index with FTS5's `delete` command and the original text, in the same transaction as the canonical delete, and runs `optimize` only when an index exists.
+  - (medium) A watermark over `messages.id` could miss rows after a delete, a downgrade and a reused ID. It is replaced by an `fts_pending` table written with each insert while the index cannot be updated, and drained in one transaction with the index changes.
+  - (medium) A forced-fallback switch cannot prove downgrade compatibility. The implementing card must also reopen the same database on a genuinely module-free build (Node 22.14.0), then on an FTS5 build.
+  - (low) The fallback contract now includes the session title and the descending session `rowid` order.
+  - (low) The landing note now says what happens to the better-sqlite3 passages when P1a is accepted or rejected.
