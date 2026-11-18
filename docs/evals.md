@@ -1551,12 +1551,21 @@ P4b was narrowed to key formats with a fixed shape, because seven review rounds 
 
 ### P4c results (2026-11-18)
 
-- **Corpus:** `tests/secrets-free-text.test.mjs` has 26 secret lines, including every input earlier P4b review rounds reported as missed, plus 20 benign keyed lines and 10 benign plain lines.
+- **Corpus:** `tests/secrets-free-text.test.mjs` has 34 secret lines, including every input earlier P4b review rounds and P4c round 1 reported as missed, plus 21 benign keyed lines and 13 benign plain lines. The test pins the exact list of false alarms and checks that no four-character fragment of any secret survives in the rendered text.
 - **Misses:** 0. No character of any secret is visible after redaction.
-- **False alarms:** 1 of 20 benign keyed lines (5%), `token = getToken()`. No plain line is flagged.
+- **False alarms:** 2 of 21 benign keyed lines (9.5%), both code under a secret-like name: `token = getToken()` and `apiKey = config.apiKey`. No plain line is flagged. (The first count, 1 of 20, was wrong: it stripped the closing bracket from a redaction marker and so mis-judged it, and it left out `apiKey = config.apiKey`. Review round 1.)
 - **Line structure:** line breaks survive and the other lines are unchanged. Each speed case runs well under a second.
 - **Tests changed on purpose:** the P4b tests that asserted the narrowed scope now assert P4c's behaviour:
   - `password: hunter2` and short bearer values are now redacted;
   - code under a secret-like name is over-redacted;
   - a line tail merges with a key format on the same line, with no prefix shown.
 - **Report wording:** the `ledger redact` scope line now says what is checked: key formats, and the rest of a line after a bearer header or a secret-like name.
+- **Scope, stated after review round 1:** one physical line. A line ends at LF, CR or a Unicode line or paragraph separator, and a lead holds only spaces and tabs, so it never reaches the next line. A value that continues onto the next line, such as a quoted string with a line break inside it, is redacted only on the lead's line; the `ledger redact` report says so. A name split by a quote, such as `"pass"word`, is not recognised.
+- **Codex, round 1** (of 941e48d): three high, three medium and one low finding, fixed with tests:
+  - (high) A lead could cross a line break and redact the next line, and Unicode line separators did not end a line. Leads now hold only spaces and tabs, and every line separator ends a line.
+  - (high) The placeholder check stripped punctuation inside quotes, so `password="changeme;"` and `password="}"` stayed visible; it also accepted malformed references and any angle-bracket label. A quoted value is now judged to its closing quote, and placeholders must be complete: `${NAME}`, `$(NAME)`, `$NAME`, or an angle-bracket label naming a key, token, secret, password, value or "here".
+  - (high) A value that continues on the next line is only partly redacted. This is the line-tail rule itself, so the scope above and the report now say so.
+  - (medium) Trimming the value with a regex was quadratic on long runs of spaces (2.17 s for 64,000). It is now a backward scan, with a timing test.
+  - (medium) `api key`, and more than eight spaces or tabs before `=`, were missed. Both are found now; quote-split names stay out of scope.
+  - (medium) The false-alarm count was wrong (see above), the corpus lacked the escaped-quote case and a benign fixture, and the rendered-output check could pass with a fragment showing. All fixed.
+  - (low) The empty report said "No known key formats found" although both checks ran. It now says "No findings from the checks below", and the scope line names the leads and the placeholder exception.

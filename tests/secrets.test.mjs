@@ -183,7 +183,7 @@ test('P4b: ledger redact reports kinds, lines and masked previews, never a value
     // one span covers both and no prefix is shown.
     'line 3  aws-access-key-id  43 characters  …',
     '2 possible secrets in 2 lines. Values are not shown; use --text for the redacted hand-off.',
-    'Checked: known key formats, and the rest of any line after a bearer header or a secret-like name such as password=. Other free-text secrets are not found.',
+    'Checked: known key formats, and the rest of the same line after an Authorization: Bearer header or a secret-like name followed by : or = (such as password=), unless the whole value is a placeholder. A value that continues onto the next line, and other free-text secrets, are not found.',
     '',
   ].join('\n'));
 
@@ -295,7 +295,7 @@ test('P4b review: the redacted source name, strict escaping, and fixed errors in
     'source name  github-token  40 characters  ghp_…',
     'line 1  stripe-key  32 characters  sk_live_…',
     '2 possible secrets in 2 lines. Values are not shown; use --text for the redacted hand-off.',
-    'Checked: known key formats, and the rest of any line after a bearer header or a secret-like name such as password=. Other free-text secrets are not found.',
+    'Checked: known key formats, and the rest of the same line after an Authorization: Bearer header or a secret-like name followed by : or = (such as password=), unless the whole value is a placeholder. A value that continues onto the next line, and other free-text secrets, are not found.',
     '',
   ].join('\n'));
   const text = await cli(['redact', id, '--text'], port);
@@ -483,7 +483,7 @@ test('P4b review 3: every CLI mode prints exactly the expected output and exits 
   const report = await cli(['redact', id], port);
   assert.equal(report.code, 0);
   assert.equal(report.stderr, '');
-  assert.equal(report.stdout, 'line 1  github-token  40 characters  ghp_…\n1 possible secret in 1 line. Values are not shown; use --text for the redacted hand-off.\nChecked: known key formats, and the rest of any line after a bearer header or a secret-like name such as password=. Other free-text secrets are not found.\n');
+  assert.equal(report.stdout, 'line 1  github-token  40 characters  ghp_…\n1 possible secret in 1 line. Values are not shown; use --text for the redacted hand-off.\nChecked: known key formats, and the rest of the same line after an Authorization: Bearer header or a secret-like name followed by : or = (such as password=), unless the whole value is a placeholder. A value that continues onto the next line, and other free-text secrets, are not found.\n');
   const json = await cli(['redact', id, '--json'], port);
   assert.equal(json.code, 0);
   assert.equal(json.stderr, '');

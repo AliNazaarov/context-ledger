@@ -112,7 +112,7 @@ const valueRules = [
 ];
 
 // Card P4c: names whose value is treated as a secret.
-const nameKeywords = 'password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key|access[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token';
+const nameKeywords = 'password|passwd|pwd|passphrase|secret|client[ _-]?secret|api[ _-]?key|access[ _-]?key|access[ _-]?token|auth[ _-]?token|refresh[ _-]?token|token';
 
 /**
  * Card P4c: free-text leads. After one of these, the rest of the line is the value: the
@@ -121,8 +121,9 @@ const nameKeywords = 'password|passwd|pwd|passphrase|secret|client[_-]?secret|ap
  * the false-alarm budget in docs/evals.md.
  */
 const freeTextLeads = [
-  { kind: 'bearer-token', lead: /\bAuthorization["']?\s{0,8}:\s{0,8}["']?\s{0,8}Bearer\s{1,8}/giu },
-  { kind: 'assigned-secret', lead: new RegExp(`\\b(?:[A-Za-z0-9]{1,32}[_.-])?(?:${nameKeywords})\\b["']?\\s{0,8}[:=]\\s{0,8}`, 'giu') },
+  // Only spaces and tabs may sit inside a lead, so a lead never runs onto the next line.
+  { kind: 'bearer-token', lead: /\bAuthorization["']?[ \t]*:[ \t]*["']?[ \t]*Bearer[ \t]+/giu },
+  { kind: 'assigned-secret', lead: new RegExp(`\\b(?:[A-Za-z0-9]{1,32}[_.-])?(?:${nameKeywords})\\b["']?[ \\t]*[:=][ \\t]*`, 'giu') },
 ];
 
 /**
@@ -133,19 +134,35 @@ function isPlaceholder(value) {
   return /^[0-9]+$/u.test(value)
     || /^(?:x+|\*+|\.+|#+|-+)$/iu.test(value)
     || /^(?:changeme|change[_-]?me|placeholder|redacted|null|none|nil|undefined|true|false|required|optional)$/iu.test(value)
-    || /^\$[{(]?[A-Za-z_][A-Za-z0-9_]*[})]?$/u.test(value)
+    || /^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|\([A-Za-z_][A-Za-z0-9_]*\)|[A-Za-z_][A-Za-z0-9_]*)$/u.test(value)
     || /^%[A-Za-z_][A-Za-z0-9_]*%$/u.test(value)
-    || /^<[A-Za-z][A-Za-z0-9 _-]{0,48}>$/u.test(value)
+    // An angle-bracket stand-in names what goes there, such as <your-key-here>.
+    || /^<(?=[A-Za-z0-9 _-]{0,48}>$)[A-Za-z0-9 _-]*(?:key|token|secret|password|here|value)[A-Za-z0-9 _-]*>$/iu.test(value)
     || /^(?:process\.env|import\.meta\.env|os\.environ)\.[A-Za-z_][A-Za-z0-9_]*$/u.test(value)
     || /^\[REDACTED [a-z-]{1,32}\]$/u.test(value)
     || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)
     || /^[0-9a-f]{40}$/iu.test(value);
 }
 
-/** The end of the line that from lies on: the next LF or CR, or the end of the text. */
+/** The end of the line that from lies on: the next LF, CR or Unicode line or paragraph separator. */
 function lineEndFrom(text, from) {
-  for (let at = from; at < text.length; at += 1) if (text[at] === '\n' || text[at] === '\r') return at;
+  for (let at = from; at < text.length; at += 1) if (/[\n\r\p{Zl}\p{Zp}]/u.test(text[at])) return at;
   return text.length;
+}
+
+/**
+ * The value as judged for a placeholder. Inside a quote it runs to the closing quote; a
+ * bare value loses only trailing spaces and a trailing comma or semicolon. A backward scan,
+ * so long runs of spaces cost nothing.
+ */
+function judgedValue(text, start, end, quote) {
+  if (quote) {
+    const close = text.indexOf(quote, start);
+    return text.slice(start, close === -1 || close > end ? end : close);
+  }
+  let stop = end;
+  while (stop > start && /[ \t,;]/u.test(text[stop - 1])) stop -= 1;
+  return text.slice(start, stop);
 }
 
 /** Card P4c: one span per free-text lead, from the value's start to the end of its line. */
@@ -155,10 +172,12 @@ function lineTails(text) {
     const pattern = new RegExp(rule.lead.source, rule.lead.flags);
     for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
       let start = match.index + match[0].length;
-      // An opening quote stays visible; the value starts after it.
-      if (text[start] === '"' || text[start] === "'" || text[start] === '`') start += 1;
+      // An opening quote stays visible; the value starts after it. A quote just before
+      // Bearer opens the value too, as in "Authorization": "Bearer ...".
+      let quote = /["'`]/u.test(text[start] ?? '') ? text[start] : (rule.kind === 'bearer-token' ? (match[0].match(/(["'])[ \t]*Bearer/iu)?.[1] ?? '') : '');
+      if (/["'`]/u.test(text[start] ?? '')) start += 1;
       const end = lineEndFrom(text, start);
-      const value = text.slice(start, end).replace(/[\s"'`,;)\]}]+$/u, '');
+      const value = judgedValue(text, start, end, quote);
       if (!value || isPlaceholder(value)) continue;
       found.push({ kind: rule.kind, start, end, prefix: 0 });
       // The rest of the line is already covered, so the next lead is looked for after it.

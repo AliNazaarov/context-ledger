@@ -37,6 +37,15 @@ const secretLines = [
   [`export API_KEY=${repeat('Hk4t', 6)}; echo done`, repeat('Hk4t', 6)],
   [`  refresh_token: "${repeat('Qw9e', 5)}",`, repeat('Qw9e', 5)],
   [`env "token=${repeat('Rf5G', 5)}" end`, repeat('Rf5G', 5)],
+  // Review round 1 (of 941e48d).
+  ['password="changeme;"', 'changeme;'],
+  ['password="}"', '}'],
+  ['password=$Identifier}', '$Identifier}'],
+  ['password=<synth-pw-X9>', '<synth-pw-X9>'],
+  ['api key: synthetic9', 'synthetic9'],
+  [`token${repeat('\t', 9)}= abc9def`, 'abc9def'],
+  [`password = "esc${backslash}"aped9"`, `esc${backslash}"aped9`],
+  [`password=pw1${String.fromCodePoint(0x2028)}after`, 'pw1'],
 ];
 
 // Benign lines with a secret-like name and : or =. At most 10% may be flagged.
@@ -61,7 +70,11 @@ const benignKeyed = [
   'access_token: undefined',
   'token: "${GITHUB_TOKEN}"',
   'token = getToken()',
+  'apiKey = config.apiKey',
 ];
+
+// The benign keyed lines expected to be flagged: code under a secret-like name.
+const expectedFalseAlarms = ['token = getToken()', 'apiKey = config.apiKey'];
 
 // Benign lines without such a name. None may be flagged.
 const benignPlain = [
@@ -75,6 +88,10 @@ const benignPlain = [
   'The secret to good tests is synthetic data.',
   'Authorization is handled by the server.',
   'Set the Bearer scheme in the header docs.',
+  // Review round 1: a lead at the end of a line never reaches the next one.
+  'password=\nordinary prose',
+  'password=\r\nordinary prose',
+  'password=\rordinary prose',
 ];
 
 function hidden(line, secret) {
@@ -89,12 +106,20 @@ function hidden(line, secret) {
 test('P4c budget: no character of any secret in the corpus is left visible', () => {
   const missed = secretLines.filter(([line, secret]) => !hidden(line, secret)).map(([line]) => line);
   assert.deepEqual(missed, []);
-  // And the redacted text shows none of them.
-  for (const [line, secret] of secretLines) assert.ok(!redactText(line).includes(secret), line);
+  // And the rendered text shows no fragment of them: no run of four characters survives.
+  for (const [line, secret] of secretLines) {
+    // The redaction markers themselves are not part of the value.
+    const out = redactText(line).replace(/\[REDACTED [a-z-]+\]/gu, '');
+    for (let at = 0; at + 4 <= secret.length; at += 1) {
+      const piece = secret.slice(at, at + 4);
+      if (!line.replace(secret, '').includes(piece)) assert.ok(!out.includes(piece), `${line}: ${piece}`);
+    }
+  }
 });
 
 test('P4c budget: at most 10% of benign keyed lines, and no plain line, are flagged', () => {
   const flagged = benignKeyed.filter(line => findSecrets(line).length);
+  assert.deepEqual(flagged, expectedFalseAlarms, 'the measured false alarms are exactly the expected ones');
   assert.ok(flagged.length / benignKeyed.length <= 0.1, `flagged: ${JSON.stringify(flagged)}`);
   assert.deepEqual(benignPlain.filter(line => findSecrets(line).length), []);
 });
@@ -115,7 +140,8 @@ test('P4c: a 1 MiB transcript and 40,000 nested names scan in under a second eac
   const chunk = `Normal text. password=hunter2 then Authorization: Bearer abcdefgh123\nmore text\n`;
   const big = chunk.repeat(Math.ceil((1024 * 1024) / chunk.length));
   const names = `token=${'token='.repeat(40000)}Zt4Wq8Lm2Np6`;
-  for (const text of [big, names]) {
+  const spaces = `password=a${' '.repeat(64000)}b`;
+  for (const text of [big, names, spaces]) {
     const started = performance.now();
     findSecrets(text);
     assert.ok(performance.now() - started < 1000, `${text.length} characters took too long`);

@@ -98,9 +98,9 @@ function redactionOutput(session, format) {
   const rows = findings.map(finding => `${finding.line === null ? 'source name' : `line ${finding.line}`}  ${finding.kind}  ${finding.length} characters  ${strict(inlineText(finding.preview))}`);
   const total = findings.length
     ? `${findings.length} possible ${findings.length === 1 ? 'secret' : 'secrets'} in ${lines} ${lines === 1 ? 'line' : 'lines'}. Values are not shown; use --text for the redacted hand-off.`
-    : 'No known key formats found.';
+    : 'No findings from the checks below.';
   // Say what is checked (P4b key formats, P4c line tails), so a clean report is not read as "no secrets".
-  return [...rows, total, 'Checked: known key formats, and the rest of any line after a bearer header or a secret-like name such as password=. Other free-text secrets are not found.'].join('\n');
+  return [...rows, total, 'Checked: known key formats, and the rest of the same line after an Authorization: Bearer header or a secret-like name followed by : or = (such as password=), unless the whole value is a placeholder. A value that continues onto the next line, and other free-text secrets, are not found.'].join('\n');
 }
 
 async function main() {
