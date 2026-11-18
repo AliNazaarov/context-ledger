@@ -978,6 +978,20 @@ On the Windows CI runner (Python 3.13), `DeadlineBeforeNextCallTest.test_only_th
   - (medium, existed before this card) The timeout applies to each socket operation, so a model server that trickles its reply can hold a read and its slot past the deadline, and a reply that arrives late is accepted. Not fixed here: card H8.
   - (low, existed before this card) A connect timeout capped by the deadline is wrapped in `URLError` and returns 503 "not ready". Not fixed here: card H8.
 
+### H8 — Model calls keep to the read deadline (`ruslan/h8-model-call-deadline`, defined 2026-11-18, before the fix)
+
+From the H7 Codex review. `VllmClient._chat` passes the call's budget (the client's own timeout, or what is left of the read deadline when that is shorter) to `urlopen` as a socket timeout. A socket timeout limits each connect, send and receive separately, not the call as a whole. So a model server that trickles its headers or body, a few bytes at a time, keeps the call (and its pool slot) running past the deadline, and a reply that finishes after the deadline is still used. Separately, a connect that times out is wrapped in `URLError`, so it returns 503 "Model server is not ready." even when the deadline set its timeout.
+
+| Eval | Expected |
+| --- | --- |
+| Trickled body stops at the deadline | A synthetic model server sends its headers at once, then the body one byte every 50 ms. The client's own timeout is 30 s and the read deadline is 1 s. The read returns 504 "The latent read ran out of time." within 2 s of starting, not after the body ends. It fails on `main` (the call runs until the body ends). |
+| Trickled headers stop at the deadline | The same, with the status line and headers trickled one byte every 50 ms. 504 within 2 s. |
+| A late reply is not used | A reply whose last byte arrives after the call's budget is a timeout, never a result: a direct `chat` call with a 0.5 s budget against a body trickled over about 1 s raises `ModelTimeout`. |
+| Client's own timeout stays 502 | With the client's timeout at 0.5 s and the deadline 5 s away, a trickled body returns 502 "Model server timed out.", as a plain timeout does today. |
+| Deadline-capped connect timeout is 504 | A connect that times out (`URLError` wrapping a socket timeout) is a `ModelTimeout`, so a read whose deadline set the timeout returns 504, not 503. A refused connection still returns 503 "Model server is not ready.". |
+| Nothing else changes | Normal replies, HTTP errors (400, 413 hints, 500, 503), the folded retry and its budget, and the H7 tests behave as before. The pool releases the slot when the call ends. |
+| Suites | The four suites pass; the runtime suite passes on Windows and in WSL. |
+
 ## Cycle 11 — Latent runtime performance baseline (defined 2026-11-12, before measuring)
 
 Card C11. Until now the latent runtime had accuracy evals but no performance figures. This cycle measures it on the RTX 4090 Laptop GPU (16 GB), vLLM 0.33.0 in WSL2, with the synthetic fixtures only.

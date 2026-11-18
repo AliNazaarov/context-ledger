@@ -415,7 +415,9 @@ class SystemRoleRefusedTest(unittest.TestCase):
         # slow refusal could hold a pool slot past the request deadline.
         from latent_pool import ApiError
         from latent_pool.vllm_client import VllmClient
-        client = VllmClient(self.scripted([(0.3, 400, self.REFUSAL), (0.3, 200, self.OK)]), MODEL, timeout=10)
+        # H8: the budget covers the whole call, so the refusal lands well inside it
+        # (0.1 of 0.45 s) and the retry, which needs 0.4 s, cannot fit in what is left.
+        client = VllmClient(self.scripted([(0.1, 400, self.REFUSAL), (0.4, 200, self.OK)]), MODEL, timeout=10)
         with self.assertRaises(ApiError) as caught:
             client.chat("system", "ROLE: reader\nq", 8, timeout=0.45)
         self.assertEqual(caught.exception.status, 502)

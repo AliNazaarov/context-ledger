@@ -33,7 +33,7 @@ def run_with(client, seconds_left):
 
 class CappedTimeoutTest(unittest.TestCase):
     def call(self, run, opener):
-        with mock.patch("latent_pool.vllm_client.urllib.request.urlopen", opener):
+        with mock.patch("latent_pool.vllm_client._open", opener):
             with self.assertRaises(ApiError) as caught:
                 run.call("reader", "user", 16)
         return caught.exception

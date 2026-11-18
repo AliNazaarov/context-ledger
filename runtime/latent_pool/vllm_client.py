@@ -1,7 +1,9 @@
 """Minimal client for vLLM's OpenAI-compatible /v1/chat/completions (stdlib only)."""
 
+import http.client
 import json
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -32,6 +34,87 @@ class ChatResult:
         self.completion_tokens = completion_tokens
         self.cached_tokens = cached_tokens
         self.ms = ms
+
+
+class _Watch:
+    """Card H8: ends one model call when its whole budget runs out.
+
+    A socket timeout limits each connect, send and receive on its own, so a model
+    server that trickles its reply could keep a call going past its budget. This
+    timer shuts the call's socket down when the budget ends, which wakes a blocked
+    receive at once, and marks the call expired so a reply that completes late is
+    never used.
+    """
+
+    def __init__(self, seconds):
+        self.expired = False
+        self._sock = None
+        self._lock = threading.Lock()
+        self._timer = threading.Timer(max(seconds, 0), self._expire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def attach(self, sock):
+        with self._lock:
+            self._sock = sock
+            if self.expired:
+                self._shut()
+
+    def _expire(self):
+        with self._lock:
+            self.expired = True
+            self._shut()
+
+    def _shut(self):
+        if self._sock is not None:
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def cancel(self):
+        self._timer.cancel()
+
+
+def _watched(connection_class, watch):
+    """A connection class that hands its socket to watch as soon as it connects."""
+
+    class Watched(connection_class):
+        def connect(self):
+            super().connect()
+            watch.attach(self.sock)
+
+    return Watched
+
+
+class _WatchedHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, watch):
+        super().__init__()
+        self.watch = watch
+
+    def http_open(self, req):
+        return self.do_open(_watched(http.client.HTTPConnection, self.watch), req)
+
+
+class _WatchedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, watch):
+        super().__init__()
+        self.watch = watch
+
+    def https_open(self, req):
+        return self.do_open(_watched(http.client.HTTPSConnection, self.watch), req,
+                            context=self._context)
+
+
+def _open(request, timeout, watch):
+    """urlopen, with the call's socket handed to watch (the seam tests patch)."""
+    opener = urllib.request.build_opener(_WatchedHTTPHandler(watch), _WatchedHTTPSHandler(watch))
+    return opener.open(request, timeout=timeout)
+
+
+def _is_timeout(error):
+    return isinstance(error, (socket.timeout, TimeoutError)) or isinstance(
+        getattr(error, "reason", None), (socket.timeout, TimeoutError))
 
 
 def _int(value):
@@ -104,10 +187,17 @@ class VllmClient:
             headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
         started = time.perf_counter()
+        budget = self.timeout if timeout is None else min(self.timeout, timeout)
+        # The socket timeout still bounds each operation; the watch bounds the call.
+        watch = _Watch(budget)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout if timeout is None else min(self.timeout, timeout)) as response:
+            with _open(request, timeout=budget, watch=watch) as response:
                 raw = response.read()
+            if watch.expired:
+                raise ModelTimeout()
         except urllib.error.HTTPError as error:
+            if watch.expired:
+                raise ModelTimeout() from None
             detail = ""
             try:
                 detail = error.read(4096).decode("utf-8", "replace").lower()
@@ -122,8 +212,19 @@ class VllmClient:
             raise ApiError(502, f"Model server returned HTTP {error.code}.") from None
         except (socket.timeout, TimeoutError):
             raise ModelTimeout() from None
-        except (urllib.error.URLError, ConnectionError, OSError):
+        except (urllib.error.URLError, ConnectionError, OSError) as error:
+            # A connect that timed out is wrapped in URLError: it is a timeout too, so
+            # a read whose deadline set this budget returns 504, not 503 (card H8).
+            if watch.expired or _is_timeout(error):
+                raise ModelTimeout() from None
             raise ApiError(503, NOT_READY) from None
+        except http.client.HTTPException:
+            # A reply cut short, here usually by the watch shutting the socket.
+            if watch.expired:
+                raise ModelTimeout() from None
+            raise ApiError(502, "Model server sent an unreadable response.") from None
+        finally:
+            watch.cancel()
         ms = round((time.perf_counter() - started) * 1000)
 
         try:
