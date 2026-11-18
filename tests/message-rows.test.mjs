@@ -340,7 +340,7 @@ test('the version 3 step is safe to repeat: sessions that already have rows keep
   assert.equal(check.prepare('SELECT count(*) AS n FROM messages').get().n, 5);
 });
 
-test('the step replaces a trigger of the same name and refuses message rows without a session', async t => {
+test('the step reuses only a messages table of its own shape, replaces only its own trigger and refuses orphan rows', async t => {
   // Review round 2. A version 2 file may already hold a sessions_messages trigger that
   // writes nothing, or message rows written with foreign keys off for a missing session.
   const { directory, keep } = await scratchDirectory(t, 'ledger-p1c-leftovers-');
@@ -380,6 +380,32 @@ test('the step replaces a trigger of the same name and refuses message rows with
   const bytes = await readFile(orphaned);
   assert.throws(() => openStore(orphaned), { message: migrationFailed });
   assert.ok((await readFile(orphaned)).equals(bytes), 'the orphaned file is unchanged');
+
+  // Review round 3: a messages table of another shape is not reused, and a trigger of that
+  // name on another table is not dropped. Either fails the step and leaves the file as it was.
+  const key = 'REFERENCES sessions(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED';
+  const leftovers = [
+    ['no foreign key', messagesTable.replace(key, '')],
+    ['an immediate key', messagesTable.replace(key, 'REFERENCES sessions(id) ON DELETE CASCADE')],
+    ['no cascade', messagesTable.replace(key, 'REFERENCES sessions(id) DEFERRABLE INITIALLY DEFERRED')],
+    ['one unique constraint', messagesTable.replace(', UNIQUE (session_id, seq)', '')],
+    ['no role check', messagesTable.replace(" CHECK (role IN ('user', 'assistant'))", '')],
+    ['not STRICT', messagesTable.replace(') STRICT;', ');')],
+    ['an extra column', messagesTable.replace('key TEXT NOT NULL,', 'key TEXT NOT NULL, extra TEXT,')],
+    ['a trigger on projects', `CREATE TABLE audit (note TEXT);
+      CREATE TRIGGER sessions_messages AFTER INSERT ON projects BEGIN INSERT INTO audit VALUES ('project'); END;`],
+  ];
+  for (const [index, [name, ddl]] of leftovers.entries()) {
+    assert.notEqual(ddl, messagesTable, name);
+    const path = join(directory, `leftover-${index}.sqlite`);
+    await copyFile(fixture.path, path);
+    const leftover = new DatabaseSync(path);
+    leftover.exec(ddl);
+    leftover.close();
+    const before = await readFile(path);
+    assert.throws(() => openStore(path), { message: migrationFailed }, name);
+    assert.ok((await readFile(path)).equals(before), `${name}: the file is unchanged`);
+  }
 });
 
 test('a session whose stored messages cannot be copied fails the step and leaves the file at version 2', async t => {

@@ -47,6 +47,30 @@ const unmatchedSessions = `
         AND r.role = (m.value ->> '$.role') AND r.text_json = (m.value -> '$.text')))`;
 const migrationFailed = 'A stored session has messages that cannot be moved to schema version 3. The file was not changed.';
 
+/**
+ * Whether the messages table is the one version 3 defines: its columns, the deferred,
+ * cascading key to sessions, the role check, STRICT, and both unique constraints. A
+ * table of that name left by another branch is reused only when it is (review round 3).
+ */
+function isMessagesTable(database) {
+  const sql = database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages'").get()?.sql ?? '';
+  const shape = {
+    columns: database.prepare('PRAGMA table_info(messages)').all().map(({ name, type, notnull, pk }) => [name, type, notnull, pk]),
+    keys: database.prepare('PRAGMA foreign_key_list(messages)').all().map(row => [row.table, row.from, row.to, row.on_delete]),
+    unique: database.prepare('PRAGMA index_list(messages)').all().filter(index => index.unique === 1)
+      .map(index => database.prepare(`PRAGMA index_info(${JSON.stringify(index.name)})`).all().map(column => column.name).join(','))
+      .sort(),
+  };
+  return JSON.stringify(shape) === JSON.stringify({
+    columns: [['id', 'INTEGER', 0, 1], ['session_id', 'TEXT', 1, 0], ['seq', 'INTEGER', 1, 0], ['line', 'INTEGER', 1, 0],
+      ['role', 'TEXT', 1, 0], ['text_json', 'TEXT', 1, 0], ['key', 'TEXT', 1, 0]],
+    keys: [['sessions', 'session_id', 'id', 'CASCADE']],
+    unique: ['session_id,key', 'session_id,seq'],
+  }) && /REFERENCES\s+sessions\s*\(\s*id\s*\)\s+ON\s+DELETE\s+CASCADE\s+DEFERRABLE\s+INITIALLY\s+DEFERRED\s*,/iu.test(sql)
+    && /CHECK\s*\(\s*role\s+IN\s*\(\s*'user'\s*,\s*'assistant'\s*\)\s*\)/iu.test(sql)
+    && /\)\s*STRICT\s*$/iu.test(sql);
+}
+
 const refuseNewer = version => {
   if (version > schemaVersion) {
     throw new Error(`This ledger database was written by a newer Context Ledger (schema ${version}). ` +
@@ -154,6 +178,7 @@ export function migrate(database, bootstrap = () => {}) {
           UNIQUE (session_id, seq)
         ) STRICT;
       `);
+      if (!isMessagesTable(database)) throw new Error(migrationFailed);
       if (database.prepare(unreadableMessages).get().n > 0) throw new Error(migrationFailed);
       // A session that already has rows (a step run before) keeps them.
       // No ORDER BY: seq carries the order, and a sort of every message would hold the
@@ -165,6 +190,9 @@ export function migrate(database, bootstrap = () => {}) {
       // key only checks rows written in this transaction.
       if (database.prepare('PRAGMA foreign_key_check(messages)').all().length > 0) throw new Error(migrationFailed);
       // Replaced, not kept: a trigger of this name from elsewhere might not write the rows.
+      // One on another table is someone else's, so the step refuses rather than drop it.
+      const trigger = database.prepare("SELECT tbl_name FROM sqlite_master WHERE type = 'trigger' AND name = 'sessions_messages'").get();
+      if (trigger && trigger.tbl_name.toLowerCase() !== 'sessions') throw new Error(migrationFailed);
       database.exec(`
         DROP TRIGGER IF EXISTS sessions_messages;
         CREATE TRIGGER sessions_messages AFTER INSERT ON sessions
