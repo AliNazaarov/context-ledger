@@ -1528,3 +1528,23 @@ Seven Codex rounds kept finding new gaps in the free-text rules, each fix openin
   - (low) The test that a prefix is hidden when the labelled match covers only part of a span was lost with the bearer cases. It is restored with an AWS access key ID inside an AWS secret access key.
   - (low) The older handoff checkpoint still listed bearer and password detection. It is marked superseded.
   - The realistic-looking password literal in the tests is replaced with an obviously synthetic one.
+
+## P4c — Free-text secret detection (defined 2026-11-18, before implementation)
+
+P4b was narrowed to key formats with a fixed shape, because seven review rounds kept finding gaps in the free-text rules: bearer header values, and values after names such as `password=`. Each gap was the same problem: guessing exactly where a free-text value ends (quotes, escapes, punctuation, code). P4c takes a different approach and measures it against a written budget.
+
+**Approach: line-tail redaction.** After an `Authorization: Bearer` header, or after a secret-like name followed by `:` or `=`, everything from the value's start to the end of that line is redacted. An opening quote stays visible, and nothing on later lines is touched. The scanner never decides where the value ends inside the line, so no fragment of it can be left. The cost is over-redaction of whatever else is on that line, which the budget below bounds.
+
+**What is flagged:** a lead whose line tail starts with a value. Not flagged: an empty tail, a pure number, or a placeholder that fills the whole value (`${TOKEN}`, `<your-key>`, `changeme`, `xxxx`, `[REDACTED <kind>]`, `process.env.NAME`, a UUID or a 40-character commit hash). A tail with anything after such a placeholder is still flagged.
+
+**Budget, on a labelled synthetic corpus built at test time:**
+
+- **Misses: zero.** For every secret line, no character of the secret is left visible after redaction. The corpus covers bare, quoted, JSON, single-quoted and curl forms; escapes (`\/`, `\u` forms, an escaped quote, a backslash in a bare value); trailing punctuation; parentheses; long values; and short passwords. It includes every input earlier P4b review rounds reported as missed.
+- **False alarms:** at most 10% of the benign lines that contain a secret-like name followed by `:` or `=` (config keys holding placeholders, numbers, code), and none of the benign lines without one (prose, hashes, UUIDs, ordinary code).
+- **Line structure:** every line break survives, and text on other lines is unchanged byte for byte.
+- **Speed:** a 1 MiB transcript, and 40,000 nested names on one line, each scan in under a second.
+
+### Acceptance for the code
+
+- `node --test tests/*.test.mjs` passes, with the corpus and the budget checks in `tests/secrets-free-text.test.mjs`. The P4b key-format tests still pass unchanged.
+- No new dependency. `ledger redact` reports these findings like the others, with no preview.
