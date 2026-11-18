@@ -84,8 +84,10 @@ try {
     output += chunk;
     if (output.includes('start')) ready();
   });
-  // Once the child is about to open the file, give it time to take the write lock.
-  await starting;
+  // Once the child is about to open the file, give it time to take the write lock. A child
+  // that exits before that fails the run here, so the folder is still removed.
+  const early = await Promise.race([starting.then(() => null), closed]);
+  if (early) throw new Error(`The upgrade process exited with ${early[0]} before it started.`);
   await new Promise(resolve => setTimeout(resolve, 300));
   const second = performance.now();
   let secondOpen;

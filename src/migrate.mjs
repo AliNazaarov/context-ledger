@@ -25,52 +25,121 @@ const legacyRows = (sessionId, messages) => `
 const insertRows = 'INSERT INTO messages (session_id, seq, line, role, text_json, key)';
 
 // What is wrong with a stored session that version 3 cannot copy, in fixed words that
-// quote none of its content. A line must be from 1 to the largest integer JavaScript
-// reads exactly (Number.MAX_SAFE_INTEGER).
+// quote none of its content. A line is an integer token from 1 to the largest integer
+// JavaScript reads exactly (Number.MAX_SAFE_INTEGER), so 1.0 or 1e0 is refused as before.
 const notAnArray = 'its stored messages are not a JSON array';
 const notAMessage = 'a stored message is not an object with a user or assistant role, a string text and a line from 1 to 2^53 - 1';
+const repeatedField = 'a stored message has the same field twice';
 const sameLine = 'two stored messages have the same line';
 const migrationFailed = (id, rowid, reason) => `${id ? `Session ${id}` : `The session in row ${rowid}`} ` +
   `cannot be moved to schema version 3: ${reason}. The migration rolled back, so the file was not changed.`;
 const isMessage = message => message !== null && typeof message === 'object' && !Array.isArray(message)
   && (message.role === 'user' || message.role === 'assistant') && typeof message.text === 'string'
   && Number.isSafeInteger(message.line) && message.line >= 1;
-const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
-const parseArray = bytes => {
+const lineToken = /^[1-9][0-9]*$/u;
+const quote = 34;
+const backslash = 92;
+const colon = 58;
+const isSpace = code => code === 32 || code === 9 || code === 10 || code === 13;
+const parseArray = (decoder, bytes) => {
   try {
-    const value = JSON.parse(strictUtf8.decode(bytes));
-    return Array.isArray(value) ? value : null;
+    const source = decoder.decode(bytes);
+    const value = JSON.parse(source);
+    return Array.isArray(value) ? { source, messages: value } : null;
   } catch {
     return null;
   }
 };
 
 /**
+ * For each object in a JSON array that JSON.parse has accepted: whether a member name
+ * appears twice, and the raw token of its line member. JSON.parse keeps the last of two
+ * members with one name, while SQLite (the old copy, and the trigger for older builds)
+ * reads the first, so a repeat is refused rather than resolved either way. The raw token
+ * shows a line such as 1.0 or 1.00000000000000001 that JavaScript would read as 1
+ * (Codex review of 5a80f16). Only members of the array's own elements are looked at.
+ */
+function scanMembers(source) {
+  const elements = [];
+  let depth = 0;
+  let element = null;
+  for (let at = 0; at < source.length; at += 1) {
+    const code = source.charCodeAt(at);
+    if (code === quote) {
+      let close = source.indexOf('"', at + 1);
+      for (;;) {
+        let slashes = 0;
+        while (source.charCodeAt(close - 1 - slashes) === backslash) slashes += 1;
+        if (slashes % 2 === 0) break;
+        close = source.indexOf('"', close + 1);
+      }
+      let next = close + 1;
+      while (isSpace(source.charCodeAt(next))) next += 1;
+      if (depth === 2 && element && source.charCodeAt(next) === colon) {
+        const literal = source.slice(at, close + 1);
+        const name = literal.includes('\\') ? JSON.parse(literal) : literal.slice(1, -1);
+        if (element.names.has(name)) element.repeated = true;
+        element.names.add(name);
+        if (name === 'line') {
+          let from = next + 1;
+          while (isSpace(source.charCodeAt(from))) from += 1;
+          let to = from;
+          while (to < source.length && !isSpace(source.charCodeAt(to)) && !',}]'.includes(source[to])) to += 1;
+          element.line = source.slice(from, to);
+        }
+      }
+      at = close;
+    } else if (code === 123 || code === 91) {
+      depth += 1;
+      if (depth === 2) {
+        element = code === 123 ? { names: new Set(), repeated: false, line: '' } : null;
+        elements.push(element);
+      }
+    } else if (code === 125 || code === 93) {
+      depth -= 1;
+    }
+  }
+  return elements;
+}
+
+/**
  * Copies every stored session's JSON messages into rows, in array order with l:<line>
  * keys, in one pass: each array is read once as its exact bytes (node:sqlite cuts text at
- * a NUL when it reads it), parsed once and checked, and each text is written as a JSON
- * string literal. The first session that cannot be copied throws, naming the session; the
- * caller rolls the step back. (Review of PR #45: the SQL copy parsed every turn several
- * times and checked its own copy again, and its error named no session.)
+ * a NUL when it reads it), decoded in the file's own text encoding, parsed once and
+ * checked, and each text is written as a JSON string literal. The first session that
+ * cannot be copied throws, naming the session; the caller rolls the step back. (Review of
+ * PR #45: the SQL copy parsed every turn several times and checked its own copy again,
+ * and its error named no session.)
  */
 function copyStoredMessages(database) {
+  const encoding = database.prepare('PRAGMA encoding').get().encoding.toLowerCase();
+  // ignoreBOM keeps a leading byte order mark in the text, so JSON.parse refuses it as
+  // SQLite did. A 64-character ID is 64 bytes in UTF-8 and 128 in UTF-16.
+  const decoder = new TextDecoder(encoding, { fatal: true, ignoreBOM: true });
+  const idBytes = encoding === 'utf-8' ? 64 : 128;
   const insert = database.prepare(`${insertRows} VALUES (?, ?, ?, ?, ?, ?)`);
   // For an ID that is not 64 hex characters (none that this project writes), SQL copies
   // the ID by rowid, so one that JavaScript would read inexactly is still copied exactly.
   // It is slower, so the usual IDs are bound directly.
   const insertByRow = database.prepare(`${insertRows} SELECT id, ?, ?, ?, ?, ? FROM sessions WHERE rowid = ?`);
-  const select = database.prepare(`SELECT rowid, CASE WHEN length(CAST(id AS BLOB)) = 64 THEN id END AS id,
+  const select = database.prepare(`SELECT rowid, CASE WHEN length(CAST(id AS BLOB)) = ? THEN id END AS id,
     CAST(messages AS BLOB) AS messages FROM sessions ORDER BY rowid`);
-  for (const { rowid, id: stored, messages: bytes } of select.iterate()) {
+  // A rowid can be any 64-bit integer, beyond what a JavaScript number holds exactly.
+  select.setReadBigInts(true);
+  for (const { rowid, id: stored, messages: bytes } of select.iterate(idBytes)) {
     // An error names a session by its ID when that is 64 lowercase hex characters, and
     // otherwise by its row, so it prints no stored text.
     const id = /^[0-9a-f]{64}$/u.test(stored) ? stored : null;
-    const messages = bytes instanceof Uint8Array ? parseArray(bytes) : null;
-    if (!messages) throw new Error(migrationFailed(id, rowid, notAnArray));
+    const parsed = bytes instanceof Uint8Array ? parseArray(decoder, bytes) : null;
+    if (!parsed) throw new Error(migrationFailed(id, rowid, notAnArray));
+    const { source, messages } = parsed;
+    if (!messages.every(isMessage)) throw new Error(migrationFailed(id, rowid, notAMessage));
+    const members = scanMembers(source);
+    if (members.some(element => element.repeated)) throw new Error(migrationFailed(id, rowid, repeatedField));
+    if (!members.every(element => lineToken.test(element.line))) throw new Error(migrationFailed(id, rowid, notAMessage));
     const lines = new Set();
     for (let seq = 0; seq < messages.length; seq += 1) {
       const message = messages[seq];
-      if (!isMessage(message)) throw new Error(migrationFailed(id, rowid, notAMessage));
       if (lines.has(message.line)) throw new Error(migrationFailed(id, rowid, sameLine));
       lines.add(message.line);
       const textJson = JSON.stringify(message.text);

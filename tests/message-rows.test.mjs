@@ -89,6 +89,7 @@ const sessionColumns = 'id, provider, source, title, message_count, messages, se
 const notAnArray = 'its stored messages are not a JSON array';
 const notAMessage = 'a stored message is not an object with a user or assistant role, a string text and a line from 1 to 2^53 - 1';
 const sameLine = 'two stored messages have the same line';
+const repeatedField = 'a stored message has the same field twice';
 const migrationFailed = (session, reason) =>
   `${session} cannot be moved to schema version 3: ${reason}. The migration rolled back, so the file was not changed.`;
 const leftoverFailed = 'This ledger already has a messages table or trigger that schema version 3 did not create. ' +
@@ -133,11 +134,11 @@ async function scratchDirectory(t, prefix) {
 }
 
 /**
- * A ledger file at version 0, 1 or 2 with a Claude session in `acme` (version 2 only) and
+ * A ledger file at version 0, 1 or 2 (in UTF-8 unless another text encoding is named) with a Claude session in `acme` (version 2 only) and
  * a Codex session in `default`, three graphs and a decided room. Rows are copied from a
  * scratch store, whose sessions.messages column holds the JSON the older builds wrote.
  */
-async function oldLedger(directory, version) {
+async function oldLedger(directory, version, encoding = 'UTF-8') {
   const scratchPath = join(directory, `scratch-${version}.sqlite`);
   const scratch = openStore(scratchPath);
   const leo = scratch.importTranscript({ provider: 'claude', source: 'leo.jsonl', transcript: leoTranscript, project: 'acme' });
@@ -154,8 +155,9 @@ async function oldLedger(directory, version) {
   scratch.close();
 
   const source = new DatabaseSync(scratchPath);
-  const path = join(directory, `v${version}.sqlite`);
+  const path = join(directory, `v${version}-${encoding}.sqlite`);
   const old = new DatabaseSync(path);
+  old.exec(`PRAGMA encoding = '${encoding}'`);
   old.exec(versionZeroDdl);
   if (version >= 1) old.exec(versionOneColumns);
   if (version >= 2) old.exec(versionTwoTable);
@@ -396,6 +398,16 @@ test('a session whose stored messages cannot be copied fails the step, names the
     ['line 2^63', '[{"role": "user", "text": "Synthetic turn", "line": 9223372036854775808}]', notAMessage],
     // Two stored messages on one line would share a key.
     ['two messages on one line', JSON.stringify([turn, { ...turn, role: 'assistant' }]), sameLine],
+    // Codex review of 5a80f16: JSON.parse keeps the last of two fields with one name, SQLite
+    // the first, so a repeated field is refused. A line token that is not an integer is
+    // refused even where JavaScript reads it as one, and so is a leading byte order mark.
+    ['a repeated text', '[{"role": "user", "text": "first", "text": "last", "line": 1}]', repeatedField],
+    ['a repeated line', '[{"role": "user", "text": "Synthetic turn", "line": 2, "line": 1}]', repeatedField],
+    ['a repeated escaped name', '[{"role": "user", "text": "first", "te\\u0078t": "last", "line": 1}]', repeatedField],
+    ['line 1.0', '[{"role": "user", "text": "Synthetic turn", "line": 1.0}]', notAMessage],
+    ['line 1e0', '[{"role": "user", "text": "Synthetic turn", "line": 1e0}]', notAMessage],
+    ['line 1.00000000000000001', '[{"role": "user", "text": "Synthetic turn", "line": 1.00000000000000001}]', notAMessage],
+    ['a byte order mark', `${String.fromCodePoint(0xfeff)}${JSON.stringify([turn])}`, notAnArray],
   ];
   for (const [index, [name, messages, reason]] of variants.entries()) {
     const path = join(directory, `atomic-${index}.sqlite`);
@@ -435,6 +447,72 @@ test('a session whose stored messages cannot be copied fails the step, names the
   const bytes = await readFile(oddId);
   assert.throws(() => openStore(oddId), { message: migrationFailed(`The session in row ${rowid}`, notAMessage) });
   assert.ok((await readFile(oddId)).equals(bytes));
+});
+
+test('repeated names inside a text, nested objects and escaped quotes are not repeated fields', async t => {
+  // Codex review of 5a80f16: the field check reads only the members of each message.
+  const { directory, keep } = await scratchDirectory(t, 'ledger-p1c-fields-');
+  const fixture = await oldLedger(directory, 2);
+  const setup = new DatabaseSync(fixture.path);
+  const stored = '[{"role": "user", "text": "a \\"text\\": \\\\", "line": 1, "meta": {"line": 9, "line": 8}},' +
+    ' {"line": 2, "text": "\\"role\\":", "role": "assistant", "extra": [{"text": 1}, {"text": 2}]}]';
+  setup.prepare('UPDATE sessions SET messages = ? WHERE id = ?').run(stored, fixture.ali.id);
+  setup.close();
+  const store = openStore(fixture.path);
+  keep(() => store.close());
+  assert.deepEqual(store.get(fixture.ali.id).messages, [
+    { role: 'user', text: 'a "text": \\', line: 1, key: 'l:1' },
+    { role: 'assistant', text: '"role":', line: 2, key: 'l:2' },
+  ]);
+});
+
+test('wide rowids and UTF-16 files migrate exactly, and their bad sessions are named', async t => {
+  // Codex review of 5a80f16: a rowid above 2^53 failed to convert before the loop body ran,
+  // and a UTF-16 file was decoded as UTF-8, so every session looked invalid.
+  const { directory, keep } = await scratchDirectory(t, 'ledger-p1c-wide-');
+  const wide = 9007199254740993n;
+  const stored = [{ role: 'user', text: `Wide ${nul} row`, line: 1 }, { role: 'assistant', text: 'Wide reply', line: 2 }];
+  const insertWide = `INSERT INTO sessions (rowid, id, provider, source, title, message_count, messages, search_text)
+    VALUES (?, ?, 'claude', 'wide.jsonl', 'Wide', 2, ?, 'wide')`;
+  const fixture = await oldLedger(directory, 2);
+  const setup = new DatabaseSync(fixture.path);
+  setup.prepare(insertWide).run(wide, 'a'.repeat(64), JSON.stringify(stored));
+  setup.prepare(insertWide).run(wide + 1n, `opaque${nul}id`, JSON.stringify(stored));
+  setup.close();
+  const bad = join(directory, 'wide-bad.sqlite');
+  await copyFile(fixture.path, bad);
+  const store = openStore(fixture.path);
+  keep(() => store.close());
+  assert.deepEqual(store.get('a'.repeat(64)).messages, stored.map(message => ({ ...message, key: `l:${message.line}` })));
+  const check = new DatabaseSync(fixture.path);
+  keep(() => check.close());
+  assert.equal(check.prepare(`SELECT count(*) AS n FROM messages WHERE session_id = 'opaque' || char(0) || 'id'`).get().n, 2);
+
+  const breakIt = new DatabaseSync(bad);
+  breakIt.prepare('UPDATE sessions SET messages = ? WHERE rowid = ?').run('{}', wide + 1n);
+  breakIt.close();
+  assert.throws(() => openStore(bad), { message: migrationFailed(`The session in row ${wide + 1n}`, notAnArray) });
+
+  for (const encoding of ['UTF-16le', 'UTF-16be']) {
+    const utf16 = await oldLedger(directory, 2, encoding);
+    const raw = new DatabaseSync(utf16.path);
+    assert.equal(raw.prepare('PRAGMA encoding').get().encoding, encoding);
+    const sessions = rows(raw, 'SELECT id, messages FROM sessions ORDER BY rowid');
+    raw.close();
+    const broken = join(directory, `${encoding}-bad.sqlite`);
+    await copyFile(utf16.path, broken);
+    const migrated = openStore(utf16.path);
+    keep(() => migrated.close());
+    const after = new DatabaseSync(utf16.path);
+    keep(() => after.close());
+    for (const session of sessions) assert.deepEqual(messageRows(after, session.id), legacyRowsOf(session.messages), encoding);
+    assert.deepEqual(migrated.getGraph(utf16.leoGraph.id), utf16.leoGraph, encoding);
+    // A 64-character ID is 128 bytes in UTF-16 and is still named by its ID.
+    const setupBroken = new DatabaseSync(broken);
+    setupBroken.prepare('UPDATE sessions SET messages = ? WHERE id = ?').run('[1]', utf16.ali.id);
+    setupBroken.close();
+    assert.throws(() => openStore(broken), { message: migrationFailed(`Session ${utf16.ali.id}`, notAMessage) }, encoding);
+  }
 });
 
 test('a session whose ID is not 64 hex characters migrates with its exact ID', async t => {
@@ -486,11 +564,18 @@ test('a migrated session keeps l: keys, while a fresh import of the same bytes g
   // Importing the same bytes into the migrated ledger returns the stored session; its keys stay l:.
   assert.equal(migrated.importTranscript({ provider: 'claude', source: 'leo.jsonl', transcript: leoTranscript }).id, fixture.leo.id);
   assert.deepEqual(migrated.get(fixture.leo.id).messages, legacy);
-  // A Codex session has no UUIDs: migrated it keeps l: keys, fresh it gets h: keys.
-  const freshAli = fresh.importTranscript({ provider: 'codex', source: 'ali.jsonl', transcript: aliTranscript });
-  assert.deepEqual(migrated.get(fixture.ali.id).messages.map(message => message.key), ['l:1', 'l:2']);
-  assert.deepEqual(fresh.get(freshAli.id).messages.map(message => message.key),
-    aliTranscript.split('\n').map((line, index) => hashKey(freshAli.id, index + 1, line)));
+  // A Codex session has no UUIDs: migrated it keeps l: keys, fresh it gets h: keys
+  // (Codex review of 5a80f16: the same checks as for Claude, with the ID fixed in advance).
+  const aliId = sessionId('codex', aliTranscript);
+  assert.equal(fixture.ali.id, aliId);
+  assert.equal(fresh.importTranscript({ provider: 'codex', source: 'ali.jsonl', transcript: aliTranscript }).id, aliId);
+  const legacyAli = migrated.get(aliId).messages;
+  const currentAli = fresh.get(aliId).messages;
+  assert.deepEqual(legacyAli.map(message => message.key), ['l:1', 'l:2']);
+  assert.deepEqual(currentAli.map(message => message.key), aliTranscript.split('\n').map((line, index) => hashKey(aliId, index + 1, line)));
+  assert.deepEqual(withoutKey(legacyAli), withoutKey(currentAli));
+  assert.equal(migrated.importTranscript({ provider: 'codex', source: 'ali.jsonl', transcript: aliTranscript }).id, aliId);
+  assert.deepEqual(migrated.get(aliId).messages, legacyAli);
 });
 
 test('a newer file is refused untouched', async t => {
