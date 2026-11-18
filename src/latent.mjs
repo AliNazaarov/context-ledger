@@ -78,7 +78,7 @@ function checkPaths(paths, what) {
 }
 
 /** Read the requested files under the root, refusing anything that resolves outside it. */
-async function readFiles(root, paths) {
+async function readFiles(root, paths, refuseFiles = []) {
   if (!root) throw new LatentError(503, 'Latent reading is not configured: set LATENT_ROOT.');
   const realRoot = await realpath(root).catch(() => {
     throw new LatentError(503, 'LATENT_ROOT does not exist.');
@@ -112,6 +112,11 @@ async function readFiles(root, paths) {
     try {
       const info = await handle.stat();
       if (!info.isFile()) throw new InputError(`Not a regular file: ${path}`);
+      // The ledger's own token file, under any name (a hard link has an innocent one).
+      const identity = refuseFiles.length ? await handle.stat({ bigint: true }) : undefined;
+      if (refuseFiles.some(file => file.dev === identity.dev && file.ino === identity.ino)) {
+        throw new InputError('Paths must not name secret files (.env, .git, keys).');
+      }
       bytes += info.size;
       if (bytes > maxTextBytes) throw new LatentError(413, 'Latent read is limited to 512 KiB of file text.');
       buffer = await handle.readFile();
@@ -453,9 +458,9 @@ export function validateSlice(slice, files, question) {
  * Ask the warm pool for a slice. When the runtime is down, fall back to Tier 1:
  * return the numbered files so the closed model reads them itself.
  */
-export async function latentRead(input, { latentUrl = 'http://127.0.0.1:4320', latentRoot, fetchImpl = fetch, timeoutMs = defaultTimeoutMs } = {}) {
+export async function latentRead(input, { latentUrl = 'http://127.0.0.1:4320', latentRoot, refuseFiles, fetchImpl = fetch, timeoutMs = defaultTimeoutMs } = {}) {
   const request = checkInput(input);
-  const files = await readFiles(latentRoot, request.paths);
+  const files = await readFiles(latentRoot, request.paths, refuseFiles);
   let response;
   try {
     response = await fetchImpl(`${latentUrl}/latent/read`, {
@@ -562,9 +567,9 @@ function cleanTransferReceipt(receipt) {
   };
 }
 
-export async function latentTransfer(input, { latentUrl = 'http://127.0.0.1:4320', latentRoot, fetchImpl = fetch, timeoutMs = defaultTimeoutMs } = {}) {
+export async function latentTransfer(input, { latentUrl = 'http://127.0.0.1:4320', latentRoot, refuseFiles, fetchImpl = fetch, timeoutMs = defaultTimeoutMs } = {}) {
   const request = checkTransfer(input);
-  const files = request.paths ? await readFiles(latentRoot, request.paths)
+  const files = request.paths ? await readFiles(latentRoot, request.paths, refuseFiles)
     : [{ path: 'text', lines: request.text.split(/\r\n|\n|\r/u) }];
   const suspects = suspiciousLines(files);
   const textFallback = reason => (request.paths ? fallback(files, reason) : { mode: 'text', reason, text: request.text });
@@ -685,10 +690,10 @@ export async function latentTeam(input, { latentUrl = 'http://127.0.0.1:4320', f
  * adapter pages a long fallback with it, so a continuation never reruns the model.
  * Same path, secret and size rules as latent read.
  */
-export async function latentFiles(input, { latentRoot } = {}) {
+export async function latentFiles(input, { latentRoot, refuseFiles } = {}) {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) throw new InputError('Latent files needs a JSON object.');
   if (Object.keys(input).some(key => key !== 'paths')) throw new InputError('Latent files accepts only paths.');
   checkPaths(input.paths, 'Latent files');
-  const files = await readFiles(latentRoot, input.paths);
+  const files = await readFiles(latentRoot, input.paths, refuseFiles);
   return { mode: 'text', files: files.map(file => ({ path: file.path, text: numbered(file) })) };
 }

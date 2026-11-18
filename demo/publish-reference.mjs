@@ -5,23 +5,29 @@
 // It reads the ledger's access token from the file next to CONTEXT_LEDGER_DB (the
 // repository's .context-ledger/ledger.sqlite by default).
 import { clientToken } from '../src/token.mjs';
+import { inlineText } from '../src/text.mjs';
 import { aliReference, leoReference } from './reference-graphs.mjs';
 
 const port = Number(process.env.PORT ?? 4317);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT.');
 const origin = `http://127.0.0.1:${port}`;
-// Only for the port the token file names.
-const { token } = await clientToken(port);
+// Only for the port the token file names; without it nothing is sent.
+const { token, otherPort } = await clientToken(port);
 const auth = token === undefined ? {} : { Authorization: `Bearer ${token}` };
 
 async function api(path, body) {
+  if (token === undefined) {
+    throw new Error(otherPort === undefined
+      ? 'Cannot read the ledger\'s access token: start it with npm start, with the same CONTEXT_LEDGER_DB as this script.'
+      : `The ledger's access token is for port ${otherPort}: run this with PORT=${otherPort}.`);
+  }
   const init = body === undefined ? { headers: auth } : {
     method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin, ...auth }, body: JSON.stringify(body),
   };
   const response = await fetch(origin + path, init);
   const data = await response.json().catch(() => ({}));
   if (response.status === 401) throw new Error('The ledger refused the request: start it with npm start, with the same CONTEXT_LEDGER_DB as this script.');
-  if (!response.ok) throw new Error(`${path}: HTTP ${response.status} ${data.error ?? ''}`);
+  if (!response.ok) throw new Error(`${path}: HTTP ${response.status} ${inlineText(String(data.error ?? '')).slice(0, 200)}`);
   return data;
 }
 

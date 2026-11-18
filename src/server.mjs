@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { GraphInputError } from './graph.mjs';
 import { LatentError, latentFiles, latentRead, latentTeam, latentTransfer } from './latent.mjs';
 import { InputError, isProvider, openStore } from './store.mjs';
-import { codeLifetimeMs, createAuth, newToken, tokenFileFor, writeTokenFile } from './token.mjs';
+import { codeLifetimeMs, createAuth, newToken, removeTokenFile, tokenFileFor, writeTokenFile } from './token.mjs';
 
 const maxRequestBytes = 8 * 1024 * 1024;
 const staticFiles = new Map([
@@ -95,6 +95,9 @@ if (!tokenFile) {
   process.exit(1);
 }
 let auth;
+// The token file's identity, so a latent read refuses it under any name (a hard link).
+let tokenIdentity;
+const refuseFiles = () => (tokenIdentity ? [tokenIdentity] : []);
 const signInHelp = 'Sign in first: run npm run ledger -- login and open the link it prints.';
 
 // A handler returns the JSON body of a 200 response, `sent` when it wrote the response
@@ -172,16 +175,16 @@ const routes = [
   } },
   { method: 'POST', path: '/api/latent/read', handler: async ({ request, origin }) => {
     const input = await readJson(request, origin, 'A latent read');
-    return latentRead(input, { latentUrl: latentUrl(), latentRoot: process.env.LATENT_ROOT });
+    return latentRead(input, { latentUrl: latentUrl(), latentRoot: process.env.LATENT_ROOT, refuseFiles: refuseFiles() });
   } },
   { method: 'POST', path: '/api/latent/transfer', handler: async ({ request, origin }) => {
     const input = await readJson(request, origin, 'A latent transfer');
-    return latentTransfer(input, { latentUrl: latentUrl(), latentRoot: process.env.LATENT_ROOT });
+    return latentTransfer(input, { latentUrl: latentUrl(), latentRoot: process.env.LATENT_ROOT, refuseFiles: refuseFiles() });
   } },
   { method: 'POST', path: '/api/latent/files', handler: async ({ request, origin }) => {
     // The fallback's numbered text without the runtime: MCP pages a long fallback with it.
     const input = await readJson(request, origin, 'Reading latent files');
-    return latentFiles(input, { latentRoot: process.env.LATENT_ROOT });
+    return latentFiles(input, { latentRoot: process.env.LATENT_ROOT, refuseFiles: refuseFiles() });
   } },
   { method: 'POST', path: '/api/latent/team', handler: async ({ request, origin }) => {
     const input = await readJson(request, origin, 'A latent team run');
@@ -231,8 +234,8 @@ const server = createServer(async (request, response) => {
     }
     const origin = `http://${host}`;
     const url = new URL(request.url, origin);
+    if (!auth) throw new HttpError(503, 'Context Ledger is starting.');
     if (!staticFiles.has(url.pathname) && url.pathname !== '/login') {
-      if (!auth) throw new HttpError(503, 'Context Ledger is starting.');
       if (!auth.allowed(request)) {
         response.setHeader('WWW-Authenticate', 'Bearer realm="Context Ledger"');
         throw new HttpError(401, signInHelp);
@@ -269,12 +272,20 @@ server.listen(port, '127.0.0.1', () => {
   // The plain token lives only in this callback and in the file; auth keeps its digest.
   const token = newToken();
   try {
-    writeTokenFile(tokenFile, token, localPort);
+    tokenIdentity = writeTokenFile(tokenFile, token, localPort);
   } catch {
     console.error(tokenFailure);
     process.exit(1);
   }
   auth = createAuth({ token, port: localPort });
+  // A clean stop removes the file, so a program that takes the port later gets no
+  // live token from a client. A killed process leaves a dead token behind.
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => {
+      removeTokenFile(tokenFile, auth.isOwnToken);
+      process.exit(0);
+    });
+  }
   console.log(`Context Ledger listening at http://127.0.0.1:${localPort}`);
   console.log(`Sign in to the browser app (one use, within ${codeLifetimeMs / 1000} seconds): http://127.0.0.1:${localPort}${'/login?code=' + auth.mintCode()}`);
 });

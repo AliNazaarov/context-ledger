@@ -12,6 +12,7 @@
 import { spawn } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
+import { inlineText } from '../../src/text.mjs';
 import { tokenForUrl } from '../../src/token.mjs';
 import { gradeSlice } from './grade.mjs';
 import {
@@ -58,7 +59,7 @@ async function ask(question) {
     signal: AbortSignal.timeout(300_000),
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(`${question.id}: HTTP ${response.status} ${data.error}`);
+  if (!response.ok) throw new Error(`${question.id}: HTTP ${response.status} ${inlineText(String(data.error)).slice(0, 200)}`);
   if (data.mode !== 'latent') throw new Error(`${question.id}: runtime unavailable (${data.reason})`);
   return data;
 }

@@ -5,7 +5,7 @@
 // only SHA-256 digests; the bearer check compares digests in constant time, and codes
 // and sessions are looked up by their digests.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { closeSync, constants, mkdirSync, openSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +45,8 @@ const validPort = port => Number.isInteger(port) && port >= 1 && port <= 65535;
  * link put there in between makes this fail instead of writing through it. Mode 0600
  * applies on POSIX; on Windows the file takes its folder's ACL. The folder is trusted:
  * a folder other users can write to, or a link in the folder path, is not checked.
+ * Returns the file's identity ({ dev, ino } as bigints, from the open descriptor: on
+ * Windows only a descriptor's stat names the volume) so readers can refuse the file.
  */
 export function writeTokenFile(path, token, port) {
   if (!secretPattern.test(token) || !validPort(port)) throw new Error('Invalid token record.');
@@ -53,23 +55,35 @@ export function writeTokenFile(path, token, port) {
   const descriptor = openSync(path, 'wx', 0o600);
   try {
     writeSync(descriptor, JSON.stringify({ port, token }) + '\n');
+    const { dev, ino } = fstatSync(descriptor, { bigint: true });
+    return { dev, ino };
   } finally {
     closeSync(descriptor);
   }
 }
 
+/** Removes the token file if it still holds this server's token (another start may have replaced it). */
+export function removeTokenFile(path, isOwnToken) {
+  try {
+    const record = JSON.parse(readFileSync(path, 'utf8'));
+    if (typeof record?.token === 'string' && secretPattern.test(record.token) && isOwnToken(record.token)) rmSync(path, { force: true });
+  } catch {
+    // Already gone or replaced: nothing to remove.
+  }
+}
+
 /**
  * Reads a token file: { port, token }, or undefined when the file is missing, is not a
- * regular file (a FIFO cannot block the read), belongs to another user on POSIX, or is
- * malformed.
+ * regular file (a FIFO cannot block the read), is malformed, or on POSIX is a link,
+ * belongs to another user or can be read or written by group or others.
  */
 export async function readTokenFile(path) {
   let file;
   try {
-    file = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+    file = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
     const info = await file.stat();
     if (!info.isFile() || info.size > maxTokenFileBytes) return undefined;
-    if (typeof process.getuid === 'function' && info.uid !== process.getuid()) return undefined;
+    if (typeof process.getuid === 'function' && (info.uid !== process.getuid() || (info.mode & 0o077) !== 0)) return undefined;
     const buffer = Buffer.alloc(maxTokenFileBytes + 1);
     const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
     if (bytesRead > maxTokenFileBytes) return undefined;
@@ -96,7 +110,9 @@ export async function clientToken(port, env = process.env) {
 
 /**
  * The token for a ledger URL, for scripts that take one (LEDGER): only for plain http
- * to 127.0.0.1 or localhost on the port the token file names, else undefined.
+ * to the literal 127.0.0.1 (where the ledger listens; localhost may reach ::1) on the
+ * port the token file names, else undefined. This guards against a wrong setting, not
+ * against another program that takes the port after the ledger stops.
  */
 export async function tokenForUrl(url, env = process.env) {
   let parsed;
@@ -105,7 +121,7 @@ export async function tokenForUrl(url, env = process.env) {
   } catch {
     return undefined;
   }
-  if (parsed.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(parsed.hostname)) return undefined;
+  if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1') return undefined;
   return (await clientToken(Number(parsed.port || 80), env)).token;
 }
 
@@ -157,6 +173,8 @@ export function createAuth({ token, port, now = Date.now }) {
     cookieName,
     /** True when the request carries the bearer token. */
     bearer,
+    /** True for this server's token (compared as digests, in constant time). */
+    isOwnToken: text => timingSafeEqual(digest(text), tokenDigest),
     /** True when the request carries the bearer token or a live session cookie. */
     allowed: request => bearer(request) || session(request),
     /** A new one-time sign-in code. */

@@ -43,8 +43,10 @@ test('graph CLI publishes raw JSON to its local origin and reads the response as
   });
   t.after(() => new Promise(resolve => server.close(resolve)));
   const port = server.address().port;
+  // P1e: a publish goes only where the token file says the ledger is.
+  await writeFile(join(directory, 'ledger.sqlite.token'), JSON.stringify({ port, token: 'G'.repeat(43) }) + '\n', { mode: 0o600 });
   const cli = (...args) => execute(process.execPath, ['src/cli.mjs', 'graph', ...args], {
-    env: { ...process.env, PORT: String(port), CONTEXT_LEDGER_DB: join(directory, 'none.sqlite') },
+    env: { ...process.env, PORT: String(port), CONTEXT_LEDGER_DB: join(directory, 'ledger.sqlite') },
   });
 
   const published = await cli('publish', packetPath);

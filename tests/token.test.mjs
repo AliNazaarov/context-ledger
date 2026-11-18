@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer, request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,6 +18,8 @@ const cliNoToken = 'Cannot read the Context Ledger access token. Start the ledge
 const refused = 'Context Ledger refused the access token. Check that PORT and CONTEXT_LEDGER_DB match the running ledger.';
 const mcpNoToken = 'Cannot read the Context Ledger access token. Start the ledger with npm start, and give this MCP server the same CONTEXT_LEDGER_DB as the ledger (an absolute path).';
 
+// Token files are written owner-only: on POSIX a client refuses any other mode.
+const writeTokenText = (path, text) => writeFile(path, text, { mode: 0o600 });
 // A token file as the server writes it, for a ledger on this port.
 const tokenRecord = (port, token) => JSON.stringify({ port, token }) + '\n';
 
@@ -117,7 +119,7 @@ test('each start writes a fresh 32-byte token next to the database, owner-only, 
   const nested = join(place.directory, 'data', 'ledger.sqlite');
   // A stale file with other content is replaced, not appended to or reused.
   await mkdir(join(place.directory, 'data'), { recursive: true, mode: 0o700 });
-  await writeFile(tokenFileFor(nested), 'stale-token-from-an-old-start\n');
+  await writeTokenText(tokenFileFor(nested), 'stale-token-from-an-old-start\n');
   const first = await place.start(nested);
   assert.match(first.token, secret);
   assert.equal(Buffer.from(first.token, 'base64url').length, 32);
@@ -340,15 +342,15 @@ test('the CLI sends the token from the file named by CONTEXT_LEDGER_DB, and its 
   const missing = await cli(['search', 'vela'], { ...env, CONTEXT_LEDGER_DB: join(place.directory, 'other.sqlite') });
   assert.deepEqual({ code: missing.code, stderr: missing.stderr }, { code: 1, stderr: cliNoToken + '\n' });
   const malformed = join(place.directory, 'malformed.sqlite');
-  await writeFile(tokenFileFor(malformed), 'not a token\n');
+  await writeTokenText(tokenFileFor(malformed), 'not a token\n');
   assert.equal((await cli(['search', 'vela'], { ...env, CONTEXT_LEDGER_DB: malformed })).stderr, cliNoToken + '\n');
   // A token file in the old one-line format, or naming no port, is not a token.
-  await writeFile(tokenFileFor(malformed), 'A'.repeat(43) + '\n');
+  await writeTokenText(tokenFileFor(malformed), 'A'.repeat(43) + '\n');
   assert.equal((await cli(['search', 'vela'], { ...env, CONTEXT_LEDGER_DB: malformed })).stderr, cliNoToken + '\n');
-  await writeFile(tokenFileFor(malformed), JSON.stringify({ token: 'A'.repeat(43) }));
+  await writeTokenText(tokenFileFor(malformed), JSON.stringify({ token: 'A'.repeat(43) }));
   assert.equal((await cli(['search', 'vela'], { ...env, CONTEXT_LEDGER_DB: malformed })).stderr, cliNoToken + '\n');
   const stale = join(place.directory, 'stale.sqlite');
-  await writeFile(tokenFileFor(stale), tokenRecord(server.port, 'A'.repeat(43)));
+  await writeTokenText(tokenFileFor(stale), tokenRecord(server.port, 'A'.repeat(43)));
   const refusedRun = await cli(['search', 'vela'], { ...env, CONTEXT_LEDGER_DB: stale });
   assert.deepEqual({ code: refusedRun.code, stderr: refusedRun.stderr }, { code: 1, stderr: refused + '\n' });
   assert.equal((await cli(['login'], { ...env, CONTEXT_LEDGER_DB: stale })).stderr, refused + '\n');
@@ -381,7 +383,7 @@ test('the CLI and the MCP adapter put the file token in the Authorization header
   const place = await temporary(t);
   const token = 'Z'.repeat(20) + '_-' + 'y'.repeat(21);
   const { seen, port } = await fakeLedger(t);
-  await writeFile(tokenFileFor(place.database), tokenRecord(port, token));
+  await writeTokenText(tokenFileFor(place.database), tokenRecord(port, token));
   const searched = await cli(['search', 'vela'], { PORT: String(port), CONTEXT_LEDGER_DB: place.database });
   assert.equal(searched.code, 0, searched.stderr);
   const client = place.mcp(port, { CONTEXT_LEDGER_DB: place.database });
@@ -396,7 +398,7 @@ test('the CLI and the MCP adapter never send the token to a port its file does n
   const token = 'Q'.repeat(43);
   const { seen, port } = await fakeLedger(t, 401);
   const ledgerPort = port === 65535 ? port - 1 : port + 1;
-  await writeFile(tokenFileFor(place.database), tokenRecord(ledgerPort, token));
+  await writeTokenText(tokenFileFor(place.database), tokenRecord(ledgerPort, token));
   const otherPortCli = `The Context Ledger access token is for the ledger on port ${ledgerPort}, so it was not sent. Set PORT to ${ledgerPort}, or use the CONTEXT_LEDGER_DB of the ledger on this port.\n`;
   const run = await cli(['search', 'vela'], { PORT: String(port), CONTEXT_LEDGER_DB: place.database });
   assert.deepEqual({ code: run.code, stdout: run.stdout, stderr: run.stderr }, { code: 1, stdout: '', stderr: otherPortCli });
@@ -409,11 +411,12 @@ test('the CLI and the MCP adapter never send the token to a port its file does n
 
 test('scripts that take a ledger URL get the token only for loopback http on the named port', async t => {
   const place = await temporary(t);
-  await writeFile(tokenFileFor(place.database), tokenRecord(4999, 'W'.repeat(43)));
+  await writeTokenText(tokenFileFor(place.database), tokenRecord(4999, 'W'.repeat(43)));
   const env = { CONTEXT_LEDGER_DB: place.database };
   assert.equal(await tokenForUrl('http://127.0.0.1:4999', env), 'W'.repeat(43));
-  assert.equal(await tokenForUrl('http://localhost:4999/', env), 'W'.repeat(43));
-  for (const url of ['http://127.0.0.1:5000', 'https://127.0.0.1:4999', 'http://example.com:4999', 'http://127.0.0.2:4999',
+  assert.equal(await tokenForUrl('http://127.0.0.1:4999/api', env), 'W'.repeat(43));
+  // localhost may resolve to ::1, where another program can listen on the same port.
+  for (const url of ['http://localhost:4999', 'http://127.0.0.1:5000','https://127.0.0.1:4999', 'http://example.com:4999', 'http://127.0.0.2:4999',
     'http://[::1]:4999', 'http://127.0.0.1.example.com:4999', 'not a url']) {
     assert.equal(await tokenForUrl(url, env), undefined, url);
   }
@@ -425,7 +428,7 @@ test('a token file that is a folder, a FIFO or too large is not read', async t =
   await mkdir(tokenFileFor(folder));
   assert.equal(await readTokenFile(tokenFileFor(folder)), undefined);
   const large = join(place.directory, 'large.sqlite');
-  await writeFile(tokenFileFor(large), tokenRecord(4317, 'L'.repeat(43)).padEnd(300, ' '));
+  await writeTokenText(tokenFileFor(large), tokenRecord(4317, 'L'.repeat(43)).padEnd(300, ' '));
   assert.equal(await readTokenFile(tokenFileFor(large)), undefined);
   if (process.platform !== 'win32') {
     const fifo = join(place.directory, 'fifo.sqlite');
@@ -440,9 +443,12 @@ test('a second server on the same port fails to start and leaves the first one\'
   const first = await place.start();
   const child = spawn(process.execPath, ['src/server.mjs'], { env: { ...process.env, PORT: String(first.port), CONTEXT_LEDGER_DB: place.database }, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.resume();
-  child.stderr.resume();
+  let errors = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', chunk => { errors += chunk; });
   const [code] = await once(child, 'exit');
   assert.notEqual(code, 0);
+  assert.match(errors, /EADDRINUSE/u, 'the second start got as far as listening');
   assert.deepEqual(await readTokenFile(tokenFileFor(place.database)), { port: first.port, token: first.token });
   const searched = await cli(['search', 'vela'], { PORT: String(first.port), CONTEXT_LEDGER_DB: place.database });
   assert.deepEqual({ code: searched.code, stdout: searched.stdout }, { code: 0, stdout: '[]\n' });
@@ -484,7 +490,7 @@ test('the MCP adapter reads the token on each call and reports a missing or refu
   assert.equal(again.isError, undefined, JSON.stringify(again));
 
   const stale = join(place.directory, 'stale.sqlite');
-  await writeFile(tokenFileFor(stale), tokenRecord(restarted.port, 'A'.repeat(43)));
+  await writeTokenText(tokenFileFor(stale), tokenRecord(restarted.port, 'A'.repeat(43)));
   for (const [env, message] of [[{ CONTEXT_LEDGER_DB: stale }, refused], [{ CONTEXT_LEDGER_DB: join(place.directory, 'none.sqlite') }, mcpNoToken], [{}, mcpNoToken]]) {
     const other = place.mcp(restarted.port, env);
     await other.request(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {} });
@@ -507,7 +513,7 @@ test('the CLI prints only a sign-in link of the expected shape, so nothing else 
   });
   await new Promise(resolve => fake.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => fake.close(resolve)));
-  await writeFile(tokenFileFor(place.database), tokenRecord(fake.address().port, 'F'.repeat(43)));
+  await writeTokenText(tokenFileFor(place.database), tokenRecord(fake.address().port, 'F'.repeat(43)));
   const env ={ PORT: String(fake.address().port), CONTEXT_LEDGER_DB: place.database };
   for (const path of ['/login?code=' + 'a'.repeat(43) + String.fromCodePoint(0x1b) + '[2J', 'https://evil.example/login?code=' + 'a'.repeat(43), '/login?code=short', 42, undefined]) {
     answer = { path };
@@ -515,4 +521,62 @@ test('the CLI prints only a sign-in link of the expected shape, so nothing else 
     assert.deepEqual({ code: run.code, stdout: run.stdout, stderr: run.stderr }, { code: 1, stdout: '', stderr: 'Context Ledger returned HTTP 200.\n' });
   }
   assert.deepEqual(seen[0], { method: 'POST', url: '/api/login', authorization: `Bearer ${'F'.repeat(43)}` });
+});
+
+test('on POSIX a token file that is a link or readable by others is not read', { skip: process.platform === 'win32' && 'Windows has no POSIX modes, and links need extra rights.' }, async t => {
+  const place = await temporary(t);
+  const real = join(place.directory, 'real.sqlite');
+  await writeTokenText(tokenFileFor(real), tokenRecord(4317, 'R'.repeat(43)));
+  assert.deepEqual(await readTokenFile(tokenFileFor(real)), { port: 4317, token: 'R'.repeat(43) });
+  const linked = join(place.directory, 'linked.sqlite');
+  await symlink(tokenFileFor(real), tokenFileFor(linked));
+  assert.equal(await readTokenFile(tokenFileFor(linked)), undefined);
+  const open = join(place.directory, 'open.sqlite');
+  await writeFile(tokenFileFor(open), tokenRecord(4317, 'O'.repeat(43)), { mode: 0o644 });
+  assert.equal(await readTokenFile(tokenFileFor(open)), undefined);
+});
+
+test('the latent reader refuses the token file under another name (a hard link)', async t => {
+  const place = await temporary(t);
+  const server = await place.start(undefined, { env: { LATENT_ROOT: place.directory } });
+  await link(tokenFileFor(place.database), join(place.directory, 'notes.md'));
+  const response = await raw(server.port, { method: 'POST', path: '/api/latent/files', body: JSON.stringify({ paths: ['notes.md'] }),
+    headers: { ...bearer(server.token), 'Content-Type': 'application/json', Origin: server.origin } });
+  assert.deepEqual({ status: response.status, body: response.body }, { status: 400, body: { error: 'Paths must not name secret files (.env, .git, keys).' } });
+  // Other files in the same root are still read.
+  await writeFile(join(place.directory, 'plan.md'), 'Ship the synthetic Vela build.\n');
+  const plan = await raw(server.port, { method: 'POST', path: '/api/latent/files', body: JSON.stringify({ paths: ['plan.md'] }),
+    headers: { ...bearer(server.token), 'Content-Type': 'application/json', Origin: server.origin } });
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+});
+
+test('a clean stop removes the token file, but not one a later start wrote', { skip: process.platform === 'win32' && 'Windows has no SIGTERM handler for a child process.' }, async t => {
+  const place = await temporary(t);
+  const server = await place.start();
+  await server.stop();
+  await assert.rejects(stat(tokenFileFor(place.database)), { code: 'ENOENT' });
+  // A file that holds another server's token is left alone.
+  const second = await place.start();
+  const other = join(place.directory, 'other.sqlite');
+  const third = await place.start(other);
+  await writeTokenText(tokenFileFor(place.database), tokenRecord(third.port, third.token));
+  await second.stop();
+  assert.deepEqual(await readTokenFile(tokenFileFor(place.database)), { port: third.port, token: third.token });
+});
+
+test('a graph publish and the demo script send nothing where the token does not go', async t => {
+  const place = await temporary(t);
+  const { seen, port } = await fakeLedger(t);
+  const packet = join(place.directory, 'packet.json');
+  await writeFile(packet, JSON.stringify({ version: 2, sessionId: 'b'.repeat(64), party: 'leo', nodes: [], edges: [] }));
+  const missing = await cli(['graph', 'publish', packet], { PORT: String(port), CONTEXT_LEDGER_DB: place.database });
+  assert.deepEqual({ code: missing.code, stdout: missing.stdout, stderr: missing.stderr }, { code: 1, stdout: '', stderr: cliNoToken + '\n' });
+  const otherPortNumber = port === 65535 ? port - 1 : port + 1;
+  await writeTokenText(tokenFileFor(place.database), tokenRecord(otherPortNumber, 'P'.repeat(43)));
+  const wrongPort = await cli(['graph', 'publish', packet], { PORT: String(port), CONTEXT_LEDGER_DB: place.database });
+  assert.match(wrongPort.stderr, new RegExp(`^The Context Ledger access token is for the ledger on port ${otherPortNumber}, so it was not sent\.`, 'u'));
+  const demo = await execute(process.execPath, ['demo/publish-reference.mjs'], { env: { ...process.env, PORT: String(port), CONTEXT_LEDGER_DB: place.database } })
+    .then(() => ({ code: 0 }), error => ({ code: error.code, stderr: error.stderr }));
+  assert.deepEqual(demo, { code: 1, stderr: `The ledger's access token is for port ${otherPortNumber}: run this with PORT=${otherPortNumber}.\n` });
+  assert.deepEqual(seen, []);
 });
