@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { diffCounts } from './diff.mjs';
+import { diffCounts, diffGraphs } from './diff.mjs';
 import { InputError } from './errors.mjs';
 
 const hashPattern = /^[a-f0-9]{64}$/u;
@@ -13,7 +13,7 @@ const digest = (...parts) => createHash('sha256').update(parts.join('\0')).diges
  * reject; a proposal is agreed only when both confirm. Agents can open and read a
  * room, but choices are recorded by people (see the decisions route in server.mjs).
  */
-export function mountRooms(database, readGraph, diffGraphs) {
+export function mountRooms(database, readGraph) {
   database.exec(`
     CREATE TABLE IF NOT EXISTS rooms (
       id TEXT PRIMARY KEY,
@@ -41,15 +41,21 @@ export function mountRooms(database, readGraph, diffGraphs) {
   // Prepared on first use: the party column comes from a migration that runs after mounting.
   let selectNewest;
 
-  /** Card G11: the newest graph of the same party, when it is not this one, and what changed. */
+  /**
+   * Card G11: the newest graph of the same party, when it is not this one, and what
+   * changed. Party names are self-asserted, so a graph from another transcript under the
+   * same name is marked sameSession: false; only the room's person can tell if it is theirs.
+   */
   function newerGraph(graph) {
     selectNewest ??= database.prepare('SELECT id FROM graphs WHERE party = ? ORDER BY rowid DESC LIMIT 1');
     const newest = selectNewest.get(graph.packet.party)?.id;
     if (!newest || newest === graph.id) return;
     const newer = readGraph(newest);
     if (newer?.packet.version !== 2) return;
-    const { any, ...counts } = diffCounts(diffGraphs(newest, graph.id));
-    return { party: graph.packet.party, graphId: newest, fromGraphId: graph.id, changed: any, counts };
+    // Both snapshots are loaded here, so the diff reads nothing again.
+    const { any, ...counts } = diffCounts(diffGraphs(graph, newer));
+    return { party: graph.packet.party, graphId: newest, fromGraphId: graph.id,
+      sameSession: newer.packet.sessionId === graph.packet.sessionId, changed: any, counts };
   }
 
   function endpoint(graph, nodeId) {

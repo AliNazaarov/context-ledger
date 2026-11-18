@@ -47,6 +47,10 @@ export function diffGraphs(older, newer) {
   }
 
   const stillThere = id => after.has(id);
+  const isKind = (id, kind) => after.get(id)?.kind === kind;
+  // Review of G11: a decision is superseded only by a supersedes edge in the newer graph,
+  // not because its ID now names a node of another kind.
+  const replaced = new Set(b.edges.filter(edge => edge.type === 'supersedes').map(edge => edge.to));
   const edgeKey = edge => `${edge.type}|${edge.from}|${edge.to}`;
   const linkKey = link => `${link.type}|${link.graph}|${link.from}|${link.to}`;
   const diff = {
@@ -59,11 +63,14 @@ export function diffGraphs(older, newer) {
       changed,
     },
     // Current in the older graph, still present but no longer current in the newer one.
-    supersededDecisions: named(missingFrom(older.currentDecisionIds, newer.currentDecisionIds).filter(stillThere)),
-    answeredQuestions: named(missingFrom(older.openQuestionIds, newer.openQuestionIds).filter(stillThere)),
+    supersededDecisions: named(missingFrom(older.currentDecisionIds, newer.currentDecisionIds)
+      .filter(id => isKind(id, 'decision') && replaced.has(id))),
+    // Still a question in the newer graph, and no longer open there.
+    answeredQuestions: named(missingFrom(older.openQuestionIds, newer.openQuestionIds).filter(id => isKind(id, 'question'))),
     openedQuestions: named(missingFrom(newer.openQuestionIds, older.openQuestionIds)),
     readyActionsGained: named(missingFrom(newer.readyActionIds, older.readyActionIds)),
-    readyActionsLost: named(missingFrom(older.readyActionIds, newer.readyActionIds).filter(stillThere)),
+    // A ready action that was removed is lost too; its label comes from the older graph.
+    readyActionsLost: named(missingFrom(older.readyActionIds, newer.readyActionIds)),
     edges: setDiff(a.edges, b.edges, edgeKey, compareBy('type', 'from', 'to')),
     links: setDiff(a.links ?? [], b.links ?? [], linkKey, compareBy('type', 'graph', 'from', 'to')),
   };
@@ -81,8 +88,10 @@ export function diffCounts(diff) {
     opened: diff.openedQuestions.length,
     edges: diff.edges.added.length + diff.edges.removed.length,
     links: diff.links.added.length + diff.links.removed.length,
+    readyGained: diff.readyActionsGained.length,
+    readyLost: diff.readyActionsLost.length,
   };
-  return { ...counts, any: Object.values(counts).some(Boolean) || diff.readyActionsGained.length + diff.readyActionsLost.length > 0 };
+  return { ...counts, any: Object.values(counts).some(Boolean) };
 }
 
 /** The list sections of a diff, in order, for paging. */

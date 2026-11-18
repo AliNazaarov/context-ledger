@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import test from 'node:test';
-import { diffCounts } from '../src/diff.mjs';
+import { diffCounts, diffGraphs, diffSections } from '../src/diff.mjs';
+import { toolList } from '../src/mcp/tools.mjs';
 import { InputError, openStore } from '../src/store.mjs';
 import { startMcp } from './mcp-client.mjs';
 
@@ -47,7 +48,7 @@ function setup() {
 const ids = list => list.map(entry => entry.id);
 
 test('a diff lists each added, removed and changed node once, with old and new values', () => {
-  const { store, v1, v2 } = setup();
+  const { store, ali, v1, v2 } = setup();
   const diff = store.diffGraphs(v2.id, v1.id);
   assert.equal(diff.fromGraphId, v1.id);
   assert.equal(diff.graphId, v2.id);
@@ -65,8 +66,12 @@ test('a diff lists each added, removed and changed node once, with old and new v
   assert.deepEqual(ids(diff.readyActionsLost), ['record']);
   assert.deepEqual(diff.edges.added, [{ from: 'port', to: 'old-port', type: 'supersedes' }]);
   assert.deepEqual(diff.edges.removed, []);
-  assert.deepEqual(diff.links.added.map(link => link.type), ['answers', 'matches']);
-  assert.deepEqual(diffCounts(diff), { added: 2, removed: 1, changed: 2, superseded: 1, answered: 0, opened: 0, edges: 1, links: 2, any: true });
+  assert.deepEqual(diff.links.added, [
+    { from: 'port', graph: ali.id, to: 'which-port', type: 'answers' },
+    { from: 'pairing', graph: ali.id, to: 'gpu-time', type: 'matches' },
+  ]);
+  assert.deepEqual(diff.links.removed, []);
+  assert.deepEqual(diffCounts(diff), { added: 2, removed: 1, changed: 2, superseded: 1, answered: 0, opened: 0, edges: 1, links: 2, readyGained: 0, readyLost: 1, any: true });
   store.close();
 });
 
@@ -82,9 +87,7 @@ test('swapping the graphs gives the mirror image, and a graph against itself giv
   assert.deepEqual(ids(back.readyActionsGained), ['record']);
   const same = store.diffGraphs(v2.id, v2.id);
   assert.equal(diffCounts(same).any, false);
-  for (const list of [same.nodes.added, same.nodes.removed, same.nodes.changed, same.supersededDecisions, same.edges.added, same.links.removed]) {
-    assert.deepEqual(list, []);
-  }
+  for (const path of diffSections) assert.deepEqual(path.reduce((node, key) => node[key], same), [], path.join('.'));
   store.close();
 });
 
@@ -99,6 +102,30 @@ test('a question answered by a newer snapshot is listed as answered', () => {
   assert.deepEqual(ids(store.diffGraphs(answered.id, asked.id).answeredQuestions), ['q']);
   assert.deepEqual(ids(store.diffGraphs(asked.id, answered.id).openedQuestions), ['q']);
   store.close();
+});
+
+test('review of G11: a reused node ID is a change of kind, not a supersession or an answer', () => {
+  const graph = (id, nodes, edges = []) => ({ id, packet: { version: 2, party: 'leo', nodes, edges },
+    currentDecisionIds: nodes.filter(node => node.kind === 'decision').map(node => node.id),
+    openQuestionIds: nodes.filter(node => node.kind === 'question' && node.status === 'open').map(node => node.id),
+    readyActionIds: nodes.filter(node => node.kind === 'action' && node.status === 'pending').map(node => node.id) });
+  const older = graph('a', [
+    { id: 'x', kind: 'decision', label: 'Use port 4400', evidenceLines: [1] },
+    { id: 'q', kind: 'question', to: 'ali', status: 'open', label: 'Which box?', evidenceLines: [1] },
+    { id: 'r', kind: 'action', status: 'pending', label: 'Record it', evidenceLines: [1] },
+  ]);
+  const newer = graph('b', [
+    { id: 'x', kind: 'goal', label: 'Use port 4400', evidenceLines: [1] },
+    { id: 'q', kind: 'question', to: 'bea', status: 'open', label: 'Which box?', evidenceLines: [1] },
+  ]);
+  const diff = diffGraphs(older, newer);
+  assert.deepEqual(diff.supersededDecisions, []);
+  assert.deepEqual(diff.answeredQuestions, []);
+  assert.deepEqual(diff.nodes.changed, [
+    { id: 'x', kind: 'goal', label: 'Use port 4400', changes: { kind: { from: 'decision', to: 'goal' } } },
+    { id: 'q', kind: 'question', label: 'Which box?', changes: { to: { from: 'ali', to: 'bea' } } },
+  ].sort((m, n) => (m.id === 'x' ? -1 : 1) - (n.id === 'x' ? -1 : 1)));
+  assert.deepEqual(diff.readyActionsLost, [{ id: 'r', kind: 'action', label: 'Record it' }], 'a removed ready action is lost too');
 });
 
 test('other parties, version 1 graphs and unknown graphs are refused or not found', () => {
@@ -116,10 +143,16 @@ test('other parties, version 1 graphs and unknown graphs are refused or not foun
 test('a room names the newer graph of a party that published again', () => {
   const { store, ali, v1, v2 } = setup();
   const room = store.openRoom({ graphIds: [v1.id, ali.id] });
-  assert.deepEqual(room.newerGraphs, [{ party: 'leo', graphId: v2.id, fromGraphId: v1.id, changed: true,
-    counts: { added: 2, removed: 1, changed: 2, superseded: 1, answered: 0, opened: 0, edges: 1, links: 2 } }]);
+  assert.deepEqual(room.newerGraphs, [{ party: 'leo', graphId: v2.id, fromGraphId: v1.id, sameSession: true, changed: true,
+    counts: { added: 2, removed: 1, changed: 2, superseded: 1, answered: 0, opened: 0, edges: 1, links: 2, readyGained: 0, readyLost: 1 } }]);
   const current = store.openRoom({ graphIds: [v2.id, ali.id] });
   assert.deepEqual(current.newerGraphs, [], 'a room on the newest graphs names none');
+  // Party names are self-asserted: another transcript under the name leo is marked as such.
+  const other = store.importTranscript({ provider: 'claude', source: 'not-leo.jsonl', transcript: say('Someone else: port 9999.') });
+  const impostor = store.publishGraph({ version: 2, sessionId: other.id, party: 'leo', edges: [],
+    nodes: [{ id: 'port', kind: 'decision', label: 'Port 9999', evidenceLines: [1] }] });
+  const marked = store.getRoom(current.id).newerGraphs;
+  assert.deepEqual(marked.map(entry => [entry.graphId, entry.sameSession]), [[impostor.id, false]]);
   store.close();
 });
 
@@ -165,7 +198,8 @@ test('graph_diff asks the ledger once, escapes labels and pages a long diff', as
     assert.ok(id < 20);
   }
   assert.ok(pages.length > 1);
-  assert.deepEqual(pages.flatMap(page => page.diff.nodes.added ?? []).length, 400);
+  // In order, with nothing skipped or repeated.
+  assert.deepEqual(pages.flatMap(page => page.diff.nodes?.added ?? []).map(node => node.id), long.nodes.added.map(node => node.id));
 
   const count = ledger.requests.length;
   for (const [args, message] of [
@@ -178,6 +212,22 @@ test('graph_diff asks the ledger once, escapes labels and pages a long diff', as
     assert.match(refused.content[0].text, message);
   }
   assert.equal(ledger.requests.length, count, 'refused calls reach no ledger');
+});
+
+test('graph_diff passes on the ledger\'s not-found and refusal answers, and its schema stays small', async t => {
+  const missing = 'e'.repeat(64);
+  const other = 'f'.repeat(64);
+  const ledger = await fakeLedger(t, url => (url.includes(missing) ? { status: 404, body: { error: 'Not found.' } }
+    : { status: 400, body: { error: 'Both graphs must be version 2 graphs of the same party.' } }));
+  const client = startMcp(ledger.port);
+  t.after(() => client.close());
+  const notFound = await client.call(1, 'graph_diff', { graphId: missing, fromGraphId: other });
+  assert.deepEqual([notFound.isError, notFound.content[0].text], [true, 'Graph not found.']);
+  const refused = await client.call(2, 'graph_diff', { graphId: other, fromGraphId: other });
+  assert.deepEqual([refused.isError, refused.content[0].text], [true, 'Both graphs must be version 2 graphs of the same party.']);
+  // The cycle-10 tools/list budget counts only that cycle's tools; this one has its own.
+  const tool = toolList.find(entry => entry.name === 'graph_diff');
+  assert.ok(JSON.stringify(tool).length <= 900, `graph_diff is ${JSON.stringify(tool).length} characters`);
 });
 
 async function startServer(t) {
@@ -218,7 +268,8 @@ test('the diff route checks its parameters with fixed messages', async t => {
   for (const [query, status, body] of [
     ['', 400, { error: 'from must be a graph ID.' }],
     ['?from=xyz', 400, { error: 'from must be a graph ID.' }],
-    [`?from=${a.id}&from=${a.id}`, 400, { error: 'Each diff parameter may appear once.' }],
+    [`?from=${a.id}&from=${a.id}`, 400, { error: 'The diff takes one from parameter and no other.' }],
+    [`?from=${a.id}&extra=1`, 400, { error: 'The diff takes one from parameter and no other.' }],
     [`?from=${'e'.repeat(64)}`, 404, { error: 'Not found.' }],
   ]) assert.deepEqual(await get(query), { status, body }, query.slice(0, 40));
 });

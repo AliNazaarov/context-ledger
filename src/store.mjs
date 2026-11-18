@@ -171,7 +171,7 @@ export function openStore(path) {
     }
     return diffGraphs(older, newer);
   };
-  const rooms = mountRooms(database, readGraph, diff);
+  const rooms = mountRooms(database, readGraph);
   try {
     migrate(database);
   } catch (error) {

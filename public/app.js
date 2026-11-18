@@ -242,7 +242,9 @@ function proposalRow(proposal, parties) {
 }
 
 const changeWords = [['added', 'added'], ['removed', 'removed'], ['changed', 'changed'], ['superseded', 'decision superseded', 'decisions superseded'],
-  ['answered', 'question answered', 'questions answered'], ['opened', 'question opened', 'questions opened'], ['edges', 'edge changed', 'edges changed'], ['links', 'link changed', 'links changed']];
+  ['answered', 'question answered', 'questions answered'], ['opened', 'question opened', 'questions opened'],
+  ['readyGained', 'action now ready', 'actions now ready'], ['readyLost', 'action no longer ready', 'actions no longer ready'],
+  ['edges', 'edge changed', 'edges changed'], ['links', 'link changed', 'links changed']];
 
 function changeSummary(counts) {
   const parts = changeWords.filter(([key]) => counts[key]).map(([key, one, many = one]) => `${counts[key]} ${counts[key] === 1 ? one : many}`);
@@ -254,12 +256,17 @@ async function fillUpdate(list, update, generation) {
   try {
     const { diff } = await request(`/api/graphs/${update.graphId}/diff?from=${update.fromGraphId}`);
     if (generation !== roomGeneration) return;
+    // Each node once, with the first thing that happened to it.
+    const seen = new Set();
     const rows = [
       ...diff.nodes.added.map(node => ['Added', node]),
       ...diff.nodes.removed.map(node => ['Removed', node]),
-      ...diff.nodes.changed.map(node => ['Changed', node]),
       ...diff.supersededDecisions.map(node => ['Superseded', node]),
-    ];
+      ...diff.answeredQuestions.map(node => ['Answered', node]),
+      ...diff.nodes.changed.map(node => ['Changed', node]),
+      ...diff.readyActionsGained.map(node => ['Now ready', node]),
+      ...diff.readyActionsLost.map(node => ['No longer ready', node]),
+    ].filter(([, node]) => !seen.has(node.id) && seen.add(node.id));
     renderRows(list, rows.slice(0, 12), ([what, node]) => {
       const item = document.createElement('li');
       item.append(`${what} ${node.kind}: `, labelElement(node.label));
@@ -277,7 +284,10 @@ function renderUpdates(room) {
     const box = document.createElement('section');
     box.className = 'room-update';
     box.setAttribute('aria-label', `Newer graph from ${update.party}`);
-    box.append(textElement('p', `${update.party} has published a newer graph (${update.graphId.slice(0, 12)}…): ${changeSummary(update.counts)}. This room still shows the older one.`));
+    // Party names are not verified: a graph from another transcript is shown, not offered.
+    const who = update.sameSession ? `${update.party} has published a newer graph`
+      : `A newer graph from another transcript uses the party name ${update.party}, which is not verified`;
+    box.append(textElement('p', `${who} (${update.graphId.slice(0, 12)}…): ${changeSummary(update.counts)}. This room still shows the older one.`));
     const list = document.createElement('ul');
     box.append(list);
     const use = textElement('button', `Use ${update.party}'s newer graph`);
@@ -289,7 +299,7 @@ function renderUpdates(room) {
       roomGraphB.value = other?.graphId ?? '';
       roomGraphA.focus();
     });
-    box.append(use);
+    if (update.sameSession) box.append(use);
     void fillUpdate(list, update, generation);
     return box;
   });
