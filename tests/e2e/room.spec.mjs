@@ -176,3 +176,24 @@ test('a decision that lands after switching rooms does not replace the new room'
   await expect(page.locator('#room-proposals > li', { hasText: 'matches' })).toContainText('leo: undecided');
   expect(page.url()).toMatch(new RegExp(`#room=${secondRoom}$`, 'u'));
 });
+
+test('a graph stored before G7 shows no mark in the room', async ({ page, request, baseURL }) => {
+  const { ali, leo } = await publishPair(request, baseURL, 'Two evenings of GPU time, unmarked');
+  // A ledger that has not republished an older graph sends nodes without a mark.
+  await page.route('**/api/rooms', async route => {
+    const response = await route.fetch();
+    const body = await response.json();
+    for (const party of body.room.parties) for (const node of party.nodes) node.grounding = null;
+    delete body.room.parties[0].nodes[0].grounding;
+    await route.fulfill({ response, json: body });
+  });
+  await page.goto('/');
+  await page.getByLabel('First graph ID').fill(leo.id);
+  await page.getByLabel('Second graph ID').fill(ali.id);
+  await page.getByRole('button', { name: 'Open room' }).click();
+  const kinds = page.locator('.party-nodes .node-kind');
+  await expect(kinds.first()).toBeVisible();
+  for (const text of await kinds.allTextContents()) expect(text).not.toMatch(/quoted|inferred|null|undefined/u);
+  await expect(page.getByRole('region', { name: 'Party ali' }).locator('.party-nodes > li', { hasText: 'No work on Sunday' }).locator('.node-kind')).toHaveText('constraint');
+  expect(await page.locator('.party-nodes > li[data-grounding]').count()).toBe(0);
+});

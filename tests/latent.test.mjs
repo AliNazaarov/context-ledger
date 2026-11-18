@@ -457,3 +457,15 @@ test('merged contract: secret paths are refused up front, templates and unassign
   await assert.rejects(read({ paths: [`src/a${String.fromCodePoint(0x1c89)}.js`] }, runtime), /File not found/);
   assert.equal(runtime.requests.length, 0);
 });
+
+test('G7 review: numbers and code names stand alone, and labels in other scripts need a match', async () => {
+  const { isGrounded } = await import('../src/latent.mjs');
+  assert.equal(isGrounded('Use port 4317', 'Port 4317.5 is reserved'), false);
+  assert.equal(isGrounded('Use port 4317', 'Port 4317. Done.'), true);
+  assert.equal(isGrounded('RETRY_LIMIT is 0.5', 'waits 0.5 s'), false, 'RETRY_LIMIT is not on the line');
+  assert.equal(isGrounded('Use retryCount', 'Reset retryCounter'), false);
+  assert.equal(isGrounded('Use retryCount', 'this.retryCount = 3'), true);
+  assert.equal(isGrounded('端口固定', 'The ledger stays on port 4317'), false);
+  assert.equal(isGrounded('端口固定', '端口保持不变'), true);
+  assert.equal(isGrounded('It is used', 'anything'), true, 'nothing to compare still keeps a latent finding');
+});

@@ -124,7 +124,8 @@ test('graph_read, graph_publish, room_read and room_open page at the schema limi
     id: hex(index), type: 'matches', from: endpoint(index < 100 ? ali : leo, index % 100), to: endpoint(index < 100 ? leo : ali, index % 100),
     choices: { ali: index % 3 ? 'confirm' : null, leo: 'confirm' }, state: index % 3 ? 'agreed' : 'proposed',
   }));
-  const party = graph => ({ party: graph.packet.party, graphId: graph.id, sessionId: graph.packet.sessionId, nodes: graph.packet.nodes,
+  const party = graph => ({ party: graph.packet.party, graphId: graph.id, sessionId: graph.packet.sessionId,
+    nodes: graph.packet.nodes.map((node, index) => ({ ...node, grounding: index < 70 ? 'quoted' : 'inferred' })),
     readyActionIds: graph.readyActionIds, currentDecisionIds: [], openQuestionIds: [] });
   const room = { id: 'e'.repeat(64), parties: [party(ali), party(leo)], proposals,
     agreedProposalIds: proposals.filter(proposal => proposal.state === 'agreed').map(proposal => proposal.id) };
@@ -141,10 +142,10 @@ test('graph_read, graph_publish, room_read and room_open page at the schema limi
   assert.equal(firstGraph.page.totalItems, 100 + 300 + 100 + 50 + 100);
   // Derived state first, so a paged graph_publish result carries it on its first page.
   assert.deepEqual(firstGraph.page.sections, { readyActionIds: [1, 50], currentDecisionIds: null, openQuestionIds: null,
-    quotedNodeIds: [51, 120], inferredNodeIds: [121, 150],
-    'packet.nodes': [151, 250], 'packet.edges': [251, 550], 'packet.links': [551, 650] });
-  // No page repeats a whole mark list in its head.
-  assert.ok(graphPages.pages.every(page => (page.graph.quotedNodeIds?.length ?? 0) < 70 || page.page.fromItem <= 51));
+    'packet.nodes': [51, 150], 'packet.edges': [151, 450], 'packet.links': [451, 550],
+    // Card G7: the marks come last, so adding them to an older graph renumbers nothing.
+    quotedNodeIds: [551, 620], inferredNodeIds: [621, 650] });
+  assert.ok(graphPages.pages.slice(0, -2).every(page => page.graph.quotedNodeIds === undefined), 'not repeated in the head');
   assert.equal(firstGraph.graph.packet.party, 'leo', 'the head repeats on every page');
   assert.equal(graphPages.pages.at(-1).graph.packet.sessionId, leo.packet.sessionId);
   assert.match(firstGraph.more.note, new RegExp(`^Items ${firstGraph.more.fromItem} to 650 remain\\. Call graph_read again with this graphId and fromItem ${firstGraph.more.fromItem}\\.$`));

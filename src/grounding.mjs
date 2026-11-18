@@ -7,6 +7,10 @@ import { isGrounded } from './latent.mjs';
  * of its content words. Otherwise it is inferred, and a reader should open the cited
  * lines before trusting it. It is a floor, not proof that the label is true.
  *
+ * isGrounded keeps a latent finding whose label has nothing to compare (only short or
+ * common words). A node needs positive evidence to be quoted, so such a label is
+ * inferred: isGrounded(label, '') is true exactly when there is nothing to compare.
+ *
  * `messages` are the session's stored messages ({ line, text }). Lists follow the
  * packet's node order, which is canonical for v2 packets.
  */
@@ -16,7 +20,8 @@ export function groundNodes(packet, messages) {
   const inferredNodeIds = [];
   for (const node of packet.nodes) {
     const cited = node.evidenceLines.map(line => textAt.get(line) ?? '').join('\n');
-    (isGrounded(node.label, cited) ? quotedNodeIds : inferredNodeIds).push(node.id);
+    const quoted = !isGrounded(node.label, '') && isGrounded(node.label, cited);
+    (quoted ? quotedNodeIds : inferredNodeIds).push(node.id);
   }
   return { quotedNodeIds, inferredNodeIds };
 }

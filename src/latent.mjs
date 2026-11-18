@@ -265,7 +265,10 @@ function anchorSpan(span, lines, getIndex) {
 
 const numberPattern =/(?<![\w.])\d+(?:\.\d+)?(?![\w])/gu;
 const identifierPattern = /\b(?:[A-Za-z]+_[A-Za-z0-9_]*|[a-z]+[A-Z][A-Za-z0-9]*)\b/gu;
-const hasToken = (text, token) => new RegExp(`(?<![\\w.])${token.replace(/\./gu, '\\.')}(?![\\w])`, 'u').test(text);
+// A number must stand alone: 4317 is not in 4317.5 (G7 review), but it is in "port 4317.".
+const hasToken = (text, token) => new RegExp(`(?<![\\w.])${token.replace(/\./gu, '\\.')}(?![\\w]|\\.\\d)`, 'u').test(text);
+// A code name must stand alone too: retryCount is not in retryCounter (G7 review).
+const hasIdentifier = (text, identifier) => new RegExp(`(?<![\\w$])${identifier}(?![\\w$])`, 'u').test(text);
 // A quoted string literal in a label: 'orbit-mail', "EUR", `shipped`. The quote must not
 // touch a letter or digit, so apostrophes inside words ("user's", "isn't") open nothing.
 const literalPattern = /(?<![\p{L}\p{N}])(['"`])([^'"`\n]{1,120})\1(?![\p{L}\p{N}])/gu;
@@ -296,7 +299,7 @@ export function isGrounded(label, citedText) {
     .map(match => match[2].trim()).filter(Boolean);
   if (!literals.every(literal => hasLiteral(citedText, literal))) return false;
   const identifiers = label.match(identifierPattern) ?? [];
-  if (identifiers.length) return identifiers.some(identifier => citedText.includes(identifier));
+  if (identifiers.length) return identifiers.some(identifier => hasIdentifier(citedText, identifier));
   if (numbers.length) return true;
   // No numbers or code names to compare. Live probe on Ali's preamble v2: a steered
   // finding said "The session timeout is set in src/util.js" while citing an
@@ -306,11 +309,21 @@ export function isGrounded(label, citedText) {
   // three-letter words count too. A short word must start a word in the cited lines
   // ("low" does not match "below"); longer words compare their first four letters.
   const words = (label.toLowerCase().match(/[a-z]{3,}/gu) ?? []).filter(word => !stopWords.has(word));
-  if (!words.length) return true;
+  // G7 review: a label in another script (Han, Cyrillic) has no [a-z] words. Each run of
+  // its letters counts as a word, matched by any two letters in a row (one for a
+  // one-letter run), so an all-Han label cannot pass on unrelated English.
+  const foreign = (label.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter(run => /\P{ASCII}/u.test(run));
+  // Nothing to compare (only short or common words): no evidence either way, kept.
+  if (!words.length && !foreign.length) return true;
   const cited = citedText.toLowerCase();
   return words.some(word => (word.length === 3
     ? new RegExp(`(?<![a-z])${word}`, 'u').test(cited)
-    : cited.includes(word.slice(0, 4))));
+    : cited.includes(word.slice(0, 4))))
+    || foreign.some(run => {
+      const letters = Array.from(run);
+      if (letters.length === 1) return cited.includes(run);
+      return letters.slice(1).some((letter, index) => cited.includes(letters[index] + letter));
+    });
 }
 
 const stopWords = new Set(['the', 'and', 'for', 'are', 'was', 'not', 'but', 'its', 'set', 'get', 'has', 'had', 'can',

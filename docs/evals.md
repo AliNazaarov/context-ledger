@@ -1389,14 +1389,14 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
 
 ## G7 — Quoted or inferred nodes (defined 2026-11-17, before the code)
 
-When an agent publishes a graph, each node is marked **quoted** or **inferred**. Quoted means the transcript lines the node cites hold what its label claims, by the same floor the latent findings use (`isGrounded` in `src/latent.mjs`): every number and quoted literal in the label appears in the cited lines, at least one code name does when the label has any, and otherwise at least one content word does. Inferred means they do not, so a reader should open the cited lines before trusting the node. It is a floor, not proof that a label is true.
+When an agent publishes a graph, each node is marked **quoted** or **inferred**. Quoted means the transcript lines the node cites hold what its label claims, by the same floor the latent findings use (`isGrounded` in `src/latent.mjs`): every number and quoted literal in the label appears in the cited lines, at least one code name does when the label has any, and otherwise at least one content word does. Inferred means they do not, so a reader should open the cited lines before trusting the node. A label with nothing to compare (only short or common words) is inferred too: a node needs positive evidence to be quoted. It is a floor, not proof that a label is true.
 
 ### What is tested (synthetic transcripts only)
 
 - **Publish:** a graph with a node whose label repeats its cited line ("Use port 4317", citing "the ledger stays on port 4317") and a node whose label adds a number the line does not hold ("Retry 5 times", citing "retry a few times") is stored with `quotedNodeIds` naming the first and `inferredNodeIds` naming the second, in the graph's canonical node order. Both v1 and v2 graphs are marked.
 - **Cited text:** only the cited lines count. A label whose facts are on another line of the same transcript is inferred.
 - **Graphs from before G7:** a stored graph without marks gets them when the same packet is published again; its ID and creation time do not change. A graph that is never republished stays unmarked, and every reader treats it as unmarked rather than as inferred.
-- **`context_for`:** an inferred node's line ends its citation with `, inferred`, and the briefing then says once what inferred means. A graph with only quoted nodes reads as it did before G7, so the cached prefix does not change for it.
+- **`context_for`:** an inferred node's line ends its citation with `, inferred`, and the briefing then says once what inferred means, in its last section so that the stable prefix does not move. A graph with only quoted nodes reads byte for byte as it did before G7.
 - **Browser:** the room view shows "quoted" or "inferred" next to each node's kind, as text, and nothing for an unmarked node. A Playwright check covers a room with one node of each.
 - **Read API:** `GET /api/graphs/:id` and `graph_read` return the two lists with the graph; the room API puts the mark on each node.
 
