@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { allowedRequest, ledgerEnv, publishTake, speed } from '../demo/record-console.mjs';
+import { allowedRequest, consoleFiles, ledgerEnv, publishTake, speed } from '../demo/record-console.mjs';
 
 // Card U3: the shot list fits 60 seconds at an easy pace, what it shows is in the demo
 // data, and the recorder keeps to the console and to its own files.
@@ -45,18 +45,26 @@ test('U3: the answer and the proof the script narrates are in the demo recording
   assert.deepEqual(decision.evidenceLines, [27, 28]);
   // The whole replay fits the growth shot (play to finished, 27 s) at the recorder's speed.
   assert.ok(recording.durationMs / speed / 1000 <= 27, 'the replay fits the growth shot');
-  const cues = read('docs/video/u3-script.md').match(/cue `([a-zA-Z]+)`/gu).map(cue => cue.slice(5, -1));
-  const recorder = read('demo/record-console.mjs');
-  for (const cue of new Set(cues)) assert.ok(recorder.includes(`mark('${cue}')`), `the recorder marks ${cue}`);
+  // Review round 2: the recorder marks every cue, once, in the order of the take, and the
+  // script names only those cues.
+  const order = ['emptyOffice', 'play', 'firstLink', 'answerLink', 'finished', 'proofOpen', 'numbers', 'end'];
+  const marked = [...read('demo/record-console.mjs').matchAll(/mark\('([a-zA-Z]+)'\)/gu)].map(match => match[1]);
+  assert.deepEqual(marked, order);
+  const named = [...read('docs/video/u3-script.md').matchAll(/`([a-zA-Z]+)`/gu)].map(match => match[1]).filter(name => /^[a-z]+[A-Z]?[a-zA-Z]*$/u.test(name) && order.includes(name));
+  for (const cue of ['play', 'finished', 'answerLink', 'proofOpen', 'numbers', 'end']) assert.ok(named.includes(cue), `the script uses cue ${cue}`);
 });
 
 test('U3: the recorder allows only console files, starts the ledger with a small environment, and publishes only its own take', async t => {
   const origin = 'http://127.0.0.1:4999';
   assert.equal(allowedRequest(`${origin}/console/?demo`, origin), true);
   assert.equal(allowedRequest(`${origin}/console/demo-recording.json`, origin), true);
-  for (const url of [`${origin}/api/graphs`, `${origin}/`, 'https://example.com/console/', 'http://127.0.0.1:5000/console/']) {
+  for (const url of [`${origin}/api/graphs`, `${origin}/`, 'https://example.com/console/', 'http://127.0.0.1:5000/console/', `${origin}/console/unlisted.js`]) {
     assert.equal(allowedRequest(url, origin), false, url);
   }
+  assert.equal(allowedRequest(`${origin}/console/`, origin, 'POST'), false, 'only GET');
+  // The list is exactly the console's files.
+  const files = readdirSync(new URL('../public/console/', import.meta.url)).map(name => `/console/${name}`).filter(path => !path.endsWith('index.html'));
+  assert.deepEqual([...consoleFiles].sort(), ['/console/', ...files].sort());
   const env = ledgerEnv('/tmp/x.sqlite', { PATH: 'p', NODE_OPTIONS: '--require evil', LATENT_ROOT: '/home/me', CONTEXT_LEDGER_DB: '/real.sqlite' });
   assert.deepEqual(env, { PATH: 'p', PORT: '0', CONTEXT_LEDGER_DB: '/tmp/x.sqlite' });
 
@@ -76,4 +84,11 @@ test('U3: the recorder allows only console files, starts the ledger with a small
   const empty = join(root, 'empty');
   await mkdir(empty);
   await assert.rejects(publishTake(empty, out, 'none', {}), /No video was recorded/u);
+  // Review round 2: a take with the same name never overwrites, and a half-written pair is rolled back.
+  await assert.rejects(publishTake(staging, out, 'stamp', { play: 2 }), /EEXIST/u);
+  assert.equal(await readFile(join(out, 'console-demo-stamp.cues.json'), 'utf8'), JSON.stringify({ play: 1 }, null, 2) + '\n');
+  await writeFile(join(out, 'console-demo-half.cues.json'), 'already here');
+  await assert.rejects(publishTake(staging, out, 'half', {}), /EEXIST/u);
+  assert.equal((await readdir(out)).includes('console-demo-half.webm'), false, 'the video this call wrote is removed');
+  assert.equal(await readFile(join(out, 'console-demo-half.cues.json'), 'utf8'), 'already here');
 });

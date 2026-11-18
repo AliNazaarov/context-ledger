@@ -1482,3 +1482,11 @@ The browser take itself is not run in the suites: it needs about 45 seconds and 
   - (medium) The ledger inherited the caller's environment, and the page could load anything. It now gets a small environment, and the take fails if the page loads anything outside the console's files.
   - (medium) The install line assumed G8, and "the line behind every fact" overstated what citations prove. Before G8 the script has its own line, and the growth shot is described as a replay of agents citing their transcripts.
   - (medium) The tests are now as listed above.
+- **Codex, round 2** (of 5dff274): the privacy, isolation, timing and wording fixes hold. Fixed in the next commit:
+  - (high) A take with the same name could overwrite an earlier one, or leave half a pair. The name now has a random part, both files are created exclusively, and a failed publish removes what it wrote.
+  - (medium) A failed spawn could stall cleanup. The ledger's end is now the first of close or error, shutdown is bounded, and cleanup failures are reported.
+  - (medium) The request guard accepted any path under `/console/`. It now allows only GET requests for the console's own files (a test pins that list to the folder), and service workers are blocked.
+  - (low) The cue test now checks that the recorder marks every cue once, in order, and that the script uses them.
+  - A new take after these changes loaded nothing outside the list, and the earlier takes in the folder were kept.
+- **Not covered by the suites:** the browser take itself, and a spawn failure, which would need the ledger start exported. Both are in the recorder's code paths, and the take was run by hand.
+- **Suites (Windows):** `npm run -s test:graph` 9/9; node 218/219 (one skipped); Playwright 17/17; Python runtime 192 run, 50 skipped, OK.

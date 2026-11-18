@@ -9,6 +9,8 @@
 // It writes console-demo-<time>.webm and console-demo-<time>.cues.json, and never touches
 // any other file in the output folder.
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { constants } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -20,10 +22,14 @@ export const size = { width: 1280, height: 720 };
 export const speed = 1.3;
 const startDeadlineMs = 15_000;
 
-/** Only the console's own files may load during a take; the demo needs no API. */
-export function allowedRequest(url, origin) {
+/** The console's own files, the only requests a take may make; the demo needs no API. */
+export const consoleFiles = new Set(['/console/', '/console/console.css', '/console/office.css', '/console/console.mjs',
+  '/console/office.mjs', '/console/model.mjs', '/console/source.mjs', '/console/brain.mjs', '/console/evidence.mjs',
+  '/console/demo-recording.json']);
+
+export function allowedRequest(url, origin, method = 'GET') {
   const parsed = new URL(url);
-  return parsed.origin === origin && (parsed.pathname === '/console/' || parsed.pathname.startsWith('/console/'));
+  return method === 'GET' && parsed.origin === origin && consoleFiles.has(parsed.pathname);
 }
 
 /** A small environment for the ledger: no inherited preload, latent settings or database. */
@@ -33,23 +39,36 @@ export function ledgerEnv(database, from = process.env) {
   return { ...kept, PORT: '0', CONTEXT_LEDGER_DB: database };
 }
 
-/** Copy the finished take out of its staging folder under a name of its own. */
+/**
+ * Copy the finished take out of its staging folder under a name of its own. Both files
+ * are created exclusively, so an existing file is never overwritten; if either cannot be
+ * written, the files this call created are removed and the error is raised.
+ */
 export async function publishTake(staging, outDir, stamp, cues) {
   const [video] = (await readdir(staging)).filter(name => name.endsWith('.webm'));
   if (!video) throw new Error('No video was recorded.');
   await mkdir(outDir, { recursive: true });
   const base = join(outDir, `console-demo-${stamp}`);
-  await copyFile(join(staging, video), `${base}.webm`);
-  await writeFile(`${base}.cues.json`, JSON.stringify(cues, null, 2) + '\n');
+  const created = [];
+  try {
+    await copyFile(join(staging, video), `${base}.webm`, constants.COPYFILE_EXCL);
+    created.push(`${base}.webm`);
+    await writeFile(`${base}.cues.json`, JSON.stringify(cues, null, 2) + '\n', { flag: 'wx' });
+    created.push(`${base}.cues.json`);
+  } catch (error) {
+    for (const path of created) await rm(path, { force: true });
+    throw error;
+  }
   return `${base}.webm`;
 }
 
 function startLedger(database) {
   const child = spawn(process.execPath, [join(repo, 'src', 'server.mjs')], { cwd: repo, env: ledgerEnv(database), stdio: ['ignore', 'pipe', 'inherit'] });
-  const exited = new Promise(done => child.once('exit', done));
+  // A failed spawn emits error and may never emit exit, so either one ends the process.
+  const ended = new Promise(done => { child.once('close', done); child.once('error', done); });
   const stop = async () => {
-    if (child.exitCode === null && child.signalCode === null) child.kill();
-    await exited;
+    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) child.kill();
+    await Promise.race([ended, new Promise(done => setTimeout(done, 5000))]);
   };
   const ready = new Promise((resolve, reject) => {
     let output = '';
@@ -76,9 +95,14 @@ async function record(outDir) {
     const browser = await chromium.launch();
     cleanups.unshift(() => browser.close());
     const staging = join(work, 'video');
-    const context = await browser.newContext({ viewport: size, recordVideo: { dir: staging, size } });
+    const context = await browser.newContext({ viewport: size, recordVideo: { dir: staging, size }, serviceWorkers: 'block' });
     const blocked = [];
-    await context.route('**/*', route => (allowedRequest(route.request().url(), origin) ? route.continue() : (blocked.push(route.request().url()), route.abort())));
+    await context.route('**/*', route => {
+      const request = route.request();
+      if (allowedRequest(request.url(), origin, request.method())) return route.continue();
+      blocked.push(`${request.method()} ${request.url()}`);
+      return route.abort();
+    });
     const page = await context.newPage();
     const started = Date.now();
     const cues = { speed, size };
@@ -106,10 +130,14 @@ async function record(outDir) {
     mark('end');
     await context.close();
     if (blocked.length) throw new Error(`The take tried to load something outside the console: ${blocked.join(', ')}`);
-    return await publishTake(staging, outDir, new Date().toISOString().replace(/[:.]/gu, '-'), cues);
+    // The time plus a random part, so two takes in the same millisecond cannot share a name.
+    const stamp = `${new Date().toISOString().replace(/[:.]/gu, '-')}-${randomBytes(3).toString('hex')}`;
+    return await publishTake(staging, outDir, stamp, cues);
   } finally {
-    // Every cleanup runs, even when one fails.
-    for (const cleanup of cleanups) await cleanup().catch(() => {});
+    // Every cleanup runs, even when one fails; failures are reported, not hidden.
+    for (const cleanup of cleanups) {
+      await cleanup().catch(error => console.error(`Cleanup failed; something may be left in ${work}: ${error.message}`));
+    }
   }
 }
 
