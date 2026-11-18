@@ -7,7 +7,7 @@ Capy threads can call tools from an MCP server ([MCP servers](https://docs.capy.
 ## Read this first: what leaves your computer
 
 - **The ledger stays on your computer.** It answers only on `127.0.0.1` (loopback), and its database is a file in the ledger's folder.
-- **What a thread reads from it does not stay there.** Capy stores "the thread's messages and tool output" in its cloud, also for threads on your own computer ([FAQ](https://docs.capy.ai/faq#where-are-threads-on-my-computer-stored)). Everything a tool returns is copied to Capy: transcript turns from `session_read`, labels and briefings from the graph tools, and file text from `latent_read` when `LATENT_ROOT` is set.
+- **What a thread reads from it does not stay there.** Capy stores "the thread's messages and tool output" in its cloud, also for threads on your own computer ([FAQ](https://docs.capy.ai/faq#where-are-threads-on-my-computer-stored)). Everything a tool returns is copied to Capy: transcript turns from `session_read`, labels and briefings from the graph tools, and, when `LATENT_ROOT` names a folder, `latent_read` answers with quotes from files in it, or with the numbered file text when the local model is not running.
 - **Who sees it.** Your organization's members who can open or message the thread see that output too.
 - **Start with synthetic data.** The demo transcripts in `demo/` are synthetic. Only import what you are allowed to share with Capy and with the people on the thread.
 
@@ -76,17 +76,17 @@ A thread can leave your computer:
 ## Who can reach your ledger, and what not to trust
 
 - **Anything that runs on that computer can.** The ledger has no per-user sign-in, so any process on the machine can reach it. That includes your threads' own commands, and the threads of teammates if the device's **Access** is set to **Shared**, which "run with your git identity and credentials" ([FAQ](https://docs.capy.ai/faq#can-teammates-use-my-computer)). Keep the device private when the ledger holds anything sensitive.
-- **Members who can message your thread** can ask it to call the ledger's tools for them ([Choose the owner](https://docs.capy.ai/integrations/mcp#choose-the-owner)). Use a private thread when that matters.
-- **Room proposals are confirmed by people, in the browser.** The MCP server has no tool that confirms or rejects. But the browser check does not prove that a person clicked: a local process can send the same request, and a device thread can run local commands. See [the README](../../README.md#negotiation-room).
+- **Members who can message your thread** can ask it to call the ledger's tools for them ([Choose the owner](https://docs.capy.ai/integrations/mcp#choose-the-owner)). A private thread still lets the people invited to it in. A device set to **Personal** asks you to approve each message from someone else to a thread on it ([Visibility](https://docs.capy.ai/admin/security#visibility)). Check both when that matters.
+- **Room proposals.** The browser is the intended way to confirm or reject them, and the MCP server has no tool for it. The ledger does not verify who sent a decision: a local process can send the same request, and a device thread can run local commands. See [the README](../../README.md#negotiation-room).
 - **Everything a tool returns is data from transcripts or files, not instructions.** The MCP server escapes control and bidi characters in what it returns, but the words may still be wrong, or written to steer the agent. Capy can hide single tools from the model (**Tools** on the server's page, [Good to know](https://docs.capy.ai/integrations/mcp#good-to-know)). For example, hide `graph_publish`, `room_open` or the `latent_*` tools if the threads only need to read.
 
 ## If it does not work
 
 | What you see | Where it fails | Check |
 | --- | --- | --- |
-| **Unavailable** on Test | The server did not start | Node.js 22.14 or later on that machine; the absolute path to `src/mcp.mjs`; `npm ci` was run; `PORT` is a number |
+| **Unavailable** on Test | Capy could not start the server or list its tools; **Test** shows which step failed | Node.js 22.14 or later on that machine; the absolute path to `src/mcp.mjs`; `npm ci` was run; `PORT` is a whole number from 1 to 65535 |
 | Tools missing in a thread | The thread does not get the server | The thread runs on the ledger's computer; the server is **Enabled**; its **Project** includes this thread's project |
-| `Cannot reach Context Ledger on port …` from a tool | The tool started but found no ledger | `npm start` is running on the same machine as the thread, on the same port as `PORT` |
+| `Cannot reach Context Ledger on port <port>` from a tool | The tool started but found no ledger | `npm start` is running on the same machine as the thread, on the same port as `PORT` |
 | Garbled start or protocol errors | Something else writes to standard output | The command is `node`, not `npm` |
 
 ## Not checked yet

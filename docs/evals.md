@@ -1418,3 +1418,8 @@ A guide, `docs/integrations/capy.md`, for adding Context Ledger as an MCP server
   - (high) "Only you" was presented as access control. It only decides which threads get the tools; any local process, a shared device and members who message the thread can reach the ledger.
   - (medium) Missing: automatic offline moves and checkpoints, the Dock device choice, prerequisites and `npm ci`, a real check from a thread (Test only lists tools), split troubleshooting, a copyable `AGENTS.md` note, and the transcript and file-reading tools.
   - (low) The key rule and the Name, Working directory and Also listens on fields; and the TOML import, now marked untried.
+- **Codex, round 2** (of f156a36): the cloud-storage and "Only you" fixes hold, as do the moves, prerequisites and real-check fixes. Fixed in the next commit:
+  - (medium) The room wording, in the guide and in the README, now says the browser is the intended way and the ledger does not verify who sent a decision.
+  - (medium) Private threads still admit invited people, and a Personal device asks before others message its threads. The guide says to check both.
+  - (low) What `latent_read` returns, a broader **Unavailable** row, the port placeholder, and the `PORT` range.
+- **Still owed:** a person with a Capy organization follows the guide once and records the result here.
