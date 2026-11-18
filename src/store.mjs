@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { graphContext } from './context.mjs';
 import { InputError } from './errors.mjs';
 import { canonicalPacket, validateGraph } from './graph.mjs';
-import { defaultProject, migrate } from './migrate.mjs';
+import { defaultProject, migrate, refuseNewerSchema } from './migrate.mjs';
 import { mountRooms } from './rooms.mjs';
 
 export { InputError };
@@ -136,9 +136,15 @@ function serializeGraphPacket(packet) {
 export function openStore(path) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const database = new DatabaseSync(path);
+  database.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
+  // Before any DDL, so a newer file is refused unchanged; migrate() checks again under its lock.
+  try {
+    refuseNewerSchema(database);
+  } catch (error) {
+    database.close();
+    throw error;
+  }
   database.exec(`
-    PRAGMA busy_timeout = 5000;
-    PRAGMA foreign_keys = ON;
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex')),

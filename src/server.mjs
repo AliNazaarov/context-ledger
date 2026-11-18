@@ -116,8 +116,9 @@ const routes = [
     if (provider && !isProvider(provider)) throw new InputError('Unknown provider.');
     // A project slug filters; an unknown one matches nothing. Errors never echo it.
     if (url.searchParams.getAll('project').length > 1) throw new InputError('project may appear once.');
-    const project = url.searchParams.get('project') ?? '';
-    if (project && !isProjectSlug(project)) throw new InputError(projectSlugRule);
+    // A present but empty project is invalid, not "every project".
+    const project = url.searchParams.get('project');
+    if (project !== null && !isProjectSlug(project)) throw new InputError(projectSlugRule);
     // The browser and the CLI send neither limit nor after and get every match, as before.
     if (!url.searchParams.has('limit') && !url.searchParams.has('after')) return { sessions: store.list(query, provider, project) };
     const { limit = 100, after } = listParameters(url, []);

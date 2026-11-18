@@ -26,13 +26,19 @@ export const defaultProject = 'default';
  * foreign key, so sessions.project_id stays nullable and the trigger fills it.
  * Recreate the triggers if graphs, rooms or sessions is ever rebuilt.
  */
+const refuseNewer = version => {
+  if (version > schemaVersion) {
+    throw new Error(`This ledger database was written by a newer Context Ledger (schema ${version}). ` +
+      'Use that version or another CONTEXT_LEDGER_DB.');
+  }
+};
+
+/** Throws, writing nothing, when the file has a newer schema than this build. */
+export function refuseNewerSchema(database) {
+  refuseNewer(userVersion(database));
+}
+
 export function migrate(database) {
-  const refuseNewer = version => {
-    if (version > schemaVersion) {
-      throw new Error(`This ledger database was written by a newer Context Ledger (schema ${version}). ` +
-        'Use that version or another CONTEXT_LEDGER_DB.');
-    }
-  };
   refuseNewer(userVersion(database));
   if (userVersion(database) === schemaVersion) return;
 

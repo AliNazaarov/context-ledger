@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { defaultProject, schemaVersion } from '../src/migrate.mjs';
 import { InputError, openStore } from '../src/store.mjs';
 
@@ -259,7 +260,83 @@ test('the version 2 step is safe to repeat, atomic, and newer files are refused 
   const bytes = await readFile(newer);
   assert.throws(() => openStore(newer),
     { message: 'This ledger database was written by a newer Context Ledger (schema 3). Use that version or another CONTEXT_LEDGER_DB.' });
-  assert.deepEqual(await readFile(newer), bytes);
+  assert.ok((await readFile(newer)).equals(bytes), 'the newer file is unchanged');
+
+  // Review round 1: a newer file whose schema no longer has the legacy tables gets no DDL
+  // before it is refused (openStore used to create sessions, graphs and rooms first).
+  const reshaped = join(directory, 'reshaped.sqlite');
+  const future = new DatabaseSync(reshaped);
+  future.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY, text TEXT NOT NULL) STRICT; PRAGMA user_version = 3;');
+  future.close();
+  const reshapedBytes = await readFile(reshaped);
+  assert.throws(() => openStore(reshaped), /newer Context Ledger \(schema 3\)/u);
+  // Compared with equals: a deepEqual diff of two database files can exhaust the heap.
+  assert.ok((await readFile(reshaped)).equals(reshapedBytes), 'the reshaped file is unchanged');
+  const reopened = new DatabaseSync(reshaped);
+  assert.deepEqual(rows(reopened, "SELECT name FROM sqlite_master WHERE type = 'table'"), [{ name: 'messages' }]);
+  reopened.close();
+});
+
+test('a failed session insert leaves no new project behind and the store keeps working', async t => {
+  // Review round 1, finding 3: the project and the session commit together or not at all.
+  const { directory, keep } = await scratchDirectory(t, 'ledger-p1b-rollback-');
+  const path = join(directory, 'ledger.sqlite');
+  const store = openStore(path);
+  keep(() => store.close());
+  const check = new DatabaseSync(path);
+  keep(() => check.close());
+  check.exec("CREATE TRIGGER test_refuse BEFORE INSERT ON sessions WHEN NEW.source = 'refused.jsonl' BEGIN SELECT RAISE(ABORT, 'refused for the test'); END;");
+  assert.throws(() => store.importTranscript({ provider: 'claude', source: 'refused.jsonl', transcript: claude('Never stored.'), project: 'fresh' }),
+    /refused for the test/u);
+  assert.deepEqual(rows(check, 'SELECT slug FROM projects ORDER BY rowid'), [{ slug: 'default' }]);
+  assert.equal(check.prepare('SELECT count(*) AS n FROM sessions').get().n, 0);
+  // No transaction was left open: the next import commits and another connection sees it.
+  const next = store.importTranscript({ provider: 'claude', source: 'kept.jsonl', transcript: claude('Stored.'), project: 'fresh' });
+  assert.equal(next.project, 'fresh');
+  assert.deepEqual(rows(check, 'SELECT slug FROM projects ORDER BY rowid'), [{ slug: 'default' }, { slug: 'fresh' }]);
+});
+
+test('two processes racing to import the same bytes into two projects create only the winner\'s project', async t => {
+  // Review round 1, finding 4. This test holds the write lock until both children have
+  // looked the session up and missed, so both reach BEGIN IMMEDIATE every run. Without the
+  // second lookup under the lock, the loser would create its project for nothing.
+  const { directory, keep } = await scratchDirectory(t, 'ledger-p1b-race-');
+  const path = join(directory, 'ledger.sqlite');
+  openStore(path).close();
+  const storeUrl = pathToFileURL(join(process.cwd(), 'src/store.mjs')).href;
+  const transcript = claude('Raced synthetic transcript.');
+  const holder = new DatabaseSync(path);
+  keep(() => holder.close());
+  holder.exec('BEGIN IMMEDIATE');
+  const start = project => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', `import { openStore } from ${JSON.stringify(storeUrl)};
+      const store = openStore(process.env.LEDGER_FILE);
+      process.stdout.write('ready\\n');
+      const summary = store.importTranscript({ provider: 'claude', source: 'race.jsonl', transcript: process.env.TRANSCRIPT, project: process.env.PROJECT });
+      process.stdout.write(JSON.stringify(summary) + '\\n');
+      store.close();`], { env: { ...process.env, LEDGER_FILE: path, TRANSCRIPT: transcript, PROJECT: project }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    const ready = new Promise(resolve => child.stdout.on('data', chunk => {
+      stdout += chunk;
+      if (stdout.includes('ready\n')) resolve();
+    }));
+    return { ready, exit: once(child, 'exit').then(([code]) => ({ code, stderr, stdout })) };
+  };
+  const children = [start('left'), start('right')];
+  await Promise.all(children.map(child => child.ready));
+  // Each child now misses the first lookup and waits for the lock (busy_timeout is 5 s).
+  await new Promise(resolve => setTimeout(resolve, 750));
+  assert.equal(holder.prepare('SELECT count(*) AS n FROM sessions').get().n, 0, 'neither child could write while the lock was held');
+  holder.exec('ROLLBACK');
+  const results = await Promise.all(children.map(child => child.exit));
+  for (const result of results) assert.equal(result.code, 0, result.stderr);
+  const [left, right] = results.map(result => JSON.parse(result.stdout.split('\n')[1]));
+  assert.deepEqual(left, right);
+  assert.ok(['left', 'right'].includes(left.project));
+  assert.deepEqual(rows(holder, 'SELECT slug FROM projects ORDER BY rowid'), [{ slug: 'default' }, { slug: left.project }]);
+  assert.equal(holder.prepare('SELECT count(*) AS n FROM sessions').get().n, 1);
 });
 
 test('an import names its project, a new slug creates it once, and the default is default', () => {
@@ -418,7 +495,8 @@ test('HTTP import takes a project, the session list filters by it, and the CLI s
 
   // Bad or repeated filters are 400 with fixed text that never echoes the value.
   const secret = 'Secret-Slug';
-  for (const path of [`/api/sessions?project=${secret}`, `/api/sessions?project=${secret}&limit=5`]) {
+  for (const path of [`/api/sessions?project=${secret}`, `/api/sessions?project=${secret}&limit=5`,
+    '/api/sessions?q=vega&project=', '/api/sessions?q=vega&project=&limit=5']) {
     assert.deepEqual(await get(path), { status: 400, body: { error: 'project must be a slug of at most 64 lowercase letters, digits and single hyphens.' } });
   }
   assert.deepEqual(await get('/api/sessions?project=acme&project=beta'), { status: 400, body: { error: 'project may appear once.' } });
