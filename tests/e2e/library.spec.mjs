@@ -56,7 +56,7 @@ test('imports both agents, searches across messages and opens a cited transcript
   await expect(page.getByText('No matching transcripts.')).toBeVisible();
 });
 
-test('makes imports idempotent and rejects a malformed or foreign-origin import atomically', async ({ request, baseURL }) => {
+test('makes imports idempotent and rejects an unreadable or foreign-origin import atomically', async ({ request, baseURL }) => {
   const transcript = asJsonl({ type: 'user', message: { role: 'user', content: 'Kepler uniqueness check' } });
   const data = { provider: 'claude', source: 'kepler.jsonl', transcript };
   const headers = { origin: baseURL };
@@ -67,11 +67,14 @@ test('makes imports idempotent and rejects a malformed or foreign-origin import 
   expect((await first.json()).session.id).toBe((await second.json()).session.id);
 
   const candidate = asJsonl({ type: 'user', message: { role: 'user', content: 'Discard this partial record' } });
+  const before = (await (await request.get('/api/sessions')).json()).sessions;
+  // Card I2: a file with no readable JSON line is still refused as a whole.
   const malformed = await request.post('/api/import', {
     headers,
-    data: { ...data, transcript: `${candidate}\n{invalid` },
+    data: { ...data, transcript: 'Discard this partial record\n{invalid' },
   });
   expect(malformed.status()).toBe(400);
+  expect((await malformed.json()).error).toBe('Invalid JSONL at line 1.');
   const foreign = await request.post('/api/import', {
     headers: { origin: 'https://foreign.example' },
     data: { ...data, transcript: candidate },
@@ -79,6 +82,8 @@ test('makes imports idempotent and rejects a malformed or foreign-origin import 
   expect(foreign.status()).toBe(403);
   const list = await request.get('/api/sessions?q=discard');
   expect((await list.json()).sessions).toEqual([]);
+  // Review round 1: nothing at all was stored, not only nothing matching the search.
+  expect((await (await request.get('/api/sessions')).json()).sessions).toEqual(before);
   const repeated = await request.get('/api/sessions?q=kepler');
   expect((await repeated.json()).sessions).toHaveLength(1);
 });
@@ -95,4 +100,26 @@ test('the library search lists all 150 matching transcripts', async ({ page, req
   await page.getByLabel('Search transcripts').fill(keyword);
   await page.getByRole('button', { name: 'Search', exact: true }).click();
   await expect(page.getByText('150 transcripts', { exact: true })).toBeVisible();
+});
+
+test('I2: an import with unreadable lines keeps the readable messages and says which lines it skipped', async ({ page, request, baseURL }) => {
+  const transcript = [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'Where does the Cygnus log go?' } }),
+    'not json at all',
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Into cygnus.log.' }] } }),
+    '{"type":"assistant","mess',
+  ].join('\n');
+  const response = await request.post('/api/import', { headers: { origin: baseURL }, data: { provider: 'claude', source: 'cygnus-api.jsonl', transcript } });
+  expect(response.ok()).toBe(true);
+  const body = await response.json();
+  expect(body.skipped).toEqual({ count: 2, lines: [2, 4] });
+  expect(body.session.messageCount).toBe(2);
+  expect(body.session.skipped).toBeUndefined();
+
+  await page.goto('/');
+  await page.getByLabel('Source agent').selectOption('claude');
+  await page.getByLabel('Transcript file').setInputFiles({ name: 'cygnus.jsonl', mimeType: 'application/x-ndjson', buffer: Buffer.from(transcript + '\n') });
+  await page.getByRole('button', { name: 'Import transcript' }).click();
+  await expect(page.getByText('Partially imported cygnus.jsonl: kept 2 messages, skipped 2 unreadable lines (2, 4). Messages on those lines are missing.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Line 3', { exact: true })).toBeVisible();
 });

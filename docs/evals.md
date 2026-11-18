@@ -1386,3 +1386,35 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## I2 — Tolerant JSONL parsing (defined 2026-11-17, before implementation)
+
+Real data showed that one unreadable line, often a last line cut off while the agent was still writing, made the whole session fail to import. I2 skips such lines and says how many it skipped. It changes only the parser, not the database.
+
+All tests use synthetic transcripts.
+
+### What is tested and the expected result
+
+- **Some lines unreadable.** A Claude Code transcript and a Codex transcript, each with readable messages around unreadable lines (a cut-off last line, a line of plain text, an unclosed object), import. The result names how many lines were skipped and the first ten of their line numbers.
+- **Line numbers stay true.** Every message keeps the line number it has in the file, so a graph citing line 4 still points at line 4 after earlier lines were skipped, and a graph citing a skipped line is refused.
+- **Nothing readable.** A file in which no line is JSON is still refused with `Invalid JSONL at line N.`, naming the first line, and nothing is stored.
+- **Readable but empty.** A file of readable lines with no messages is still refused with `No supported conversation messages found.`
+- **Same file, same answer.** Importing the same file again returns the same session and the same skip report.
+- **A clean file is unchanged.** A transcript with no unreadable line returns exactly the session summary it returned before I2, with no skip report.
+- **The browser says so.** After an import with skipped lines, the import status reads "Partially imported", with how many messages were kept, how many lines were skipped and which ones, and that messages on those lines are missing.
+- **Through HTTP.** `POST /api/import` returns the skip report beside the session, and a file with nothing readable is still a 400 that stores nothing.
+
+### Acceptance for the code
+
+- `node --test tests/*.test.mjs` and `npx playwright test` pass, with the cases above in `tests/import-tolerant.test.mjs` and the library browser spec.
+- No new dependency and no schema change.
+
+### I2 results (2026-11-17)
+
+- `tests/import-tolerant.test.mjs` 8/8 and the library browser spec 4/4. Full suites on Windows: `npm run -s test:graph` 9/9, `node --test tests/*.test.mjs` 199 (198 pass, 1 skipped), `npx playwright test` 14/14, and `runtime/` Python 192 run (50 skipped).
+- **Codex, round 1:** no high findings. One medium and three low, fixed in the next commit:
+  - (medium) A partial import read like a clean one. The status now says "Partially imported", how many messages were kept, which lines were skipped, and that messages on them are missing.
+  - (low) The rejection test checked only a search for the rejected text. It now compares the whole session list before and after.
+  - (low) The Codex case only had a cut-off last line. It now has a bad line between two messages and checks that the later message keeps its line number.
+  - (low) Citations were not tested. A graph citing a kept line by its file number is accepted, and one citing a skipped line is refused.
+- **Left for P1:** after reopening a partially imported session, nothing says lines were skipped. Keeping that needs a stored count, which is a schema change; P1 owns the storage redesign, so I2 adds none.

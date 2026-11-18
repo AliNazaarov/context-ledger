@@ -235,3 +235,9 @@ Next steps:
 2. G10: a person checks the 82 labels in `evals/handoff/labelled.json`, then live runs (`node evals/handoff/run.mjs --agent claude --model M --runs 10`, the same for codex, then `--summary`). Check token and cost parsing on the first live Claude run.
 3. Still owed from earlier: Ali's review of the runtime changes from cycle 9, the human review of PR #8's schema migration, and Ali's decision on `VLLM_NGRAM=1` (cycle 11).
 4. PR #3 (Ali's draft M0 benchmark, based on `feature/semantic-graph`) was left open: it is Ali's and conflicts with its base.
+
+## Current checkpoint — I2 tolerant JSONL parsing (2026-11-17)
+
+Branch `ruslan/i2-tolerant-jsonl`. A transcript line that is not JSON no longer rejects the whole import. The parser skips it, and `POST /api/import` returns `skipped: { count, lines }` (the first ten line numbers) beside the session. The browser shows "Partially imported", with the counts. Messages keep their line numbers in the file, so citations stay true. A file with no readable line is still refused with `Invalid JSONL at line N.`
+
+Next owner: the skip count is not stored, so a reopened session does not show it. Add it with P1's storage work. No schema change was made here.

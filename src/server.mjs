@@ -103,7 +103,8 @@ const routes = [
   })),
   { method: 'POST', path: '/api/import', handler: async ({ request, origin }) => {
     const input = await readJson(request, origin, 'Import');
-    return { session: store.importTranscript(input) };
+    const { skipped, ...session } = store.importTranscript(input);
+    return skipped ? { session, skipped } : { session };
   } },
   { method: 'POST', path: '/api/graphs', handler: async ({ request, origin }) => {
     const packet = await readJson(request, origin, 'Graph publication');

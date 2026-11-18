@@ -60,8 +60,19 @@ function messageAt(record, provider, line) {
   if (text?.trim()) return { role, text, line };
 }
 
+// How many skipped line numbers an import reports; the count covers all of them.
+const skippedLinesShown = 10;
+
+/**
+ * Card I2: a line that is not JSON (often a last line cut off while the agent was still
+ * writing) is skipped and counted instead of rejecting the whole file. Messages keep their
+ * line numbers in the file, so citations stay true. A file with no readable line at all is
+ * still refused, since it is not JSONL.
+ */
 function parseTranscript(transcript, provider) {
   const messages = [];
+  const skipped = [];
+  let readable = 0;
   for (const [index, rawLine] of transcript.split('\n').entries()) {
     const line = index + 1;
     const value = rawLine.trim();
@@ -71,14 +82,22 @@ function parseTranscript(transcript, provider) {
     try {
       record = JSON.parse(value);
     } catch {
-      throw new InputError(`Invalid JSONL at line ${line}.`);
+      skipped.push(line);
+      continue;
     }
+    readable += 1;
     const message = messageAt(record, provider, line);
     if (message) messages.push(message);
   }
 
+  if (readable === 0 && skipped.length) throw new InputError(`Invalid JSONL at line ${skipped[0]}.`);
   if (messages.length === 0) throw new InputError('No supported conversation messages found.');
-  return messages;
+  return { messages, skipped };
+}
+
+function withSkipped(summary, skipped) {
+  if (!skipped.length) return summary;
+  return { ...summary, skipped: { count: skipped.length, lines: skipped.slice(0, skippedLinesShown) } };
 }
 
 function sourceName(source) {
@@ -201,14 +220,15 @@ export function openStore(path) {
       if (typeof transcript !== 'string') throw new InputError('Transcript must be JSONL text.');
       const name = sourceName(source);
       const id = createHash('sha256').update(`${provider}\0`).update(transcript).digest('hex');
+      // Parsed before the duplicate check, so a repeated import reports the same skipped lines.
+      const { messages, skipped } = parseTranscript(transcript, provider);
       const existing = getSummary.get(id);
-      if (existing) return existing;
+      if (existing) return withSkipped(existing, skipped);
 
-      const messages = parseTranscript(transcript, provider);
       const title = titleFor(messages);
       const searchText = [title, ...messages.map(message => message.text)].join('\n').toLowerCase();
       insert.run(id, provider, name, title, messages.length, JSON.stringify(messages), searchText);
-      return getSummary.get(id);
+      return withSkipped(getSummary.get(id), skipped);
     },
 
     list(query, provider) {
