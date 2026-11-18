@@ -1415,3 +1415,7 @@ ADR-003 picked better-sqlite3 because `node:sqlite` had no FTS5. P1a checks whet
   - (medium) §6's scheduled retention and evidence-only cleanup could be blocked without saying so. A blocked run records why and what it would have removed, and an evidence-only export reports that its cleanup did not run.
   - (low) The fallback contract now includes the provider filter and empty queries.
   - (low) Rejection now restores the original ADR-003 entry and the lifecycle text, not only removes §5.1.
+- **Codex, round 4** (of 7533cc7, the round 3 fixes): no high findings. Two medium and one low, fixed in the document:
+  - (medium) A drain followed by a separate search could miss a message appended in between. Each indexed search now drains and queries inside one transaction.
+  - (medium) A blocked evidence-only cleanup was promised to a later run, but nothing remembered it. The pending cleanup is now recorded in `settings` and carried out by the next retention run that can update the index.
+  - (low) The rejection instructions now also cover the paragraph that points to §5.1.
