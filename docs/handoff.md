@@ -235,3 +235,16 @@ Next steps:
 2. G10: a person checks the 82 labels in `evals/handoff/labelled.json`, then live runs (`node evals/handoff/run.mjs --agent claude --model M --runs 10`, the same for codex, then `--summary`). Check token and cost parsing on the first live Claude run.
 3. Still owed from earlier: Ali's review of the runtime changes from cycle 9, the human review of PR #8's schema migration, and Ali's decision on `VLLM_NGRAM=1` (cycle 11).
 4. PR #3 (Ali's draft M0 benchmark, based on `feature/semantic-graph`) was left open: it is Ali's and conflicts with its base.
+
+## Current checkpoint — G11 graph diff between snapshots (2026-11-17)
+
+Branch `ruslan/g11-graph-diff`. `GET /api/graphs/:id/diff?from=:otherId` and the MCP tool `graph_diff` say what changed from an older snapshot of one party's graph to a newer one. The eval and results are in the G11 section of [the eval log](evals.md).
+
+- `src/diff.mjs` compares the canonical packets. It reports nodes added, removed and changed (each changed field with its old and new value), decisions newly superseded, questions answered or opened, ready actions gained or lost, and edges and links added or removed. Both graphs must be version 2 graphs of the same party.
+- `graph_diff` pages a long diff by item, like `graph_read`.
+- A room now carries `newerGraphs`: for each party whose newest graph is not the room's, the newer graph's ID and change counts. The room view says so, lists up to 12 changed labels, and offers a button that fills the form with the newer graph. The person still opens the new room, as before.
+
+Next steps:
+
+1. "Newest" is by party name, and party names are self-asserted. Another session publishing under the same party name shows up as a newer graph. Rooms keyed to sessions as well would fix that once P1's projects exist.
+2. The console (U1, #22) could flash only the changed nodes, using the diff instead of its own comparison.

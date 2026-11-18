@@ -4,6 +4,7 @@ import { basename, dirname, win32 } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { graphContext } from './context.mjs';
 import { InputError } from './errors.mjs';
+import { diffGraphs } from './diff.mjs';
 import { canonicalPacket, validateGraph } from './graph.mjs';
 import { migrate } from './migrate.mjs';
 import { mountRooms } from './rooms.mjs';
@@ -160,7 +161,17 @@ export function openStore(path) {
   };
   // Schema version 1 adds the listing columns. Its triggers stamp created_at and party
   // on every new graph and room row, whichever build inserts it (src/migrate.mjs).
-  const rooms = mountRooms(database, readGraph);
+  // Card G11: two snapshots of one party's graph, older first.
+  const diff = (id, fromId) => {
+    const newer = readGraph(id);
+    const older = readGraph(fromId);
+    if (!newer || !older) return;
+    if (newer.packet.version !== 2 || older.packet.version !== 2 || newer.packet.party !== older.packet.party) {
+      throw new InputError('Both graphs must be version 2 graphs of the same party.');
+    }
+    return diffGraphs(older, newer);
+  };
+  const rooms = mountRooms(database, readGraph, diff);
   try {
     migrate(database);
   } catch (error) {
@@ -264,6 +275,8 @@ export function openStore(path) {
     },
 
     getGraph: readGraph,
+
+    diffGraphs: diff,
 
     ...rooms,
 

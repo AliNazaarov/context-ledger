@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { diffCounts } from './diff.mjs';
 import { InputError } from './errors.mjs';
 
 const hashPattern = /^[a-f0-9]{64}$/u;
@@ -12,7 +13,7 @@ const digest = (...parts) => createHash('sha256').update(parts.join('\0')).diges
  * reject; a proposal is agreed only when both confirm. Agents can open and read a
  * room, but choices are recorded by people (see the decisions route in server.mjs).
  */
-export function mountRooms(database, readGraph) {
+export function mountRooms(database, readGraph, diffGraphs) {
   database.exec(`
     CREATE TABLE IF NOT EXISTS rooms (
       id TEXT PRIMARY KEY,
@@ -37,6 +38,19 @@ export function mountRooms(database, readGraph) {
   `);
   let selectCursor;
   let selectRooms;
+  // Prepared on first use: the party column comes from a migration that runs after mounting.
+  let selectNewest;
+
+  /** Card G11: the newest graph of the same party, when it is not this one, and what changed. */
+  function newerGraph(graph) {
+    selectNewest ??= database.prepare('SELECT id FROM graphs WHERE party = ? ORDER BY rowid DESC LIMIT 1');
+    const newest = selectNewest.get(graph.packet.party)?.id;
+    if (!newest || newest === graph.id) return;
+    const newer = readGraph(newest);
+    if (newer?.packet.version !== 2) return;
+    const { any, ...counts } = diffCounts(diffGraphs(newest, graph.id));
+    return { party: graph.packet.party, graphId: newest, fromGraphId: graph.id, changed: any, counts };
+  }
 
   function endpoint(graph, nodeId) {
     const node = graph.packet.nodes.find(candidate => candidate.id === nodeId);
@@ -89,6 +103,7 @@ export function mountRooms(database, readGraph) {
         openQuestionIds: graph.openQuestionIds,
       })),
       proposals,
+      newerGraphs: graphs.map(newerGraph).filter(Boolean),
       agreedProposalIds: proposals.filter(proposal => proposal.state === 'agreed').map(proposal => proposal.id),
     };
   }

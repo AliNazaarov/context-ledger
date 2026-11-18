@@ -168,6 +168,7 @@ const roomGraphB = document.querySelector('#room-graph-b');
 const roomStatus = document.querySelector('#room-status');
 const roomView = document.querySelector('#room-view');
 const roomParties = document.querySelector('#room-parties');
+const roomUpdates = document.querySelector('#room-updates');
 const roomProposals = document.querySelector('#room-proposals');
 const roomAgreed = document.querySelector('#room-agreed');
 const linkVerbs = { matches: 'matches', conflicts: 'conflicts with', answers: 'answers' };
@@ -240,8 +241,63 @@ function proposalRow(proposal, parties) {
   return item;
 }
 
+const changeWords = [['added', 'added'], ['removed', 'removed'], ['changed', 'changed'], ['superseded', 'decision superseded', 'decisions superseded'],
+  ['answered', 'question answered', 'questions answered'], ['opened', 'question opened', 'questions opened'], ['edges', 'edge changed', 'edges changed'], ['links', 'link changed', 'links changed']];
+
+function changeSummary(counts) {
+  const parts = changeWords.filter(([key]) => counts[key]).map(([key, one, many = one]) => `${counts[key]} ${counts[key] === 1 ? one : many}`);
+  return parts.length ? parts.join(', ') : 'no node, edge or link changes';
+}
+
+/** Card G11: the labels that changed, from the diff of the two snapshots. */
+async function fillUpdate(list, update, generation) {
+  try {
+    const { diff } = await request(`/api/graphs/${update.graphId}/diff?from=${update.fromGraphId}`);
+    if (generation !== roomGeneration) return;
+    const rows = [
+      ...diff.nodes.added.map(node => ['Added', node]),
+      ...diff.nodes.removed.map(node => ['Removed', node]),
+      ...diff.nodes.changed.map(node => ['Changed', node]),
+      ...diff.supersededDecisions.map(node => ['Superseded', node]),
+    ];
+    renderRows(list, rows.slice(0, 12), ([what, node]) => {
+      const item = document.createElement('li');
+      item.append(`${what} ${node.kind}: `, labelElement(node.label));
+      return item;
+    });
+  } catch {
+    if (generation === roomGeneration) list.replaceChildren(textElement('li', 'The changes could not be loaded.', 'room-note'));
+  }
+}
+
+function renderUpdates(room) {
+  const updates = room.newerGraphs ?? [];
+  const generation = roomGeneration;
+  renderRows(roomUpdates, updates, update => {
+    const box = document.createElement('section');
+    box.className = 'room-update';
+    box.setAttribute('aria-label', `Newer graph from ${update.party}`);
+    box.append(textElement('p', `${update.party} has published a newer graph (${update.graphId.slice(0, 12)}…): ${changeSummary(update.counts)}. This room still shows the older one.`));
+    const list = document.createElement('ul');
+    box.append(list);
+    const use = textElement('button', `Use ${update.party}'s newer graph`);
+    use.type = 'button';
+    use.addEventListener('click', () => {
+      // Fill the form with the newer graph and the other party's graph; the person opens the room.
+      const other = room.parties.find(party => party.graphId !== update.fromGraphId);
+      roomGraphA.value = update.graphId;
+      roomGraphB.value = other?.graphId ?? '';
+      roomGraphA.focus();
+    });
+    box.append(use);
+    void fillUpdate(list, update, generation);
+    return box;
+  });
+}
+
 function renderRoom(room) {
   currentRoomId = room.id;
+  renderUpdates(room);
   const parties = room.parties.map(party => party.party);
   renderRows(roomParties, room.parties, partyColumn);
   renderRows(roomProposals, room.proposals, proposal => proposalRow(proposal, parties));

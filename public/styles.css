@@ -208,6 +208,10 @@ footer { padding-block: 1rem 1.5rem; color: var(--muted); }
 .party { min-width: 0; padding: 1rem; border: 1px solid var(--rule); background: var(--white); }
 .party h3 { margin: 0; }
 .party-nodes, .proposals, .agreed { list-style: none; margin: 0; padding: 0; }
+/* G11: a party published a newer graph than the one this room shows. */
+.room-update { border-left: 3px solid var(--accent-dark); padding: .5rem .75rem; margin-block: 0 .75rem; }
+.room-update ul { margin: .25rem 0; padding-left: 1.25rem; }
+.room-update button { margin-top: .25rem; }
 .party-nodes li { display: grid; gap: .1rem; padding-block: .5rem; border-top: 1px solid var(--rule); }
 .node-kind { color: var(--accent-dark); font: bold .75rem var(--mono); text-transform: uppercase; }
 /* Labels are untrusted one-line text: never honor embedded line breaks. */

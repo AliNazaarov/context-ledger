@@ -171,3 +171,33 @@ test('a decision that lands after switching rooms does not replace the new room'
   await expect(page.locator('#room-proposals > li', { hasText: 'matches' })).toContainText('leo: undecided');
   expect(page.url()).toMatch(new RegExp(`#room=${secondRoom}$`, 'u'));
 });
+
+test('a room says when a party has published a newer graph, and what changed', async ({ page, request, baseURL }, testInfo) => {
+  // Card G11. The label is set with textContent, so markup in it stays text.
+  const label = `<b>GPU</b> evenings #g11-${testInfo.repeatEachIndex}-${Date.now()}`;
+  const { ali, leo } = await publishPair(request, baseURL, label);
+  await page.goto('/');
+  await page.getByLabel('First graph ID').fill(leo.id);
+  await page.getByLabel('Second graph ID').fill(ali.id);
+  await page.getByRole('button', { name: 'Open room' }).click();
+  await expect(page.locator('#room-status')).toContainText('3 proposals');
+
+  // Leo publishes again: the goal is relabelled and the action is done.
+  const revised = leoPacket(leo.packet.sessionId, ali.id);
+  revised.nodes = revised.nodes.map(node => (node.id === 'orbit-demo' ? { ...node, label: `${label} demo live by 19:00` }
+    : node.id === 'record-demo' ? { ...node, status: 'completed' } : node));
+  const newer = await publish(request, baseURL, revised);
+  await page.reload();
+  const update = page.getByRole('region', { name: 'Newer graph from leo' });
+  await expect(update).toContainText(`leo has published a newer graph (${newer.id.slice(0, 12)}…): 2 changed`);
+  await expect(update.locator('li')).toHaveText([/^Changed goal: /u, /^Changed action: Record the demo on Sunday$/u]);
+  await expect(update.locator('li').first().locator('bdi')).toHaveText(`${label} demo live by 19:00`);
+  expect(await update.locator('b').count()).toBe(0);
+
+  await update.getByRole('button', { name: "Use leo's newer graph" }).click();
+  await expect(page.getByLabel('First graph ID')).toHaveValue(newer.id);
+  await expect(page.getByLabel('Second graph ID')).toHaveValue(ali.id);
+  await page.getByRole('button', { name: 'Open room' }).click();
+  await expect(page.locator('#room-status')).toContainText('3 proposals');
+  await expect(page.getByRole('region', { name: 'Newer graph from leo' })).toHaveCount(0);
+});
