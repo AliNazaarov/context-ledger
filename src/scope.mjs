@@ -49,7 +49,11 @@ function nodeText(node) {
 
 // Four letters or more compare by their first four, so "decided" finds a decision; a
 // three-letter word must start a word ("gpu" finds "GPU time" and "GPU時", not "upgpu").
-const asciiMatch = (term, words) => words.some(word => word.startsWith(term.length >= 4 ? term.slice(0, 4) : term));
+// The prefix is compared in whole letters, so "qax" does not stop inside an x with an accent.
+const asciiMatch = (term, words) => {
+  const prefix = term.length >= 4 ? term.slice(0, 4) : term;
+  return words.some(word => lettersOf(word).slice(0, prefix.length).join('') === prefix);
+};
 // Another script: two letters in a row of the word, one of them outside ASCII, must be two
 // letters in a row of the node. A one-letter word must be a whole word of the node.
 const foreignMatch = (word, { words, pairs }) => {

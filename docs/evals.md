@@ -1411,3 +1411,18 @@ The briefing's state section ends with a scope line: how many nodes matched, how
 
 - The four suites pass, with no new runtime dependency.
 - Codex reviews the change read-only; findings are fixed with tests or recorded here.
+
+### G9 results (2026-11-17)
+
+- **Built:** `src/scope.mjs` ranks the nodes for a question and cuts the result to a budget. `graphContext` in `src/context.mjs` renders the scoped graph with the same `contextText`, plus a last scope line, and reads each linked graph once per request. `GET /api/graphs/:id/context` takes `question` and `budget`, and `context_for` takes them too, caching paged scoped briefings under graph ID, question and budget. Without either argument, nothing changes.
+- **Tests:** `tests/scope.test.mjs` (13): ranking and matching rules, the budget, the golden unscoped output, the links fixture, the MCP cache and argument checks, and the real route with paging.
+- **Codex review, round 1** (of 103051b), six findings, fixed in c991f6a:
+  - (high) A budget smaller than the briefing with no nodes was answered over budget. It is refused now, with the size, and every budget path checks the meter.
+  - (medium) Words were double-counted, `café` became `caf` (finding `cafeteria`), and one letter of another script matched anywhere. The question is now split once into Unicode words, each with one rule.
+  - (medium) The cache-key test changed two things at once. Question and budget are now varied one at a time, each with its own text.
+  - (low) The 500 limit counted UTF-16 units, not characters. It counts code points now.
+  - (low) Each budget probe repeated work. It now counts shown matches directly and reads linked graphs once.
+  - (low) The eval claimed more than the tests checked. A golden output from main, a links fixture and real-route paging are added.
+- **Round 2** (of c991f6a): all six fixes hold. Three more findings, fixed in bef4378: an ASCII word missed a mixed-script node word (`gpu` and a label `GPU` followed by a Han letter); letter pairs could end inside a marked letter; and two coverage notes (blank question over HTTP, MCP's handling of a repeated JSON name).
+- **Round 3** (of bef4378): those fixes hold. One low finding is fixed in the next commit: an ASCII prefix is now compared in whole letters, so `qax` no longer stops inside an `x` with an accent.
+- **Suites (Windows):** `npm run -s test:graph` 9/9; node 203/204 (one skipped), was 191/192 on `main`; Playwright 13/13; Python runtime 192 run, 50 skipped, OK.

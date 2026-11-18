@@ -379,3 +379,10 @@ test('review round 2: ASCII words find mixed-script labels, and letter pairs end
   const marked = { edges: [], nodes: [{ id: 'm', kind: 'goal', label: `a${imacron}${cp(0x301)}` }, { id: 'n', kind: 'goal', label: `a${imacron}` }] };
   assert.deepEqual(rankNodes(marked, `a${imacron}`).matched, ['n']);
 });
+
+test('review round 3: an ASCII prefix is compared in whole letters', () => {
+  const acute = String.fromCodePoint(0x301);
+  const packet = { edges: [], nodes: [{ id: 'a', kind: 'goal', label: `qax${acute} plan` }, { id: 'b', kind: 'goal', label: 'qaxis plan' }] };
+  assert.deepEqual(rankNodes(packet, 'qax').matched, ['b']);
+  assert.deepEqual(rankNodes({ edges: [], nodes: [{ id: 'c', kind: 'goal', label: `GPU${String.fromCodePoint(0x6642)}` }] }, 'gpu').matched, ['c']);
+});
