@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { test, expect } from '@playwright/test';
 
 const asJsonl = (...records) => records.map(record => JSON.stringify(record)).join('\n');
@@ -67,7 +68,6 @@ test('makes imports idempotent and rejects an unreadable or foreign-origin impor
   expect((await first.json()).session.id).toBe((await second.json()).session.id);
 
   const candidate = asJsonl({ type: 'user', message: { role: 'user', content: 'Discard this partial record' } });
-  const before = (await (await request.get('/api/sessions')).json()).sessions;
   // Card I2: a file with no readable JSON line is still refused as a whole.
   const malformed = await request.post('/api/import', {
     headers,
@@ -82,8 +82,12 @@ test('makes imports idempotent and rejects an unreadable or foreign-origin impor
   expect(foreign.status()).toBe(403);
   const list = await request.get('/api/sessions?q=discard');
   expect((await list.json()).sessions).toEqual([]);
-  // Review round 1: nothing at all was stored, not only nothing matching the search.
-  expect((await (await request.get('/api/sessions')).json()).sessions).toEqual(before);
+  // Review rounds 1 and 2: neither rejected file was stored under its own ID. Checked by ID,
+  // not by comparing whole lists, because other workers share the database.
+  for (const rejected of ['Discard this partial record\n{invalid', candidate]) {
+    const id = createHash('sha256').update('claude\0').update(rejected).digest('hex');
+    expect((await request.get(`/api/sessions/${id}`)).status()).toBe(404);
+  }
   const repeated = await request.get('/api/sessions?q=kepler');
   expect((await repeated.json()).sessions).toHaveLength(1);
 });

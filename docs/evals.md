@@ -1414,7 +1414,8 @@ All tests use synthetic transcripts.
 - `tests/import-tolerant.test.mjs` 8/8 and the library browser spec 4/4. Full suites on Windows: `npm run -s test:graph` 9/9, `node --test tests/*.test.mjs` 199 (198 pass, 1 skipped), `npx playwright test` 14/14, and `runtime/` Python 192 run (50 skipped).
 - **Codex, round 1:** no high findings. One medium and three low, fixed in the next commit:
   - (medium) A partial import read like a clean one. The status now says "Partially imported", how many messages were kept, which lines were skipped, and that messages on them are missing.
-  - (low) The rejection test checked only a search for the rejected text. It now compares the whole session list before and after.
+  - (low) The rejection test checked only a search for the rejected text. It now checks the rejected files' own session IDs (see round 2).
   - (low) The Codex case only had a cut-off last line. It now has a bad line between two messages and checks that the later message keeps its line number.
   - (low) Citations were not tested. A graph citing a kept line by its file number is accepted, and one citing a skipped line is refused.
+- **Codex, round 2** (of af581a9): the four fixes are complete. One low finding: comparing whole session lists can fail when other browser workers import at the same time. The test now checks that neither rejected file is stored under its own session ID.
 - **Left for P1:** after reopening a partially imported session, nothing says lines were skipped. Keeping that needs a stored count, which is a schema change; P1 owns the storage redesign, so I2 adds none.
