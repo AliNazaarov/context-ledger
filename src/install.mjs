@@ -1,11 +1,14 @@
 // Card G8: `ledger install` connects Claude Code and Codex to this ledger, and
-// `ledger uninstall` undoes it. Each agent gets the MCP server, registered with its
-// own CLI at user scope, and a short marked block in its user instruction file.
-// Every change is printed; --dry-run prints them without making them.
+// `ledger uninstall` takes the instruction block out again. Each agent gets the MCP
+// server, registered with its own CLI at user scope, and a short marked block in its
+// user instruction file. Every change is printed; --dry-run prints them without making
+// them.
 //
-// Nothing is recorded between the two commands. Uninstall removes only what is exactly
-// what install makes: a server entry with this checkout's command, arguments and PORT
-// at user scope, and the block with its exact text. Anything else is left alone.
+// Uninstall does not remove the server registration. Neither CLI shows a user-scope
+// entry exactly (Claude prints arguments joined; Codex reports the effective entry but
+// removes from the global table), so no check here could prove an entry is the one
+// install made. Uninstall prints the remove command for the person to run instead
+// (G8 review rounds 1 to 3). It removes the block only when its text is exact.
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
@@ -42,7 +45,7 @@ export class InstallError extends Error {}
 
 const shown = value => inlineText(String(value));
 
-/** The two agents, with their CLI, instruction file, MCP commands and expected entry. */
+/** The two agents, with their CLI, instruction file and MCP commands. */
 export function agentTargets(env = process.env) {
   const home = homedir();
   const port = env.PORT && env.PORT !== defaultPort ? env.PORT : undefined;
@@ -55,12 +58,12 @@ export function agentTargets(env = process.env) {
       envName: 'CONTEXT_LEDGER_CLAUDE_BIN',
       bin: env.CONTEXT_LEDGER_CLAUDE_BIN || 'claude',
       instructions: join(home, '.claude', 'CLAUDE.md'),
-      get: ['mcp', 'get', serverName],
+      // No get: `claude mcp get` can start project servers for a health check. `add`
+      // itself refuses a name its scope already has.
       // -e takes every value up to the next option, so it must not sit just before the name.
       add: ['mcp', 'add', ...(port ? ['-e', `PORT=${port}`] : []), '--scope', 'user', serverName, '--', ...server],
       remove: ['mcp', 'remove', '--scope', 'user', serverName],
-      absent: /^No MCP server found with name: "context-ledger"\./mu,
-      expected: { env: port ? { PORT: port } : {} },
+      exists: /already exists/iu,
     },
     codex: {
       key: 'codex',
@@ -68,11 +71,11 @@ export function agentTargets(env = process.env) {
       envName: 'CONTEXT_LEDGER_CODEX_BIN',
       bin: env.CONTEXT_LEDGER_CODEX_BIN || 'codex',
       instructions: join(env.CODEX_HOME || join(home, '.codex'), 'AGENTS.md'),
+      // `codex mcp add` replaces an entry of the same name, so install asks first.
       get: ['mcp', 'get', serverName, '--json'],
       add: ['mcp', 'add', serverName, ...(port ? ['--env', `PORT=${port}`] : []), '--', ...server],
       remove: ['mcp', 'remove', serverName],
       absent: /^Error: No MCP server named 'context-ledger' found\.$/mu,
-      expected: { env: port ? { PORT: port } : {} },
     },
   };
 }
@@ -138,61 +141,23 @@ export function runAgent(bin, args, { platform = process.platform, env = process
 }
 
 const firstLine = text => shown(String(text ?? '').trim().split(/\r?\n/u)[0] ?? '').slice(0, 200);
-const samePath = value => {
-  const slashes = String(value).replace(/\\/gu, '/');
-  return process.platform === 'win32' ? slashes.toLowerCase() : slashes;
-};
-const sameEnv = (actual, expected) => {
-  const keys = Object.keys(actual ?? {});
-  return keys.length === Object.keys(expected).length && keys.every(key => actual[key] === expected[key]);
-};
-
-/** Claude prints an entry as indented "Key: value" lines, with environment pairs under Environment. */
-function claudeEntry(output) {
-  const lines = output.split(/\r?\n/u);
-  const field = name => lines.find(line => line.trimStart().startsWith(`${name}:`))?.trimStart().slice(name.length + 1).trim();
-  const env = {};
-  const at = lines.findIndex(line => line.trim() === 'Environment:');
-  if (at >= 0) {
-    const indent = lines[at].length - lines[at].trimStart().length;
-    for (const line of lines.slice(at + 1)) {
-      if (!line.trim() || line.length - line.trimStart().length <= indent) break;
-      const pair = /^([^=]+)=(.*)$/u.exec(line.trim());
-      if (pair) env[pair[1]] = pair[2];
-    }
-  }
-  return { userScope: /^user\b/iu.test(field('Scope') ?? ''), command: field('Command'), args: field('Args'), env };
-}
-
-function codexEntry(output) {
-  const entry = JSON.parse(output);
-  const transport = entry?.transport ?? {};
-  return {
-    userScope: true,
-    command: transport.command,
-    args: Array.isArray(transport.args) ? transport.args.join(' ') : undefined,
-    env: transport.env && typeof transport.env === 'object' ? transport.env : {},
-  };
-}
 
 /**
- * What the agent's CLI says about the server name: present (and whether the entry is
- * exactly the one install makes), absent (the CLI's own "no such server" answer), or
- * failed. Only those exact answers count, so a broken configuration is never "absent".
+ * Codex's answer about the server name: present, absent (its own "no such server"
+ * answer), or failed. An answer of any other shape is a failure, never "absent".
  */
-function probe(target, run) {
+function probeCodex(target, run) {
   const result = run(target.bin, target.get);
   if (result.missing || result.unsafe) return result;
   if (result.status === 0) {
-    let entry;
     try {
-      entry = target.key === 'codex' ? codexEntry(result.stdout) : claudeEntry(result.stdout);
+      const entry = JSON.parse(result.stdout);
+      const transport = entry?.transport;
+      if (entry?.name === serverName && typeof transport?.command === 'string' && Array.isArray(transport.args)) return { present: true };
     } catch {
-      return { failed: true, detail: 'its answer could not be read' };
+      // Falls through to the failure below.
     }
-    const ours = entry.userScope && entry.command === 'node' && samePath(entry.args ?? '') === samePath(mcpPath)
-      && sameEnv(entry.env, target.expected.env);
-    return { present: true, userScope: entry.userScope, ours };
+    return { failed: true, detail: 'its answer could not be read' };
   }
   if (result.status === 1 && target.absent.test(result.output ?? '')) return { absent: true };
   return { failed: true, detail: result.detail || `exit status ${result.status}` };
@@ -237,7 +202,8 @@ export function withoutBlock(text, path = 'file') {
   const found = findBlock(lines, path);
   if (!found) return null;
   let [start, end] = found;
-  if (start > 0 && lines[start - 1].trim() === '') start -= 1;
+  // Only an empty line, as install writes it: a line of spaces is the person's.
+  if (start > 0 && /^\r?\n$/u.test(lines[start - 1])) start -= 1;
   return [...lines.slice(0, start), ...lines.slice(end + 1)].join('');
 }
 
@@ -309,6 +275,10 @@ function writeFileSafely(path, file, bytes) {
       closeSync(descriptor);
     }
     chmodSync(temporary, file ? file.mode : 0o644);
+    // A link that now points elsewhere is not written through to its old target.
+    if (file?.link && realpathSync(path) !== file.real) {
+      throw new InstallError(`${shown(path)} changed while it was being updated; nothing was written to it. Run the command again.`);
+    }
     assertUnchanged(file, path);
     renameSync(temporary, real);
   } finally {
@@ -329,7 +299,8 @@ function planInstructions(target, mode) {
   const after = file ? withoutBlock(before, path) : null;
   if (after === null) return { note: `no block in ${shown(path)}.` };
   // A file that held only the block goes; a link is emptied instead, so it does not dangle.
-  const remove = after === '' && !file.link;
+  // A file whose bytes would be empty, BOM included, goes; a link is emptied instead.
+  const remove = after === '' && !file.bom && !file.link;
   return { path, file, text: after, remove, verb: remove ? 'remove' : 'remove the block from', done: remove ? 'removed' : 'removed the block from' };
 }
 
@@ -343,33 +314,27 @@ function applyInstructions(plan) {
 }
 
 const failure = result => (result.unsafe ? 'a path holds " or %' : result.detail || `exit status ${result.status}`);
+const missingLine = (target, what) => `${shown(target.bin)} was not found, so the server was not ${what}. Install the CLI or set its path in ${target.envName}.`;
 
-function serverStep(target, mode, dryRun, run) {
+/** The MCP server step of install. stop: the instruction file is left as it is. */
+function installServer(target, dryRun, run) {
   const command = args => shown([target.bin, ...args].join(' '));
-  const state = probe(target, run);
-  if (state.missing) {
-    return { ok: false, line: `${shown(target.bin)} was not found, so the server was not ${mode === 'install' ? 'registered' : 'removed'}. Install the CLI or set its path in ${target.envName}.` };
-  }
-  if (state.unsafe) return { ok: false, stop: true, line: 'a path holds " or %, which cmd.exe cannot be given safely; register the server by hand (see README).' };
-  if (state.failed) return { ok: false, stop: true, line: `${command(target.get)} failed (${state.detail}).` };
-
-  if (mode === 'install') {
-    if (state.present) {
-      const what = state.ours ? '' : state.userScope ? ' with another command or PORT' : ' at another scope';
-      return { ok: true, line: `${serverName} is already registered${what}; left as it is.` };
-    }
+  if (target.key === 'codex') {
+    const state = probeCodex(target, run);
+    if (state.missing) return { ok: false, line: missingLine(target, 'registered') };
+    if (state.unsafe) return { ok: false, stop: true, line: 'a path holds " or %, which cmd.exe cannot be given safely; register the server by hand (see README).' };
+    if (state.failed) return { ok: false, stop: true, line: `${command(target.get)} failed (${state.detail}).` };
+    if (state.present) return { ok: true, line: `${serverName} is already registered; left as it is.` };
     if (dryRun) return { ok: true, line: `would run ${command(target.add)}` };
-    const result = run(target.bin, target.add);
-    if (result.status === 0) return { ok: true, line: `ran ${command(target.add)}` };
-    return { ok: false, line: `${command(target.add)} failed (${failure(result)}).` };
+  } else if (dryRun) {
+    if (!findCommand(target.bin)) return { ok: false, line: missingLine(target, 'registered') };
+    return { ok: true, line: `would run ${command(target.add)} (Claude Code refuses it when the name is already registered at user scope)` };
   }
-
-  if (state.absent) return { ok: true, line: `${serverName} is not registered.` };
-  if (!state.ours) return { ok: true, line: `${serverName} is not the entry install makes (another command, PORT or scope); left as it is.` };
-  if (dryRun) return { ok: true, line: `would run ${command(target.remove)}` };
-  const result = run(target.bin, target.remove);
-  if (result.status === 0) return { ok: true, line: `ran ${command(target.remove)}` };
-  return { ok: false, line: `${command(target.remove)} failed (${failure(result)}).` };
+  const result = run(target.bin, target.add);
+  if (result.missing) return { ok: false, line: missingLine(target, 'registered') };
+  if (result.status === 0) return { ok: true, line: `ran ${command(target.add)}` };
+  if (target.exists?.test(result.output ?? '')) return { ok: true, line: `${serverName} is already registered; left as it is.` };
+  return { ok: false, stop: true, line: `${command(target.add)} failed (${failure(result)}).` };
 }
 
 function setupOne(target, mode, dryRun, run) {
@@ -377,20 +342,25 @@ function setupOne(target, mode, dryRun, run) {
   const say = text => lines.push('  ' + text);
   let plan;
   try {
-    // Check the file first, so a refused file stops this agent before its CLI changes anything.
+    // Check the file first, so a refused file stops this agent before its CLI is called.
     plan = planInstructions(target, mode);
   } catch (error) {
     if (!(error instanceof InstallError)) throw error;
     say(`Nothing changed for ${target.name}: ${error.message}`);
     return { ok: false, lines };
   }
-  const server = serverStep(target, mode, dryRun, run);
-  say('MCP server: ' + server.line);
-  if (server.stop) {
-    say(`Instructions: left as they are, because the CLI did not answer.`);
-    return { ok: false, lines };
+  let ok = true;
+  if (mode === 'install') {
+    const server = installServer(target, dryRun, run);
+    say('MCP server: ' + server.line);
+    ok = server.ok;
+    if (server.stop) {
+      say('Instructions: left as they are, because the server step failed.');
+      return { ok: false, lines };
+    }
+  } else {
+    say(`MCP server: not removed by this command. If install registered it, remove it with: ${shown([target.bin, ...target.remove].join(' '))}`);
   }
-  let ok = server.ok;
   if (plan.note) {
     say('Instructions: ' + plan.note);
   } else if (dryRun) {

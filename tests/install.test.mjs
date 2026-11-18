@@ -144,27 +144,60 @@ test('install on an empty home registers both servers at user scope and writes o
     ['claude', 'mcp', 'add', '--scope', 'user', 'context-ledger', '--', 'node', mcpPath],
     ['codex', 'mcp', 'add', 'context-ledger', '--', 'node', mcpPath],
   ]);
+  // Claude is never asked with mcp get, which can start project servers for a health check.
+  assert.deepEqual(box.calls().filter(call => call[0] === 'claude' && call[2] === 'get'), []);
   assert.deepEqual(box.servers('claude').user['context-ledger'], ours());
   assert.deepEqual(box.servers('codex').global['context-ledger'], ours());
   assert.match(result.stdout, /Claude Code\n {2}MCP server: ran /u);
   assert.match(result.stdout, /Instructions: created /u);
-  assert.deepEqual(readdirSync(dirname(box.files.claude)), ['CLAUDE.md'], 'no temporary or record file is left');
+  assert.deepEqual(readdirSync(dirname(box.files.claude)), ['CLAUDE.md'], 'no temporary file is left');
 });
 
 test('install twice changes nothing the second time', t => {
   const box = sandbox(t);
   assert.equal(box.ledger('install').status, 0);
-  const first = [readFileSync(box.files.claude), readFileSync(box.files.codex)];
+  const first = [readFileSync(box.files.claude), readFileSync(box.files.codex), JSON.stringify(box.servers('claude')), JSON.stringify(box.servers('codex'))];
   const again = box.ledger('install');
-  assert.equal(again.status, 0);
-  assert.deepEqual([readFileSync(box.files.claude), readFileSync(box.files.codex)], first);
-  assert.equal(box.writes().length, 2, 'no second registration');
-  assert.match(again.stdout, /context-ledger is already registered; left as it is/u);
+  assert.equal(again.status, 0, again.stdout);
+  assert.deepEqual([readFileSync(box.files.claude), readFileSync(box.files.codex), JSON.stringify(box.servers('claude')), JSON.stringify(box.servers('codex'))], first);
+  assert.equal(again.stdout.match(/context-ledger is already registered; left as it is/gu).length, 2);
   assert.match(again.stdout, /already has the block/u);
+  assert.equal(box.writes().filter(call => call[0] === 'codex').length, 1, 'Codex add replaces, so it is not called again');
 });
 
-test('install and uninstall give back the bytes of a file that ended in a line break, with CRLF or a BOM', t => {
-  for (const before of [`# My rules${crlf}${crlf}Be brief.${crlf}`, `Notes${nl}${nl}`, `One line${nl}`]) {
+test('install leaves an entry the person registered, whatever it runs', t => {
+  const elsewhere = { command: 'node', args: ['/elsewhere/src/mcp.mjs'], env: { PORT: '4400' } };
+  const box = sandbox(t);
+  box.seed('codex', { global: { 'context-ledger': elsewhere } });
+  box.seed('claude', { user: { 'context-ledger': elsewhere } });
+  const result = box.ledger('install');
+  assert.equal(result.status, 0, result.stdout);
+  assert.equal(result.stdout.match(/already registered; left as it is/gu).length, 2);
+  assert.deepEqual(box.servers('codex').global['context-ledger'], elsewhere);
+  assert.deepEqual(box.servers('claude').user['context-ledger'], elsewhere);
+  assert.deepEqual(box.writes().filter(call => call[0] === 'codex'), [], 'Codex add is not called over an entry');
+});
+
+test('uninstall removes the blocks, never a server, and prints the remove commands', t => {
+  const box = sandbox(t);
+  assert.equal(box.ledger('install').status, 0);
+  const servers = [JSON.stringify(box.servers('claude')), JSON.stringify(box.servers('codex'))];
+  const calls = box.calls().length;
+  const result = box.ledger('uninstall');
+  assert.equal(result.status, 0, result.stdout);
+  assert.equal(existsSync(box.files.claude), false, 'a file holding only the block is removed');
+  assert.equal(existsSync(box.files.codex), false);
+  assert.equal(box.calls().length, calls, 'uninstall calls no CLI');
+  assert.deepEqual([JSON.stringify(box.servers('claude')), JSON.stringify(box.servers('codex'))], servers);
+  assert.match(result.stdout, /not removed by this command\. If install registered it, remove it with: .*claude.* mcp remove --scope user context-ledger/u);
+  assert.match(result.stdout, /remove it with: .*codex.* mcp remove context-ledger/u);
+  const again = box.ledger('uninstall');
+  assert.equal(again.status, 0);
+  assert.match(again.stdout, /no block in /u);
+});
+
+test('install and uninstall give back the bytes of a file that ended in a line break, with CRLF or BOMs', t => {
+  for (const before of [`# My rules${crlf}${crlf}Be brief.${crlf}`, `Notes${nl}${nl}`, `One line${nl}`, `Indented    ${nl}    ${nl}`]) {
     const box = sandbox(t);
     box.write(box.files.claude, before);
     assert.equal(box.ledger('install', '--agent', 'claude').status, 0);
@@ -179,6 +212,13 @@ test('install and uninstall give back the bytes of a file that ended in a line b
   plain.ledger('uninstall', '--agent', 'claude');
   assert.equal(readFileSync(plain.files.claude, 'utf8'), `Be brief.${nl}`);
 
+  // A file that held only a BOM keeps it: its bytes were never empty.
+  const bomOnly = sandbox(t);
+  bomOnly.write(bomOnly.files.claude, bom);
+  bomOnly.ledger('install', '--agent', 'claude');
+  bomOnly.ledger('uninstall', '--agent', 'claude');
+  assert.deepEqual(readFileSync(bomOnly.files.claude), bom);
+
   const box = sandbox(t);
   const withBoms = Buffer.concat([bom, bom, Buffer.from(`Rules${crlf}`)]);
   box.write(box.files.claude, withBoms);
@@ -192,95 +232,33 @@ test('install and uninstall give back the bytes of a file that ended in a line b
   assert.deepEqual(box.calls().filter(call => call[0] === 'codex'), []);
 });
 
-test('uninstall removes a file that holds only the block, and says when there is nothing to remove', t => {
-  const box = sandbox(t);
-  assert.equal(box.ledger('install').status, 0);
-  const result = box.ledger('uninstall');
-  assert.equal(result.status, 0, result.stdout);
-  assert.equal(existsSync(box.files.claude), false);
-  assert.equal(existsSync(box.files.codex), false);
-  assert.deepEqual(box.writes().slice(2), [
-    ['claude', 'mcp', 'remove', '--scope', 'user', 'context-ledger'],
-    ['codex', 'mcp', 'remove', 'context-ledger'],
-  ]);
-  assert.deepEqual(box.servers('claude').user, {});
-  const again = box.ledger('uninstall');
-  assert.equal(again.status, 0);
-  assert.match(again.stdout, /context-ledger is not registered/u);
-  assert.match(again.stdout, /no block in /u);
+test('a line of spaces before a block is the person\'s, and stays', () => {
+  const text = `Notes${nl}   ${nl}${block(nl)}`;
+  assert.equal(withoutBlock(text), `Notes${nl}   ${nl}`);
 });
 
-test('uninstall leaves any entry that is not exactly the one install makes', t => {
-  const elsewhere = { command: 'node', args: ['/elsewhere/src/mcp.mjs'], env: {} };
-  const cases = [
-    ['another checkout', elsewhere],
-    ['a backup path', { ...ours(), args: [mcpPath + '.backup'] }],
-    ['another command', { ...ours(), command: 'bun' }],
-    ['an extra argument', { ...ours(), args: [mcpPath, '--debug'] }],
-    ['a PORT', ours({ PORT: '4400' })],
-  ];
-  for (const [what, entry] of cases) {
-    const box = sandbox(t);
-    box.seed('codex', { global: { 'context-ledger': entry } });
-    box.seed('claude', { user: { 'context-ledger': entry } });
-    const installed = box.ledger('install');
-    assert.match(installed.stdout, /already registered with another command or PORT; left as it is/u, what);
-    const result = box.ledger('uninstall');
-    assert.equal(result.status, 0, what);
-    assert.match(result.stdout, /is not the entry install makes/u, what);
-    assert.deepEqual(box.servers('codex').global['context-ledger'], entry, what);
-    assert.deepEqual(box.servers('claude').user['context-ledger'], entry, what);
-    assert.deepEqual(box.writes(), [], what);
-  }
-});
-
-test('a Claude entry at local scope is left alone, and shadows nothing install touches', t => {
-  const box = sandbox(t);
-  box.seed('claude', { local: { 'context-ledger': ours() } });
-  const result = box.ledger('install', '--agent', 'claude');
-  assert.equal(result.status, 0);
-  assert.match(result.stdout, /already registered at another scope; left as it is/u);
-  assert.match(box.ledger('uninstall', '--agent', 'claude').stdout, /is not the entry install makes/u);
-  assert.deepEqual(box.servers('claude').local['context-ledger'], ours());
-  assert.deepEqual(box.writes(), []);
-});
-
-test('the CLIs run from the home folder, so no project configuration applies', t => {
-  const box = sandbox(t);
-  const seen = [];
-  const run = (bin, args) => {
-    seen.push(args);
-    return runAgent(bin, args, { env: box.env, cwd: box.home });
-  };
-  // runAgent's own default is the home folder; this checks the stub sees it as the cwd.
-  const where = spawnSync(process.execPath, ['-e', 'import("./src/install.mjs").then(m => { const r = m.runAgent(process.execPath, ["-e", "console.log(process.cwd())"]); console.log(r.stdout.trim()); })'],
-    { cwd: repo, env: box.env, encoding: 'utf8' });
-  assert.equal(where.stdout.trim().toLowerCase(), box.home.toLowerCase());
-  assert.equal(setupAgents({ mode: 'install', agents: ['codex'], env: box.env, run }).ok, true);
-  assert.ok(seen.length);
-});
-
-test('--dry-run changes no file and runs no command that writes, for install and uninstall', t => {
+test('--dry-run changes no file, runs no command that writes and never asks Claude', t => {
   const box = sandbox(t);
   const result = box.ledger('install', '--dry-run');
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /Claude Code \(dry run\)\n {2}MCP server: would run /u);
+  assert.match(result.stdout, /Claude Code \(dry run\)\n {2}MCP server: would run .*refuses it when the name is already registered/u);
+  assert.match(result.stdout, /Codex \(dry run\)\n {2}MCP server: would run /u);
   assert.match(result.stdout, /Instructions: would create /u);
   assert.equal(existsSync(join(box.home, '.claude')), false);
   assert.equal(existsSync(join(box.home, '.codex')), false);
   assert.deepEqual(box.writes(), []);
+  assert.deepEqual(box.calls().filter(call => call[0] === 'claude'), [], 'no Claude call at all');
 
   assert.equal(box.ledger('install').status, 0);
   const snapshot = [readFileSync(box.files.claude), JSON.stringify(box.servers('claude'))];
   const dry = box.ledger('uninstall', '--dry-run');
   assert.equal(dry.status, 0);
-  assert.match(dry.stdout, /would run .*mcp remove/u);
   assert.match(dry.stdout, /Instructions: would remove /u);
   assert.deepEqual([readFileSync(box.files.claude), JSON.stringify(box.servers('claude'))], snapshot);
   assert.equal(box.writes().length, 2);
 });
 
-test('unmatched or edited markers, UTF-16 with or without a BOM, NUL bytes and invalid UTF-8 are refused before any CLI call', t => {
+test('unmatched or edited markers, UTF-16 with a BOM, NUL bytes and invalid UTF-8 are refused before any CLI call', t => {
   const cases = [
     [Buffer.from(`Notes${nl}${startMarker}${nl}half a block${nl}`), /unmatched Context Ledger markers/u],
     [Buffer.from(block(nl).replace('## Context Ledger', '## My heading')), /was edited by hand/u],
@@ -302,35 +280,47 @@ test('unmatched or edited markers, UTF-16 with or without a BOM, NUL bytes and i
   }
 });
 
-test('a missing CLI skips its registration, still handles the block and fails the command', t => {
+test('a missing CLI skips its registration, still writes the block and fails install; uninstall needs no CLI', t => {
   const box = sandbox(t);
   box.env.CONTEXT_LEDGER_CODEX_BIN = join(box.root, 'no such dir', 'codex');
+  box.env.CONTEXT_LEDGER_CLAUDE_BIN = join(box.root, 'no such dir', 'claude');
   const result = box.ledger('install');
   assert.equal(result.status, 1);
   assert.match(result.stdout, /Codex\n {2}MCP server: .*codex was not found, so the server was not registered\. .*CONTEXT_LEDGER_CODEX_BIN/u);
+  assert.match(result.stdout, /Claude Code\n {2}MCP server: .*claude was not found/u);
   assert.equal(readFileSync(box.files.codex, 'utf8'), block(nl));
-  const removed = box.ledger('uninstall', '--agent', 'codex');
-  assert.equal(removed.status, 1);
-  assert.match(removed.stdout, /was not removed/u);
-  assert.equal(existsSync(box.files.codex), false, 'the block is still removed');
-  assert.deepEqual(box.writes().map(call => call[0]), ['claude']);
+  assert.match(box.ledger('install', '--agent', 'claude', '--dry-run').stdout, /claude was not found/u);
+  const removed = box.ledger('uninstall');
+  assert.equal(removed.status, 0);
+  assert.equal(existsSync(box.files.codex), false);
+  assert.deepEqual(box.calls(), []);
 });
 
-test('a CLI that answers with an error is not taken as "not registered", and nothing changes', t => {
-  const box = sandbox(t);
-  box.write(box.files.claude, `Rules${nl}`);
-  box.env.STUB_BROKEN = 'claude';
-  for (const mode of ['install', 'uninstall']) {
-    const result = box.ledger(mode, '--agent', 'claude');
-    assert.equal(result.status, 1, mode);
-    assert.match(result.stdout, /mcp get context-ledger failed \(config file is broken\)/u);
-    assert.match(result.stdout, /Instructions: left as they are, because the CLI did not answer/u);
+test('a CLI that answers with an error is not taken as "not registered", and the file is left alone', t => {
+  for (const agent of ['claude', 'codex']) {
+    const box = sandbox(t);
+    box.write(box.files[agent], `Rules${nl}`);
+    box.env.STUB_BROKEN = agent;
+    const result = box.ledger('install', '--agent', agent);
+    assert.equal(result.status, 1, agent);
+    assert.match(result.stdout, /failed \(config file is broken\)/u);
+    assert.match(result.stdout, /Instructions: left as they are, because the server step failed/u);
+    assert.equal(readFileSync(box.files[agent], 'utf8'), `Rules${nl}`);
   }
-  assert.equal(readFileSync(box.files.claude, 'utf8'), `Rules${nl}`);
-  assert.deepEqual(box.writes(), []);
 });
 
-test('a PORT other than 4317 is passed to both servers in a place each CLI parses, and checked on uninstall', t => {
+test('a Codex answer of the wrong shape is a failure, not a present or absent server', async t => {
+  const box = sandbox(t);
+  for (const stdout of ['{}', '[]', 'not json', JSON.stringify({ name: 'context-ledger', transport: { command: 'node' } })]) {
+    const run = (bin, args) => (args[1] === 'get' ? { status: 0, stdout, output: stdout } : assert.fail('no add after a bad answer'));
+    const { ok, lines } = setupAgents({ mode: 'install', agents: ['codex'], env: box.env, run });
+    assert.equal(ok, false, stdout);
+    assert.match(lines.join(nl), /could not be read/u);
+  }
+  assert.equal(existsSync(box.files.codex), false);
+});
+
+test('a PORT other than 4317 is passed to both servers in a place each CLI parses', t => {
   const box = sandbox(t);
   box.env.PORT = '4400';
   const result = box.ledger('install');
@@ -340,11 +330,7 @@ test('a PORT other than 4317 is passed to both servers in a place each CLI parse
     ['codex', 'mcp', 'add', 'context-ledger', '--env', 'PORT=4400', '--', 'node', mcpPath],
   ]);
   assert.deepEqual(box.servers('claude').user['context-ledger'], ours({ PORT: '4400' }));
-  delete box.env.PORT;
-  assert.match(box.ledger('uninstall').stdout, /is not the entry install makes/u, 'without the PORT it is not ours');
-  box.env.PORT = '4400';
-  assert.equal(box.ledger('uninstall').status, 0);
-  assert.deepEqual(box.servers('codex').global, {});
+  assert.deepEqual(box.servers('codex').global['context-ledger'], ours({ PORT: '4400' }));
   for (const port of ['4317x', '0', '65536', '99999']) {
     box.env.PORT = port;
     assert.equal(box.ledger('install').status, 1, port);
