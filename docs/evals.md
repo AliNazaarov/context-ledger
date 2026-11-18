@@ -1386,3 +1386,30 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## G11 — Graph diff between snapshots (defined 2026-11-17, before the code)
+
+A party that publishes again makes a new graph snapshot, and until now an agent had to read both snapshots and compare them itself. `GET /api/graphs/:id/diff?from=:otherId` and the MCP tool `graph_diff` (`graphId`, `fromGraphId`) say what changed from the older snapshot to the newer one:
+
+- **Nodes:** added, removed and changed. A node is changed when it keeps its ID but its label, kind, status, addressee or cited lines differ; the diff names each changed field with its old and new value.
+- **Decisions newly superseded:** decisions that a `supersedes` edge in the newer graph replaces and that were current in the older one.
+- **Questions newly answered or opened**, and **ready actions** gained and lost, from the stored derived lists.
+- **Edges and links:** added and removed.
+
+Both graphs must be version 2 graphs of the same party. Diffing a graph with itself is allowed and reports no change. The diff is JSON, in the canonical order of each graph. The MCP tool renders it as escaped JSON and pages it like `graph_read`.
+
+The room view uses it: a room is tied to two snapshots, so when a newer graph of either party exists, the room says so and shows what changed. A person then opens a new room on the newer graphs, as before.
+
+### What is tested (synthetic transcripts only)
+
+- Two snapshots of one party that add, remove and change nodes (a relabelled decision, an action moved from pending to completed, a node citing new lines), supersede a decision, answer a question and add a link: each change appears once, in the right list, with old and new values. Unchanged nodes do not appear.
+- Swapping `from` and the graph gives the mirror image (added and removed swap).
+- Diffing a graph with itself gives empty lists.
+- Different parties, a version 1 graph, an unknown graph, a malformed ID, a missing `from` and a repeated parameter are refused with fixed messages. A refused `graph_diff` reaches no ledger.
+- Labels in the diff are data: `graph_diff` output escapes control and bidi characters, and the browser sets them with `textContent`.
+- Room: with a newer graph for one party, `GET /api/rooms/:id` names it (`newerGraphs`), and the room view shows the change count and the changed labels. Playwright covers it.
+
+### Acceptance
+
+- The four suites pass, with no new runtime dependency.
+- Codex reviews the change read-only; findings are fixed with tests or recorded here.
