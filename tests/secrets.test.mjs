@@ -217,3 +217,142 @@ test('P4b: ledger redact reports kinds, lines and masked previews, never a value
   const handoff = await cli(['handoff', id], port);
   assert.ok(handoff.stdout.includes(fake['github-token']), 'ledger handoff is unchanged by P4b');
 });
+
+// Review round 1 regressions.
+
+test('P4b review: every GitHub, OpenAI and Stripe variant is found with its exact preview', () => {
+  const variants = [
+    [join2('gh', 'o_', body('Ab3D', 9)), 'github-token', 'gho_…'],
+    [join2('gh', 'u_', body('Ab3D', 9)), 'github-token', 'ghu_…'],
+    [join2('gh', 's_', body('Ab3D', 9)), 'github-token', 'ghs_…'],
+    [join2('gh', 'r_', body('Ab3D', 9)), 'github-token', 'ghr_…'],
+    [fake['github-pat'], 'github-token', 'github_pat_…'],
+    [join2('sk', '-', body('Hk4t', 10)), 'openai-key', 'sk-…'],
+    [fake['openai-key'], 'openai-key', 'sk-proj-…'],
+    [join2('sk', '_test_', body('Rf5G', 6)), 'stripe-key', 'sk_test_…'],
+    [join2('rk', '_live_', body('Rf5G', 6)), 'stripe-key', 'rk_live_…'],
+    [fake['anthropic-key'], 'anthropic-key', 'sk-ant-…'],
+    [join2('sk', '-ant-', body('abcd', 8)), 'anthropic-key', 'sk-ant-…'],
+    [fake['slack-token'], 'slack-token', 'xoxb-…'],
+    [fake['aws-access-key-id'], 'aws-access-key-id', 'AKIA…'],
+    [fake.jwt, 'jwt', 'eyJ…'],
+    [join2('ey', 'JhbGciOiJub25lIn0', '.', 'ey', 'JzdWIiOiIxMjM0In0', '.'), 'jwt', 'eyJ…'],
+  ];
+  for (const [value, kind, preview] of variants) {
+    const text = `value ${value} end`;
+    const found = findSecrets(text);
+    assert.equal(found.length, 1, `${preview}: ${JSON.stringify(found)}`);
+    assert.equal(found[0].kind, kind, preview);
+    assert.equal(text.slice(found[0].start, found[0].end), value, preview);
+    assert.equal(maskedPreview(text, found[0]), preview);
+  }
+});
+
+test('P4b review: overlapping matches merge into one span, with no fragment or prefix left', () => {
+  const inner = fake['github-token'];
+  const text = `Authorization: Bearer abcdef12.${inner} sent`;
+  const found = findSecrets(text);
+  assert.equal(found.length, 1);
+  assert.equal(found[0].kind, 'github-token');
+  assert.equal(text.slice(found[0].start, found[0].end), `abcdef12.${inner}`);
+  assert.equal(maskedPreview(text, found[0]), '…', 'the inner prefix is part of the bearer value');
+  assert.equal(redactText(text), 'Authorization: Bearer [REDACTED github-token] sent');
+  assert.deepEqual(kinds(`ANTHROPIC_KEY=${fake['anthropic-key']}`), ['anthropic-key']);
+});
+
+test('P4b review: long values, long keys and quoted passwords are redacted whole', () => {
+  const longToken = join2('gh', 'p_', body('Ab3D', 80));
+  const longBearer = body('Tq8z', 1500);
+  const bigPem = `-----BEGIN ${pemType}-----\n${(body('q1W2', 16) + '\n').repeat(400)}-----END ${pemType}-----`;
+  const openPem = `-----BEGIN ${pemType}-----\n${body('q1W2', 16)}\n${body('e3R4', 16)}\n\nAfter the key.`;
+  const quote = String.fromCodePoint(39);
+  const cases = [
+    [`a ${longToken} b`, 'a [REDACTED github-token] b'],
+    [`Authorization: Bearer ${longBearer} b`, 'Authorization: Bearer [REDACTED bearer-token] b'],
+    [`x\n${bigPem}\ny`, 'x\n[REDACTED private-key]\ny'],
+    [openPem, '[REDACTED private-key]\n\nAfter the key.'],
+    ['password = "correct horse, battery staple 9!" ok', 'password = "[REDACTED assigned-secret]" ok'],
+    [`api_key: ${body('Zk3m', 200)} ok`, 'api_key: [REDACTED assigned-secret] ok'],
+    [`client_secret=${quote}a\\${quote}b9cd efgh${quote} ok`, `client_secret=${quote}[REDACTED assigned-secret]${quote} ok`],
+  ];
+  for (const [text, expected] of cases) assert.equal(redactText(text), expected, expected);
+  assert.ok(bigPem.length > 16384);
+});
+
+test('P4b review: placeholders by shape, and UUIDs and commit hashes under a name, are not flagged', () => {
+  assert.deepEqual(kinds('token = 0b7e2a4c-9f1d-4e3b-8a5c-6d2f1e0a9b8c'), []);
+  assert.deepEqual(kinds('token = 3f2a9c1e7b4d5a6f8e9c0b1a2d3e4f5a6b7c8d9e'), []);
+  assert.deepEqual(kinds('password = my_RealLooking9Secret'), ['assigned-secret'], 'a my_ prefix is not a placeholder by itself');
+  assert.deepEqual(kinds('token = 9f86d081884c7d659a2feaa0c55ad015'), ['assigned-secret'], 'other hex values can be secrets');
+  assert.deepEqual(kinds('Authorization: Bearer short1'), [], 'bearer values under eight characters are not flagged');
+});
+
+test('P4b review: dense matches and dense unfinished key headers stay fast', () => {
+  const dense = `${fake['aws-access-key-id']} `.repeat(50000);
+  const headers = `-----BEGIN ${pemType}-----\n`.repeat(30000);
+  for (const text of [dense, headers]) {
+    const started = performance.now();
+    findSecrets(text);
+    assert.ok(performance.now() - started < 1500, `${text.length} characters took too long`);
+  }
+});
+
+test('P4b review: the redacted source name, strict escaping, and fixed errors in the CLI', async t => {
+  const { origin, port } = await startServer(t);
+  const zwj = String.fromCodePoint(0x200d);
+  const rlo = String.fromCodePoint(0x202e);
+  const bell = String.fromCodePoint(7);
+  const separator = String.fromCodePoint(0x2028);
+  const source = `${fake['github-token']}.jsonl`;
+  const transcript = JSON.stringify({ type: 'user', message: { role: 'user', content: `odd${zwj}${rlo}${bell}${separator} text and ${fake['stripe-key']}` } });
+  const imported = await (await fetch(`${origin}/api/import`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ provider: 'claude', source, transcript }),
+  })).json();
+  const id = imported.session.id;
+
+  const report = await cli(['redact', id], port);
+  assert.equal(report.stdout, [
+    'source name  github-token  40 characters  ghp_…',
+    'line 1  stripe-key  32 characters  sk_live_…',
+    '2 possible secrets in 2 lines. Values are not shown; use --text for the redacted hand-off.',
+    '',
+  ].join('\n'));
+  const text = await cli(['redact', id, '--text'], port);
+  assert.equal(text.code, 0, text.stderr);
+  // The hand-off renderer escapes Markdown in the source name, brackets included.
+  assert.match(text.stdout, /^Source: \\\[REDACTED github-token\\\]\.jsonl$/mu);
+  for (const run of [report, text]) {
+    assert.ok(!run.stdout.includes(fake['github-token']) && !run.stdout.includes(fake['stripe-key']));
+    assert.doesNotMatch(run.stdout, /[^\P{Cc}\n]|\p{Cf}|\p{Zl}|\p{Zp}/u, 'no raw control, format or separator characters');
+  }
+  assert.match(text.stdout, /\\u200d\\u202e\\u0007\\u2028/u);
+  const odd = await cli(['redact', id, 'constructor'], port);
+  assert.equal(odd.code, 1);
+  assert.match(odd.stderr, /Usage: npm run ledger/u);
+});
+
+test('P4b review: an unreadable server response is a fixed sentence, never its bytes', async () => {
+  const { createServer } = await import('node:http');
+  const leak = `${fake['github-token']}${String.fromCodePoint(27)}[31m`;
+  const bodies = [
+    `{"session": "${leak}`,
+    JSON.stringify({ session: { id: 'a'.repeat(64), source: 'x', provider: 'claude', messages: [{ line: '1', role: 'user', text: leak }] } }),
+  ];
+  for (const reply of bodies) {
+    const server = createServer((request, response) => {
+      response.setHeader('Content-Type', 'application/json');
+      response.end(reply);
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const run = await cli(['redact', 'a'.repeat(64)], String(server.address().port));
+      assert.equal(run.code, 1);
+      assert.match(run.stderr, /Context Ledger returned an unexpected session response\./u);
+      assert.ok(!run.stderr.includes(fake['github-token']) && !run.stdout.includes(fake['github-token']));
+      assert.doesNotMatch(run.stderr, /[^\P{Cc}\n]/u);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
+  }
+});

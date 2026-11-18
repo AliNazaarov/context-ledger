@@ -28,7 +28,7 @@ function command(argv) {
   }
   // Card P4b: report what in a session looks like a secret, without showing any value.
   if (action === 'redact' && args.length >= 1 && args.length <= 2 && /^[a-f0-9]{64}$/.test(args[0])) {
-    const format = args[1] === undefined ? 'report' : { '--json': 'json', '--text': 'text' }[args[1]];
+    const format = args[1] === undefined ? 'report' : args[1] === '--json' ? 'json' : args[1] === '--text' ? 'text' : null;
     if (format) return { action, format, path: '/api/sessions/' + args[0] };
   }
   if (action === 'handoff' && args.length === 1 && /^[a-f0-9]{64}$/.test(args[0])) {
@@ -70,13 +70,29 @@ async function readGraphPacket(packetPath) {
   }
 }
 
+// The hand-off renderer keeps ZWNJ and ZWJ for emoji; the redaction view escapes every
+// format character, so nothing in it can be hidden.
+const strict = text => text.replace(/\p{Cf}/gu, character => Array.from({ length: character.length },
+  (_, index) => `\\u${character.charCodeAt(index).toString(16).padStart(4, '0')}`).join(''));
+
+/** A session as the server returns it, checked before anything is scanned or printed. */
+function sessionShape(data) {
+  const session = data?.session;
+  const ok = session && typeof session === 'object' && /^[a-f0-9]{64}$/u.test(session.id) && typeof session.source === 'string'
+    && typeof session.provider === 'string' && Array.isArray(session.messages)
+    && session.messages.every(message => message && typeof message.text === 'string' && typeof message.role === 'string'
+      && Number.isSafeInteger(message.line) && message.line >= 1);
+  if (!ok) throw new Error('Context Ledger returned an unexpected session response.');
+  return session;
+}
+
 /** Card P4b: the redaction report, the findings as JSON, or the redacted hand-off. */
 function redactionOutput(session, format) {
   const { session: redacted, findings } = redactSession(session);
-  if (format === 'text') return handoffMarkdown(redacted);
-  const lines = new Set(findings.map(finding => finding.line)).size;
+  if (format === 'text') return strict(handoffMarkdown(redacted));
+  const lines = new Set(findings.map(finding => finding.line ?? 'source')).size;
   if (format === 'json') return terminalJson({ sessionId: session.id, count: findings.length, lines, findings });
-  const rows = findings.map(finding => `line ${finding.line}  ${finding.kind}  ${finding.length} characters  ${inlineText(finding.preview)}`);
+  const rows = findings.map(finding => `${finding.line === null ? 'source name' : `line ${finding.line}`}  ${finding.kind}  ${finding.length} characters  ${strict(inlineText(finding.preview))}`);
   const total = findings.length
     ? `${findings.length} possible ${findings.length === 1 ? 'secret' : 'secrets'} in ${lines} ${lines === 1 ? 'line' : 'lines'}. Values are not shown; use --text for the redacted hand-off.`
     : 'No secrets found.';
@@ -113,13 +129,20 @@ async function main() {
     }
     throw new Error(`Context Ledger returned HTTP ${response.status}.`);
   }
+  if (action === 'redact') {
+    let session;
+    try {
+      session = sessionShape(await response.json());
+    } catch {
+      // The parser's message can quote response bytes, so it is never shown.
+      throw new Error('Context Ledger returned an unexpected session response.');
+    }
+    console.log(redactionOutput(session, format));
+    return;
+  }
   const data = await response.json();
   if (action === 'graph') {
     console.log(terminalJson(data));
-    return;
-  }
-  if (action === 'redact') {
-    console.log(redactionOutput(data.session, format));
     return;
   }
   console.log(action === 'search' ? terminalJson(data.sessions) : handoffMarkdown(data.session));

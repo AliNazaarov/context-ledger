@@ -1433,16 +1433,37 @@ All fixtures are synthetic. The fake credentials are put together at test time f
 - **Not over-eager:**
   - Ordinary prose, hex commit hashes, UUIDs, the word "password" without a value, placeholders (`<your-key>`, `xxxx`, `${TOKEN}`, `changeme`) and short values are not flagged.
   - Overlapping matches are reported once, by the most specific kind.
-- **Redaction:** `redactText(text)` replaces each finding with `[REDACTED <kind>]` and leaves everything else byte for byte. `redactSession(session)` does that for every message, keeps line numbers, and lists findings by line and kind.
+- **Deliberate limits** (made explicit after review round 1):
+  - A JWT needs a header and a payload that both start `eyJ`. Its signature may be empty (an unsecured token).
+  - A bearer value needs at least eight characters.
+  - Under a secret-like name, a UUID or a 40-character git commit hash is not flagged, but any other hex value is.
+- **Whole values:** a match is extended to the end of its value: the rest of its character class, the closing quote of a quoted value, or a private key's END line. If there is no END line, every following base64 or PEM header line is included. No tail is ever left behind, however long the value.
+- **Overlaps:** overlapping matches merge into one span labelled with the most specific kind. Its prefix is shown only when that kind's match begins the span.
+- **Redaction:** `redactText(text)` replaces each finding with `[REDACTED <kind>]` and leaves everything else byte for byte. `redactSession(session)` does that for the source name and every message, keeps line numbers, and lists findings by line and kind; a finding in the source name has line `null` and is reported as "source name".
 - **The report never shows a secret:** `npm run ledger -- redact <session-id>` prints, for each finding:
   - its line number and kind;
   - its length;
   - a masked preview that keeps at most the known prefix, such as `ghp_…`, and never any other character of the value.
 
-  It ends with the count and exits 0. With `--json` it prints the same as escaped JSON. With `--text` it prints the redacted hand-off. All output goes through the terminal escaping in `src/text.mjs`, and errors are fixed sentences.
+  It ends with the count and exits 0. With `--json` it prints the same as escaped JSON. With `--text` it prints the redacted hand-off with every format character escaped, ZWNJ and ZWJ included. All output goes through the terminal escaping in `src/text.mjs`. Errors are fixed sentences, including when the server sends something that is not a session.
 - **No surprises in the other tools:** `ledger handoff`, the browser, MCP and the store are unchanged.
 
 ### Acceptance for the code
 
 - `node --test tests/*.test.mjs` passes, with the cases above in `tests/secrets.test.mjs`, including a CLI run against a server on a temporary database.
 - No new dependency. Scanning a 1 MiB synthetic transcript takes under a second.
+
+### P4b results (2026-11-17)
+
+- `tests/secrets.test.mjs` has 15 tests. Fake credentials are assembled at run time. Running the scanner over every committed file finds no provider-format credential.
+- **Codex, round 1** (of 742b071): three high, four medium and three low findings, all fixed with tests:
+  - (high) Overlapping matches kept only one span, so part of an enclosing bearer value could stay visible. Overlaps now merge into one span, and the prefix is hidden unless the labelled match begins it.
+  - (high) Length caps could leave the tail of a long value: private keys over 16 KiB, long bearer values, quoted passwords with spaces. Values are now extended by a linear scan to their real end.
+  - (high) `--text` printed the source name unredacted. It is scanned and redacted, and reported as "source name".
+  - (medium) Anthropic keys with a letter-only tail and unsecured JWTs were missed; the bearer minimum was unstated. Fixed, and the deliberate limits are now in the eval.
+  - (medium) A `my_` prefix hid real secrets, and UUIDs and commit hashes under a name were flagged. Placeholders are now judged by shape, and those two identifiers are excluded.
+  - (medium) Overlap handling was quadratic in the number of matches. It is now one sorted sweep, and unfinished key headers reuse one search for their END line. The tests cover 50,000 matches and 30,000 unfinished headers.
+  - (medium) An unreadable server reply could put its bytes on stderr. The redact path checks the reply's shape and prints a fixed sentence.
+  - (low) `--text` kept ZWNJ and ZWJ. It now escapes every format character.
+  - (low) `constructor` was accepted as a format. The format is now checked exactly.
+  - (low) The tests now cover every GitHub, OpenAI and Stripe variant with exact spans and previews, plus full CLI output.
