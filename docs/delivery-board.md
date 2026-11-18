@@ -7,7 +7,8 @@ Claim a card before working on it (AGENTS.md section 2). States: Backlog, Ready,
 | C3 Semantic graph handoff | Claude Code (integrating for Codex) | PR #1, `feature/semantic-graph` | Graph packets, API, CLI, review fixes | In review |
 | P0 Product strategy | Claude Code | `product/strategy`, `product/v1` | Research, product plan, UzCombinator validation | In progress |
 | P1 Architecture and foundation (wave 1) | Claude Code workflows | `product/v1` | `docs/architecture.md`, projects, one row per message, stable IDs, migrations, delete and retention, API token | In progress |
-| P1e Loopback API token | Claude Code (for Ruslan) | `ruslan/p1e-loopback-token` | ADR-10: a token exchanged for a cookie on the loopback server; CLI and MCP keep working. Needs a human security review before merge | In progress |
+| P1e Loopback API token | Claude Code (for Ruslan) | `ruslan/p1e-loopback-token` | ADR-10: a token exchanged for a cookie on the loopback server; CLI and MCP keep working. Needs a human security review before merge | In review |
+| P1f Origin-scoped browser credential | Unassigned (needs P1's owner) | — | From the P1e review: browsers send the P1e session cookie to every port on 127.0.0.1, so a page served by another local program can take a browser session. Replace or back the cookie with a credential scoped to the ledger origin (for example a secret in page storage sent as a header); this changes ADR-10 | Backlog |
 | P2 MCP server and graph v2 (wave 2) | Unassigned | — | Stdio MCP tools, project-scoped graph with message-ID citations and approvals | Backlog (after P1) |
 | P3 Reviewer UI (wave 3) | Unassigned | — | Node and evidence side by side; approve, edit or reject | Backlog (after P2) |
 | P4 Redaction and signed export (wave 4) | Unassigned | — | Secret scanner, redaction diff, Ed25519 signing, `ledger verify` | Backlog (after P2) |

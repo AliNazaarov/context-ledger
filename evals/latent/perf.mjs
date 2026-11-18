@@ -60,7 +60,7 @@ async function ask(question) {
   });
   const data = await response.json();
   if (!response.ok) throw new Error(`${question.id}: HTTP ${response.status} ${inlineText(String(data.error)).slice(0, 200)}`);
-  if (data.mode !== 'latent') throw new Error(`${question.id}: runtime unavailable (${data.reason})`);
+  if (data.mode !== 'latent') throw new Error(`${question.id}: runtime unavailable (${inlineText(String(data.reason)).slice(0, 200)})`);
   return data;
 }
 

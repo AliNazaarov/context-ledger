@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer, request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -532,7 +532,8 @@ test('on POSIX a token file that is a link or readable by others is not read', {
   await symlink(tokenFileFor(real), tokenFileFor(linked));
   assert.equal(await readTokenFile(tokenFileFor(linked)), undefined);
   const open = join(place.directory, 'open.sqlite');
-  await writeFile(tokenFileFor(open), tokenRecord(4317, 'O'.repeat(43)), { mode: 0o644 });
+  await writeFile(tokenFileFor(open), tokenRecord(4317, 'O'.repeat(43)));
+  await chmod(tokenFileFor(open), 0o644);
   assert.equal(await readTokenFile(tokenFileFor(open)), undefined);
 });
 
@@ -562,6 +563,15 @@ test('a clean stop removes the token file, but not one a later start wrote', { s
   await writeTokenText(tokenFileFor(place.database), tokenRecord(third.port, third.token));
   await second.stop();
   assert.deepEqual(await readTokenFile(tokenFileFor(place.database)), { port: third.port, token: third.token });
+
+  // A FIFO put in place of the file cannot hang the stop.
+  const fourth = await place.start(join(place.directory, 'fourth.sqlite'));
+  await rm(tokenFileFor(join(place.directory, 'fourth.sqlite')));
+  await execute('mkfifo', [tokenFileFor(join(place.directory, 'fourth.sqlite'))]);
+  const started = Date.now();
+  await fourth.stop();
+  assert.ok(Date.now() - started < 5000);
+  assert.equal((await stat(tokenFileFor(join(place.directory, 'fourth.sqlite')))).isFIFO(), true);
 });
 
 test('a graph publish and the demo script send nothing where the token does not go', async t => {

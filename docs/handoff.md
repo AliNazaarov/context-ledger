@@ -244,3 +244,14 @@ Next steps:
 
 1. After this merges, rerun the failed `runtime (windows-latest, Python 3.13)` job on any open PR still red from this flake.
 2. H8 (Backlog): keep each model call inside the read deadline as a whole, not per socket read, and map a deadline-capped connect timeout to 504 instead of 503.
+
+## Current checkpoint — P1e loopback API token (2026-11-17)
+
+ADR-10 is built on `ruslan/p1e-loopback-token`. **It needs a human security review before merge.** At each start the server writes `{ port, token }` (32 random bytes) to `<database>.token`. It does this only after it holds the port, with mode 0600 on POSIX, and keeps only the digest. Every route except the static files and `/login` then needs `Authorization: Bearer` or a session cookie, and answers 401 otherwise. The browser signs in through a one-time `/login?code=…` link (60 s, single use), printed at start or by `npm run ledger -- login`. The link sets an HttpOnly, SameSite=Strict cookie for 12 hours. The CLI, the MCP adapter, the handoff benchmark, the demo scripts and the latent evals read the file named by `CONTEXT_LEDGER_DB` and send the token only to the port it names. Tests read their temporary server's file (`tests/ledger-auth.mjs`). Playwright signs pages in through `tests/e2e/fixtures.mjs`. `.token` is now a secret suffix for the latent readers. The threat model, the results and three Codex rounds are in the P1e section of [the eval log](evals.md).
+
+Next steps:
+
+1. Human security review of the PR. The open high finding: browsers send the cookie to every port on 127.0.0.1, so a page served by another local program can take a browser session. The reviewer either accepts this for now (the README warns about it) or asks for card P1f first.
+2. P1f (Backlog): an origin-scoped browser credential, for example a secret kept in page storage and sent as a header, in place of or beside the cookie. It changes ADR-10, so P1's owner decides.
+3. Known limits: same-user programs can read the token file. The folder must be private, and on Windows the file takes its folder's ACL. Two servers on different ports and one database share one token file. The server's default database is relative to its working folder, while clients default to the repository's. The latent runtime on 4320 has no token of its own.
+4. After a merge, MCP configs that set only `PORT` keep working when the ledger runs from the repository. A ledger started with another `CONTEXT_LEDGER_DB` needs the same absolute value in the MCP config.

@@ -5,7 +5,7 @@
 // only SHA-256 digests; the bearer check compares digests in constant time, and codes
 // and sessions are looked up by their digests.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, constants, fstatSync, mkdirSync, openSync, readSync, rmSync, writeSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -62,13 +62,30 @@ export function writeTokenFile(path, token, port) {
   }
 }
 
-/** Removes the token file if it still holds this server's token (another start may have replaced it). */
+/**
+ * Removes the token file if it still holds this server's token (another start may have
+ * replaced it). The read is bounded, non-blocking and refuses links and non-regular
+ * files, so a FIFO put there cannot hang the stop. A start that replaces the file
+ * between this read and the removal loses its file; run one server per database.
+ */
 export function removeTokenFile(path, isOwnToken) {
+  let descriptor;
   try {
-    const record = JSON.parse(readFileSync(path, 'utf8'));
-    if (typeof record?.token === 'string' && secretPattern.test(record.token) && isOwnToken(record.token)) rmSync(path, { force: true });
+    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
+    const info = fstatSync(descriptor);
+    if (!info.isFile() || info.size > maxTokenFileBytes) return;
+    const buffer = Buffer.alloc(maxTokenFileBytes + 1);
+    const bytesRead = readSync(descriptor, buffer, 0, buffer.length, 0);
+    const record = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'));
+    if (typeof record?.token === 'string' && secretPattern.test(record.token) && isOwnToken(record.token)) {
+      closeSync(descriptor);
+      descriptor = undefined;
+      rmSync(path, { force: true });
+    }
   } catch {
-    // Already gone or replaced: nothing to remove.
+    // Already gone, replaced or unreadable: nothing to remove.
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 
@@ -110,7 +127,8 @@ export async function clientToken(port, env = process.env) {
 
 /**
  * The token for a ledger URL, for scripts that take one (LEDGER): only for plain http
- * to the literal 127.0.0.1 (where the ledger listens; localhost may reach ::1) on the
+ * to the IPv4 loopback 127.0.0.1 (where the ledger listens; localhost may reach ::1;
+ * URL parsing also accepts spellings such as 127.1, which are the same address) on the
  * port the token file names, else undefined. This guards against a wrong setting, not
  * against another program that takes the port after the ledger stops.
  */
