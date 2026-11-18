@@ -135,6 +135,15 @@ const routes = [
     const graph = store.getGraph(id);
     return graph ? { graph } : undefined;
   } },
+  { method: 'GET', pattern: idPattern('/api/graphs', '/export'), handler: ({ params: [id], url }) => {
+    // Card G12. One format today; the parameter is there so another can be added.
+    const keys = [...url.searchParams.keys()];
+    if (keys.some(key => key !== 'format') || keys.length > 1 || (keys.length && url.searchParams.get('format') !== 'node-link')) {
+      throw new InputError('The export takes format=node-link or no parameter.');
+    }
+    const graph = store.exportGraph(id);
+    return graph ? { export: graph } : undefined;
+  } },
   { method: 'GET', pattern: idPattern('/api/graphs', '/context'), handler: ({ params: [id] }) => {
     const context = store.getGraphContext(id);
     return context ? { context } : undefined;

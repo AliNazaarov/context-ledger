@@ -235,3 +235,16 @@ Next steps:
 2. G10: a person checks the 82 labels in `evals/handoff/labelled.json`, then live runs (`node evals/handoff/run.mjs --agent claude --model M --runs 10`, the same for codex, then `--summary`). Check token and cost parsing on the first live Claude run.
 3. Still owed from earlier: Ali's review of the runtime changes from cycle 9, the human review of PR #8's schema migration, and Ali's decision on `VLLM_NGRAM=1` (cycle 11).
 4. PR #3 (Ali's draft M0 benchmark, based on `feature/semantic-graph`) was left open: it is Ali's and conflicts with its base.
+
+## Current checkpoint — G12 export for code-graph tools (2026-11-17)
+
+Branch `ruslan/g12-graph-export`. `GET /api/graphs/:id/export` and `npm run ledger -- graph export <graph-id>` write a graph as node-link JSON for Graphify (`src/export.mjs`). The eval and results are in the G12 section of [the eval log](evals.md).
+
+- Node IDs are `ctm_<party>__<node id>` with `-` turned into `_` (version 1 graphs: `ctm_session_<8 characters>__…`). The schemas' ID rule makes this one-to-one, and the double underscore keeps party and node apart.
+- The export is undirected (`directed: false`), because `graphify merge-graphs` composes into an undirected graph and refuses a directed one. That was found by running the real Graphify. `ledger_from` and `ledger_to` keep each link's direction.
+- Cross-graph links point at the other party's node IDs, so two parties' exports in one `graphify-out` folder join when merged.
+
+Next steps:
+
+1. Merge with a real code graph and check that `graphify query` and `graphify explain` find the decisions. This card only merged two exports with each other.
+2. Decisions that name files or functions could link to the matching code nodes; that needs Graphify's code node IDs and would be a new card.

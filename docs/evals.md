@@ -1387,21 +1387,23 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - a file with no kept answer stops the run.
 - No new runtime dependency.
 
-## G12 — Export for code-graph tools (defined 2026-11-17, before the code)
+## G12 — Export for code-graph tools (defined 2026-11-17, before the code; revised after trying the real Graphify)
 
 A decision graph can be exported as node-link JSON, the format NetworkX writes and Graphify keeps in `graphify-out/graph.json` (edges under `links`). `graphify merge-graphs` can then put the decisions beside a code graph. The export is `GET /api/graphs/:id/export` and `npm run ledger -- graph export <graph-id>`.
 
-- **Graph:** `directed: true`, `multigraph: false`, and `graph` names the source (`context-ledger`), the graph ID, the party and the session.
-- **Nodes:** one per graph node. The ID is `ctm_<party>_<node id>`, lowercased with every character outside `[a-z0-9]` turned into `_`, because Graphify's IDs use that alphabet. Two nodes whose IDs would collide get a short suffix from a hash of their original ID, so the IDs stay unique and deterministic. Each node keeps its `label`. It also gets `file_type` (`rationale` for decisions and constraints, `concept` for the other kinds) and `source_file` (the transcript's file name). `source_location` holds the cited lines (`L2, L5`), and `kind`, `status` and `to` are kept as they are. `ledger_graph` and `ledger_node` lead back to the ledger.
-- **Links:** one per edge, with `relation` set to the edge type (`supersedes`, `depends_on`…), `confidence` `EXTRACTED`, `confidence_score` 1 and `weight` 1. Each cross-graph link also becomes a link, to the other party's node ID in the same naming. When both parties are exported and merged, their nodes join.
-- Version 1 graphs have no party; their IDs use `ctm_session_<first 8 characters of the session ID>_…`.
+- **Graph:** `directed: false` and `multigraph: false`, as Graphify's own graphs are. `merge-graphs` composes into an undirected graph and refuses a directed one; this was found by running it. `graph` names the source (`context-ledger`), the graph ID, the party and the session.
+- **Nodes:** one per graph node, with the ID `ctm_<party>__<node id>` and every `-` turned into `_`, to fit Graphify's `[a-z0-9_]` alphabet. Party names and node IDs allow only lowercase letters, digits and single hyphens in both schemas, so this never makes two names one. A double underscore cannot come from a single hyphen, so it separates party and node without ambiguity (`leo-x` with `y`, against `leo` with `x-y`). Version 1 graphs have no party and use `ctm_session_<first 8 characters of the session ID>__…`.
+  - Each node keeps its `label`, and gets `file_type` (`rationale` for decisions and constraints, `concept` for the other kinds) and `source_file` (the transcript's file name).
+  - `source_location` holds the cited lines (`L2, L5`), and `kind`, `status` and `to` are kept as they are.
+  - `ledger_graph` and `ledger_node` lead back to the ledger.
+- **Links:** one per edge, with `relation` set to the edge type (`supersedes`, `depends_on`…), `confidence` `EXTRACTED`, `confidence_score` 1 and `weight` 1. Because the graph is undirected, `ledger_from` and `ledger_to` keep the direction. Each cross-graph link becomes a link to the other party's node ID in the same naming, so the two parties' exports join when they are merged. `merge-graphs` prefixes IDs with the name of the folder above the file's folder, so the exports go in the same `graphify-out` folder as the code graph.
 
 ### What is tested (synthetic transcripts only)
 
-- The export of a two-party fixture has the fields above, one node per graph node and one link per edge and cross-graph link, and every link's ends are node IDs of the export or of the other party's export.
-- IDs: `Port-4317` and `port_4317` in one graph get distinct IDs, and exporting twice gives the same IDs. A party or node ID in another script still gives an ID in `[a-z0-9_]`.
-- The route refuses an unknown `format` and a repeated parameter with fixed messages, and answers 404 for an unknown graph. The CLI prints the export, with control and bidi characters escaped.
-- Merging the two parties' exports with the real `graphify merge-graphs` (run by hand on Windows; Graphify is not a dependency) gives one graph that holds both parties' nodes and the links between them. The result is recorded here.
+- The export of a two-party fixture has the fields above, one node per graph node and one link per edge and cross-graph link. Every link's ends are node IDs of the export or of the other party's export.
+- IDs: a party with a hyphen and a node with a hyphen never give the same ID as another split, exporting twice gives the same IDs, and every ID matches `^[a-z0-9_]+$`. A version 1 graph uses the session namespace.
+- The route refuses any parameter other than `format=node-link`, with a fixed message, and answers 404 for an unknown graph. The CLI prints the export, with control and bidi characters escaped, as JSON that parses back to the same export.
+- Merging the two parties' exports with the real `graphify merge-graphs` (run by hand on Windows; Graphify is not a dependency) gives one graph with both parties' nodes and the links between them. The result is recorded below.
 
 ### Acceptance
 

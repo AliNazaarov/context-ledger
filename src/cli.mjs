@@ -6,7 +6,8 @@ import { terminalJson } from './text.mjs';
 const usage = 'Usage: npm run ledger -- search [--provider claude|codex] [query]\n' +
   '       npm run ledger -- handoff <session-id>\n' +
   '       npm run ledger -- graph publish <packet.json>\n' +
-  '       npm run ledger -- graph read <graph-id>';
+  '       npm run ledger -- graph read <graph-id>\n' +
+  '       npm run ledger -- graph export <graph-id>';
 const maxGraphPacketBytes = 8 * 1024 * 1024;
 
 function command(argv) {
@@ -32,6 +33,10 @@ function command(argv) {
     if (operation === 'publish') return { action, path: '/api/graphs', packetPath: value };
     if (operation === 'read' && /^[a-f0-9]{64}$/.test(value)) {
       return { action, path: '/api/graphs/' + value };
+    }
+    // Card G12: node-link JSON on stdout, to redirect into a file for Graphify.
+    if (operation === 'export' && /^[a-f0-9]{64}$/.test(value)) {
+      return { action, path: `/api/graphs/${value}/export`, exportOnly: true };
     }
   }
   throw new Error(usage);
@@ -64,7 +69,7 @@ async function readGraphPacket(packetPath) {
 }
 
 async function main() {
-  const { action, path, packetPath } = command(process.argv.slice(2));
+  const { action, path, packetPath, exportOnly } = command(process.argv.slice(2));
   const port = Number(process.env.PORT ?? 4317);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT.');
   const origin = `http://127.0.0.1:${port}`;
@@ -95,7 +100,7 @@ async function main() {
   }
   const data = await response.json();
   if (action === 'graph') {
-    console.log(terminalJson(data));
+    console.log(terminalJson(exportOnly ? data.export : data));
     return;
   }
   console.log(action === 'search' ? terminalJson(data.sessions) : handoffMarkdown(data.session));
