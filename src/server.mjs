@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { GraphInputError } from './graph.mjs';
 import { LatentError, latentFiles, latentRead, latentTeam, latentTransfer } from './latent.mjs';
-import { InputError, isProvider, openStore } from './store.mjs';
+import { InputError, isProjectSlug, isProvider, openStore, projectSlugRule } from './store.mjs';
 
 const maxRequestBytes = 8 * 1024 * 1024;
 const staticFiles = new Map([
@@ -114,10 +114,14 @@ const routes = [
     const provider = url.searchParams.get('provider') ?? '';
     if (query.length > 512) throw new InputError('Search is limited to 512 characters.');
     if (provider && !isProvider(provider)) throw new InputError('Unknown provider.');
+    // A project slug filters; an unknown one matches nothing. Errors never echo it.
+    if (url.searchParams.getAll('project').length > 1) throw new InputError('project may appear once.');
+    const project = url.searchParams.get('project') ?? '';
+    if (project && !isProjectSlug(project)) throw new InputError(projectSlugRule);
     // The browser and the CLI send neither limit nor after and get every match, as before.
-    if (!url.searchParams.has('limit') && !url.searchParams.has('after')) return { sessions: store.list(query, provider) };
+    if (!url.searchParams.has('limit') && !url.searchParams.has('after')) return { sessions: store.list(query, provider, project) };
     const { limit = 100, after } = listParameters(url, []);
-    return store.listSessionsPage({ query, provider, limit, after });
+    return store.listSessionsPage({ query, provider, project, limit, after });
   } },
   { method: 'GET', path: '/api/graphs', handler: ({ url }) => {
     const { limit = 20, after, sessionId, party } = listParameters(url, ['sessionId', 'party']);
