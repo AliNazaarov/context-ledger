@@ -1,0 +1,486 @@
+import assert from 'node:assert/strict';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
+import { createPrivateKey, createPublicKey, generateKeyPairSync, sign as edSign, verify as edVerify } from 'node:crypto';
+import {
+  appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import { canonicalJson, keyFingerprint, normalizeFingerprint, verifyBundle } from '../src/sign.mjs';
+
+const cp = (...points) => String.fromCodePoint(...points);
+const BS = cp(92);
+const u = hex => BS + 'u' + hex;
+const sessionId = 'a'.repeat(64);
+const session = {
+  id: sessionId,
+  provider: 'claude',
+  source: 'synthetic-p4a.jsonl',
+  messages: [
+    { role: 'user', line: 1, text: 'Synthetic: ship the signed hand-off on Friday.' },
+    { role: 'assistant', line: 2, text: 'Synthetic: noted, Friday, with the verify command.' },
+  ],
+};
+
+function run(args, env = {}) {
+  return new Promise(resolve => {
+    execFile(process.execPath, ['src/cli.mjs', ...args], { env: { ...process.env, ...env } }, (error, stdout, stderr) => {
+      resolve({ code: error ? error.code : 0, stdout, stderr });
+    });
+  });
+}
+
+async function fakeLedger(t) {
+  const server = createServer((request, response) => {
+    response.setHeader('Content-Type', 'application/json');
+    if (request.url === '/api/sessions/' + sessionId) {
+      response.end(JSON.stringify({ session }));
+      return;
+    }
+    response.statusCode = 404;
+    response.end('{}');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  return String(server.address().port);
+}
+
+function tempFolder(t) {
+  const folder = mkdtempSync(join(tmpdir(), 'ledger-p4a-'));
+  t.after(() => rmSync(folder, { recursive: true, force: true }));
+  return folder;
+}
+
+// One key and one signed bundle per test, all in a temporary folder.
+async function signedBundle(t) {
+  const folder = tempFolder(t);
+  const env = { CONTEXT_LEDGER_DB: join(folder, 'data', 'ledger.sqlite'), PORT: await fakeLedger(t) };
+  const keygen = await run(['keygen'], env);
+  assert.equal(keygen.code, 0, keygen.stderr);
+  const bundle = join(folder, 'bundle');
+  const signed = await run(['handoff', sessionId, '--sign', bundle], env);
+  assert.equal(signed.code, 0, signed.stderr);
+  const privateKey = createPrivateKey(readFileSync(join(folder, 'data', 'signing-key.pem')));
+  return { folder, env, bundle, fingerprint: keygen.stdout.trim(), privateKey };
+}
+
+let copies = 0;
+function copyOf(context, change) {
+  const target = join(context.folder, 'copy-' + (copies += 1));
+  cpSync(context.bundle, target, { recursive: true });
+  change?.(target);
+  return target;
+}
+
+function flipByte(path, index) {
+  const bytes = readFileSync(path);
+  const at = index ?? Math.floor(bytes.length / 2);
+  bytes[at] ^= 0x01;
+  writeFileSync(path, bytes);
+}
+
+async function problemsOf(dir, options) {
+  return (await verifyBundle(dir, options)).problems;
+}
+
+// --- RFC 8785 ---------------------------------------------------------------------
+
+test('canonicalJson matches the RFC 8785 section 3.2.2 example', () => {
+  const input = '{"numbers": [333333333.33333329, 1E30, 4.50, 2e-3, 0.000000000000000000000000001],' +
+    ' "string": "' + u('20ac') + '$' + u('000F') + u('000a') + "A'" + u('0042') + u('0022') + u('005c') +
+    BS + BS + BS + '"' + BS + '/", "literals": [null, true, false]}';
+  const expected = '{"literals":[null,true,false],"numbers":[333333333.3333333,1e+30,4.5,0.002,1e-27],' +
+    '"string":"' + cp(0x20ac) + '$' + u('000f') + BS + 'n' + "A'B" + BS + '"' + BS + BS + BS + BS + BS + '"' + '/"}';
+  assert.equal(canonicalJson(JSON.parse(input)), expected);
+});
+
+test('canonicalJson sorts keys by UTF-16 code units (RFC 8785 section 3.2.3)', () => {
+  const value = {
+    [cp(0x20ac)]: 'Euro Sign',
+    [cp(0x0d)]: 'Carriage Return',
+    [cp(0xfb33)]: 'Hebrew Letter Dalet With Dagesh',
+    1: 'One',
+    [cp(0x1f600)]: 'Emoji: Grinning Face',
+    [cp(0x80)]: 'Control',
+    [cp(0xf6)]: 'Latin Small Letter O With Diaeresis',
+  };
+  const expected = '{"' + BS + 'r":"Carriage Return","1":"One","' + cp(0x80) + '":"Control","' + cp(0xf6) +
+    '":"Latin Small Letter O With Diaeresis","' + cp(0x20ac) + '":"Euro Sign","' + cp(0x1f600) +
+    '":"Emoji: Grinning Face","' + cp(0xfb33) + '":"Hebrew Letter Dalet With Dagesh"}';
+  assert.equal(canonicalJson(value), expected);
+});
+
+test('canonicalJson numbers match the RFC 8785 Appendix B table', () => {
+  const table = [
+    ['0000000000000000', '0'], ['8000000000000000', '0'], ['0000000000000001', '5e-324'],
+    ['8000000000000001', '-5e-324'], ['7fefffffffffffff', '1.7976931348623157e+308'],
+    ['ffefffffffffffff', '-1.7976931348623157e+308'], ['4340000000000000', '9007199254740992'],
+    ['c340000000000000', '-9007199254740992'], ['4430000000000000', '295147905179352830000'],
+    ['44b52d02c7e14af5', '9.999999999999997e+22'], ['44b52d02c7e14af6', '1e+23'],
+    ['44b52d02c7e14af7', '1.0000000000000001e+23'], ['444b1ae4d6e2ef4e', '999999999999999700000'],
+    ['444b1ae4d6e2ef4f', '999999999999999900000'], ['444b1ae4d6e2ef50', '1e+21'],
+    ['3eb0c6f7a0b5ed8c', '9.999999999999997e-7'], ['3eb0c6f7a0b5ed8d', '0.000001'],
+    ['41b3de4355555553', '333333333.3333332'], ['41b3de4355555554', '333333333.33333325'],
+    ['41b3de4355555555', '333333333.3333333'], ['41b3de4355555556', '333333333.3333334'],
+    ['41b3de4355555557', '333333333.33333343'], ['becbf647612f3696', '-0.0000033333333333333333'],
+    ['43143ff3c1cb0959', '1424953923781206.2'],
+  ];
+  const view = new DataView(new ArrayBuffer(8));
+  for (const [bits, expected] of table) {
+    view.setBigUint64(0, BigInt('0x' + bits));
+    assert.equal(canonicalJson(view.getFloat64(0)), expected, bits);
+  }
+  for (const bits of ['7fffffffffffffff', '7ff0000000000000', 'fff0000000000000']) {
+    view.setBigUint64(0, BigInt('0x' + bits));
+    assert.throws(() => canonicalJson([view.getFloat64(0)]), TypeError, bits);
+  }
+});
+
+test('canonicalJson keeps array order, nests objects and refuses values that are not JSON', () => {
+  assert.equal(canonicalJson({ b: [3, { d: 1, c: [] }], a: {} }), '{"a":{},"b":[3,{"c":[],"d":1}]}');
+  assert.equal(canonicalJson(cp(0x1f600)), '"' + cp(0x1f600) + '"');
+  for (const bad of [undefined, () => 1, new Date(0), 1n, Symbol('s'), [undefined], { a: undefined },
+    cp(0xd800), 'x' + cp(0xdfff), { [cp(0xdc00)]: 1 }, new Array(1)]) {
+    assert.throws(() => canonicalJson(bad), TypeError);
+  }
+});
+
+test('fingerprints accept spaces, colons or no separators in any case', () => {
+  const hex = 'ab'.repeat(32);
+  assert.equal(normalizeFingerprint(hex.toUpperCase().match(/../g).join(':')), hex);
+  assert.equal(normalizeFingerprint(hex.match(/.{4}/g).join(' ')), hex);
+  assert.throws(() => normalizeFingerprint(hex.slice(2)), /64 hex digits/);
+  assert.throws(() => normalizeFingerprint(hex.slice(2) + 'zz'), /64 hex digits/);
+});
+
+// --- keygen -------------------------------------------------------------------------
+
+test('keygen writes one Ed25519 key, prints only its fingerprint and never replaces it', async t => {
+  const folder = tempFolder(t);
+  const env = { CONTEXT_LEDGER_DB: join(folder, 'data', 'ledger.sqlite') };
+  const first = await run(['keygen'], env);
+  assert.equal(first.code, 0, first.stderr);
+  assert.match(first.stdout, /^(?:[0-9a-f]{4} ){15}[0-9a-f]{4}\n$/);
+  assert.equal(first.stderr, '');
+
+  const keyPath = join(folder, 'data', 'signing-key.pem');
+  const pem = readFileSync(keyPath);
+  assert.match(pem.toString(), /^-----BEGIN PRIVATE KEY-----\n/);
+  const privateKey = createPrivateKey(pem);
+  assert.equal(privateKey.asymmetricKeyType, 'ed25519');
+  assert.equal(first.stdout.trim(), keyFingerprint(createPublicKey(privateKey)));
+  assert.deepEqual(readdirSync(join(folder, 'data')), ['signing-key.pem']);
+  if (process.platform !== 'win32') assert.equal(statSync(keyPath).mode & 0o777, 0o600);
+
+  const second = await run(['keygen'], env);
+  assert.equal(second.code, 1);
+  assert.equal(second.stdout, '');
+  assert.match(second.stderr, /A signing key already exists\. It was not replaced\./);
+  assert.ok(readFileSync(keyPath).equals(pem), 'the existing key is byte-identical');
+});
+
+test('keygen refuses an in-memory database location', async () => {
+  const result = await run(['keygen'], { CONTEXT_LEDGER_DB: ':memory:' });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Set CONTEXT_LEDGER_DB to a file path/);
+});
+
+test('a signing key file other users can read is refused on POSIX', { skip: process.platform === 'win32' }, async t => {
+  const folder = tempFolder(t);
+  const env = { CONTEXT_LEDGER_DB: join(folder, 'ledger.sqlite'), PORT: await fakeLedger(t) };
+  assert.equal((await run(['keygen'], env)).code, 0);
+  execFileSync('chmod', ['644', join(folder, 'signing-key.pem')]);
+  const result = await run(['handoff', sessionId, '--sign', join(folder, 'bundle')], env);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Other users can read the signing key file/);
+  assert.ok(!existsSync(join(folder, 'bundle')));
+});
+
+test('the default key file name is ignored by Git', () => {
+  for (const path of ['signing-key.pem', 'data/signing-key.pem', '.context-ledger/signing-key.pem']) {
+    const result = spawnSync('git', ['check-ignore', '-q', path]);
+    if (result.error) return;
+    assert.equal(result.status, 0, path);
+  }
+});
+
+// --- handoff --sign -------------------------------------------------------------------
+
+test('handoff --sign writes exactly the hand-off, the key, a canonical manifest and its signature', async t => {
+  const context = await signedBundle(t);
+  assert.deepEqual(readdirSync(context.bundle).sort(), ['handoff.md', 'manifest.json', 'manifest.sig', 'public-key.pem']);
+
+  const plain = await run(['handoff', sessionId], context.env);
+  assert.equal(plain.code, 0, plain.stderr);
+  const markdown = readFileSync(join(context.bundle, 'handoff.md'));
+  assert.equal(markdown.toString('utf8'), plain.stdout, 'the file holds what handoff prints');
+
+  const manifestBytes = readFileSync(join(context.bundle, 'manifest.json'));
+  const manifest = JSON.parse(manifestBytes.toString('utf8'));
+  assert.equal(canonicalJson(manifest), manifestBytes.toString('utf8'));
+  assert.ok(!manifestBytes.toString('utf8').endsWith('\n'));
+  assert.deepEqual(Object.keys(manifest).sort(),
+    ['algorithm', 'created_at', 'files', 'format', 'public_key', 'session', 'version']);
+  assert.equal(manifest.format, 'context-ledger-signed-handoff');
+  assert.equal(manifest.version, 1);
+  assert.equal(manifest.algorithm, 'Ed25519');
+  assert.equal(manifest.session, sessionId);
+  assert.match(manifest.created_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  const { createHash } = await import('node:crypto');
+  assert.deepEqual(manifest.files, [{
+    name: 'handoff.md', bytes: markdown.length, sha256: createHash('sha256').update(markdown).digest('hex'),
+  }]);
+
+  const publicKey = createPublicKey({ key: Buffer.from(manifest.public_key, 'base64'), format: 'der', type: 'spki' });
+  assert.equal(keyFingerprint(publicKey), context.fingerprint);
+  assert.equal(readFileSync(join(context.bundle, 'public-key.pem'), 'utf8'), publicKey.export({ type: 'spki', format: 'pem' }));
+  const signature = readFileSync(join(context.bundle, 'manifest.sig'));
+  assert.equal(signature.length, 64);
+  assert.ok(edVerify(null, manifestBytes, publicKey, signature));
+});
+
+test('handoff --sign never writes into an existing folder and needs a key', async t => {
+  const context = await signedBundle(t);
+  const before = readdirSync(context.bundle).map(name => [name, readFileSync(join(context.bundle, name))]);
+  const again = await run(['handoff', sessionId, '--sign', context.bundle], context.env);
+  assert.equal(again.code, 1);
+  assert.match(again.stderr, /The output folder already exists/);
+  for (const [name, bytes] of before) assert.ok(readFileSync(join(context.bundle, name)).equals(bytes), name);
+
+  const empty = join(context.folder, 'empty');
+  mkdirSync(empty);
+  assert.equal((await run(['handoff', sessionId, '--sign', empty], context.env)).code, 1);
+  assert.deepEqual(readdirSync(empty), []);
+
+  const noKey = { ...context.env, CONTEXT_LEDGER_DB: join(context.folder, 'other', 'ledger.sqlite') };
+  const missing = await run(['handoff', sessionId, '--sign', join(context.folder, 'unsigned')], noKey);
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /No signing key\. Run npm run ledger -- keygen first\./);
+  assert.ok(!existsSync(join(context.folder, 'unsigned')));
+
+  for (const args of [['handoff', sessionId, '--sign'], ['handoff', sessionId, '--sign='],
+    ['handoff', sessionId, '--sign', 'x', '--bogus' + cp(0x1b)]]) {
+    const usage = await run(args, context.env);
+    assert.equal(usage.code, 1, args.join(' '));
+    assert.match(usage.stderr, /^Usage:/);
+    assert.ok(!usage.stderr.includes(cp(0x1b)));
+  }
+});
+
+// --- verify ---------------------------------------------------------------------------
+
+test('verify passes an untouched bundle and checks the fingerprint in any separator style', async t => {
+  const context = await signedBundle(t);
+  const unchecked = await run(['verify', context.bundle]);
+  assert.equal(unchecked.code, 0, unchecked.stderr);
+  assert.match(unchecked.stdout, /^Verified: handoff\.md \(\d+ bytes\)\./);
+  assert.ok(unchecked.stdout.includes('Key fingerprint: ' + context.fingerprint));
+  assert.match(unchecked.stderr, /Warning: the key was not checked/);
+
+  const hex = context.fingerprint.replace(/ /g, '');
+  for (const fingerprint of [context.fingerprint, hex, hex.toUpperCase().match(/../g).join(':')]) {
+    const checked = await run(['verify', context.bundle, '--fingerprint', fingerprint]);
+    assert.equal(checked.code, 0, checked.stderr);
+    assert.equal(checked.stderr, '');
+  }
+
+  const wrong = await run(['verify', context.bundle, '--fingerprint', 'f'.repeat(64)]);
+  assert.equal(wrong.code, 1);
+  assert.match(wrong.stderr, /signed by a different key than the fingerprint names/);
+  assert.match(wrong.stderr, /Verification failed\./);
+  assert.equal(wrong.stdout, '');
+});
+
+test('verify fails on any changed or appended byte', async t => {
+  const context = await signedBundle(t);
+  const markdownLength = readFileSync(join(context.bundle, 'handoff.md')).length;
+  for (const index of [0, Math.floor(markdownLength / 2), markdownLength - 1]) {
+    const dir = copyOf(context, target => flipByte(join(target, 'handoff.md'), index));
+    assert.deepEqual(await problemsOf(dir), ['File changed: handoff.md'], 'byte ' + index);
+  }
+  const appended = copyOf(context, target => appendFileSync(join(target, 'handoff.md'), ' '));
+  assert.deepEqual(await problemsOf(appended), ['File changed: handoff.md']);
+
+  // A changed hash digit keeps the manifest canonical, so the signature catches it.
+  const digit = copyOf(context, target => {
+    const path = join(target, 'manifest.json');
+    const text = readFileSync(path, 'utf8');
+    const at = text.indexOf('"sha256":"') + 10;
+    writeFileSync(path, text.slice(0, at) + (text[at] === '0' ? '1' : '0') + text.slice(at + 1));
+  });
+  assert.deepEqual(await problemsOf(digit), ['The signature does not match the manifest.']);
+  const anyByte = copyOf(context, target => flipByte(join(target, 'manifest.json')));
+  assert.equal((await problemsOf(anyByte)).length, 1);
+
+  for (const index of [0, 31, 63]) {
+    const dir = copyOf(context, target => flipByte(join(target, 'manifest.sig'), index));
+    assert.deepEqual(await problemsOf(dir), ['The signature does not match the manifest.']);
+  }
+  const short = copyOf(context, target => {
+    writeFileSync(join(target, 'manifest.sig'), readFileSync(join(target, 'manifest.sig')).subarray(0, 63));
+  });
+  assert.deepEqual(await problemsOf(short), ['The signature does not match the manifest.']);
+
+  const cli = await run(['verify', copyOf(context, target => flipByte(join(target, 'handoff.md')))]);
+  assert.equal(cli.code, 1);
+  assert.match(cli.stderr, /^File changed: handoff\.md\nVerification failed\.\n$/);
+});
+
+test('verify fails on a missing file, an extra file or a subfolder', async t => {
+  const context = await signedBundle(t);
+  for (const name of ['handoff.md', 'manifest.json', 'manifest.sig', 'public-key.pem']) {
+    const dir = copyOf(context, target => unlinkSync(join(target, name)));
+    assert.deepEqual(await problemsOf(dir), ['Missing file: ' + name]);
+  }
+  const extra = copyOf(context, target => writeFileSync(join(target, 'notes.txt'), 'synthetic'));
+  assert.deepEqual(await problemsOf(extra), ['Unexpected file: notes.txt']);
+  const folder = copyOf(context, target => mkdirSync(join(target, 'more')));
+  assert.deepEqual(await problemsOf(folder), ['Not a regular file: more']);
+  const renamed = copyOf(context, target => {
+    renameSync(join(target, 'handoff.md'), join(target, 'Handoff.md'));
+  });
+  assert.deepEqual((await problemsOf(renamed)).sort(), ['Missing file: handoff.md', 'Unexpected file: Handoff.md']);
+  assert.equal((await run(['verify', join(context.folder, 'nowhere')])).code, 1);
+});
+
+test('verify fails on a wrong key unless only the embedded key is trusted', async t => {
+  const context = await signedBundle(t);
+  const other = generateKeyPairSync('ed25519');
+  const resigned = copyOf(context, target => {
+    const manifest = JSON.parse(readFileSync(join(target, 'manifest.json'), 'utf8'));
+    manifest.public_key = other.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    const bytes = Buffer.from(canonicalJson(manifest));
+    writeFileSync(join(target, 'manifest.json'), bytes);
+    writeFileSync(join(target, 'manifest.sig'), edSign(null, bytes, other.privateKey));
+    writeFileSync(join(target, 'public-key.pem'), other.publicKey.export({ type: 'spki', format: 'pem' }));
+  });
+  // Without a pinned fingerprint the bundle is only self-consistent; that is why verify warns.
+  assert.deepEqual(await problemsOf(resigned), []);
+  assert.deepEqual(await problemsOf(resigned, { fingerprint: context.fingerprint }),
+    ['The bundle was signed by a different key than the fingerprint names.']);
+
+  const otherSignature = copyOf(context, target => {
+    writeFileSync(join(target, 'manifest.sig'),
+      edSign(null, readFileSync(join(target, 'manifest.json')), other.privateKey));
+  });
+  assert.deepEqual(await problemsOf(otherSignature), ['The signature does not match the manifest.']);
+
+  const otherPem = copyOf(context, target => {
+    writeFileSync(join(target, 'public-key.pem'), other.publicKey.export({ type: 'spki', format: 'pem' }));
+  });
+  assert.deepEqual(await problemsOf(otherPem), ['public-key.pem does not match the key in the manifest.']);
+});
+
+test('verify refuses a correctly signed manifest that is not canonical', async t => {
+  const context = await signedBundle(t);
+  const text = readFileSync(join(context.bundle, 'manifest.json'), 'utf8');
+  const manifest = JSON.parse(text);
+  const reversed = Object.fromEntries(Object.entries(manifest).reverse());
+  const variants = {
+    whitespace: JSON.stringify(manifest, null, 2),
+    unsorted: JSON.stringify(reversed),
+    duplicate: '{"version":1,' + text.slice(1),
+    'trailing newline': text + '\n',
+    'byte-order mark': cp(0xfeff) + text,
+    'needless escape': text.replace('"Ed25519"', '"Ed' + u('0032') + '5519"'),
+  };
+  for (const [label, variant] of Object.entries(variants)) {
+    const dir = copyOf(context, target => {
+      const bytes = Buffer.from(variant, 'utf8');
+      writeFileSync(join(target, 'manifest.json'), bytes);
+      writeFileSync(join(target, 'manifest.sig'), edSign(null, bytes, context.privateKey));
+    });
+    assert.deepEqual(await problemsOf(dir), ['The manifest is not canonical JSON (RFC 8785).'], label);
+  }
+
+  const shapes = {
+    'extra key': { ...manifest, note: 'x' },
+    'other version': { ...manifest, version: 2 },
+    'bad file name': { ...manifest, files: [{ ...manifest.files[0], name: '../handoff.md' }] },
+    'envelope listed': { ...manifest, files: [...manifest.files, { ...manifest.files[0], name: 'manifest.sig' }] },
+    'bad date': { ...manifest, created_at: '2026-02-30T00:00:00.000Z' },
+  };
+  for (const [label, shape] of Object.entries(shapes)) {
+    const dir = copyOf(context, target => {
+      const bytes = Buffer.from(canonicalJson(shape), 'utf8');
+      writeFileSync(join(target, 'manifest.json'), bytes);
+      writeFileSync(join(target, 'manifest.sig'), edSign(null, bytes, context.privateKey));
+    });
+    assert.deepEqual(await problemsOf(dir), ['The manifest does not match the signed hand-off format.'], label);
+  }
+});
+
+test('verify prints file names from the folder escaped', async t => {
+  const context = await signedBundle(t);
+  const hostile = ['note' + cp(0x202e) + 'dm.exe'];
+  if (process.platform !== 'win32') hostile.push('bell' + cp(0x07) + cp(0x1b) + '[31m');
+  const dir = copyOf(context, target => {
+    for (const name of hostile) writeFileSync(join(target, name), 'synthetic');
+  });
+  const result = await run(['verify', dir]);
+  assert.equal(result.code, 1);
+  for (const point of [0x202e, 0x07, 0x1b]) {
+    assert.ok(![...result.stderr].some(character => character.codePointAt(0) === point), 'raw U+' + point.toString(16));
+  }
+  assert.ok(result.stderr.includes('Unexpected file: note' + u('202e') + 'dm.exe'));
+});
+
+// --- OpenSSL-only recipe ----------------------------------------------------------------
+
+const opensslMissing = (() => {
+  const probe = spawnSync('openssl', ['version'], { encoding: 'utf8' });
+  return probe.error || probe.status !== 0 ? 'openssl is not on PATH' : false;
+})();
+
+function recipeCommands() {
+  const doc = readFileSync('docs/signed-handoff.md', 'utf8').replace(/\r\n/g, '\n');
+  const block = doc.match(/<!-- openssl-recipe -->\n```sh\n([\s\S]*?)```/);
+  assert.ok(block, 'the recipe block is marked in docs/signed-handoff.md');
+  return block[1].split('\n').filter(line => line.startsWith('openssl '))
+    .map(line => line.split(' | ').map(part => part.trim().split(/ +/)));
+}
+
+function runPipeline(pipeline, cwd) {
+  let input;
+  let status = 0;
+  for (const [program, ...args] of pipeline) {
+    const result = spawnSync(program, args, { cwd, input });
+    status = result.status;
+    input = result.stdout;
+  }
+  return { status, stdout: input.toString('utf8') };
+}
+
+test('the OpenSSL-only recipe in the docs accepts a bundle and refuses a changed manifest', { skip: opensslMissing }, async t => {
+  const context = await signedBundle(t);
+  const [fingerprintCommand, signatureCommand, hashCommand] = recipeCommands();
+  assert.ok(hashCommand, 'three recipe commands');
+
+  const fingerprint = runPipeline(fingerprintCommand, context.bundle);
+  assert.equal(fingerprint.status, 0);
+  assert.equal(fingerprint.stdout.match(/= ?([0-9a-f]{64})/)[1], normalizeFingerprint(context.fingerprint));
+
+  const signature = runPipeline(signatureCommand, context.bundle);
+  assert.equal(signature.status, 0, signature.stdout);
+  assert.match(signature.stdout, /Signature Verified Successfully/);
+
+  const manifest = JSON.parse(readFileSync(join(context.bundle, 'manifest.json'), 'utf8'));
+  const hash = runPipeline(hashCommand, context.bundle);
+  assert.equal(hash.status, 0);
+  assert.equal(hash.stdout.match(/= ?([0-9a-f]{64})/)[1], manifest.files[0].sha256);
+
+  const changed = copyOf(context, target => flipByte(join(target, 'manifest.json')));
+  assert.notEqual(runPipeline(signatureCommand, changed).status, 0);
+});
+
+test('the P4a files hold no raw control or format characters', () => {
+  for (const path of ['src/sign.mjs', 'src/cli.mjs', 'tests/sign.test.mjs', 'docs/signed-handoff.md']) {
+    const text = readFileSync(path, 'utf8');
+    const hostile = [...text].filter(character => /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(character)
+      && !['\t', '\n', '\r'].includes(character));
+    assert.deepEqual(hostile, [], path);
+  }
+});
