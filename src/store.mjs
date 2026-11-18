@@ -271,11 +271,11 @@ export function openStore(path) {
       database.close();
     },
 
-    getGraphContext(id) {
+    getGraphContext(id, { question, budget } = {}) {
       const graph = readGraph(id);
       if (!graph) return;
       const row = getDetail.get(graph.packet.sessionId);
-      return graphContext(graph, { ...row, messages: JSON.parse(row.messages) }, { lookupGraph: readGraph });
+      return graphContext(graph, { ...row, messages: JSON.parse(row.messages) }, { lookupGraph: readGraph, question, budget });
     },
   };
 }

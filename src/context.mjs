@@ -1,5 +1,6 @@
 import { canonicalPacket, compareBy, kindOrder } from './graph.mjs';
 import { handoffMarkdown } from './handoff.mjs';
+import { scopedText } from './scope.mjs';
 import { inlineText } from './text.mjs';
 
 // A rough, tokenizer-free estimate, labelled as such wherever it is shown. Vendors
@@ -34,7 +35,7 @@ function linkTargets(links, lookupGraph) {
  * the longest possible prefix. Identifiers that change with any edit (this graph,
  * the transcript snapshot, linked graphs) are in the final section.
  */
-export function contextText(graph, session, { lookupGraph } = {}) {
+export function contextText(graph, session, { lookupGraph, scope } = {}) {
   const packet = canonicalPacket(graph.packet);
   const lines = [
     `# Context Ledger graph v${packet.version}`,
@@ -69,13 +70,20 @@ export function contextText(graph, session, { lookupGraph } = {}) {
     ...[...targets].sort(compareBy(1)).map(([graphId, name]) => `linked graph ${name}: ${graphId}`),
     `session: ${packet.sessionId}`,
     `graph: ${graph.id}`,
+    // Card G9: a scoped briefing says what it left out, as its last line.
+    ...(scope ? [scope] : []),
   ]);
   return lines.join('\n') + '\n';
 }
 
-/** The context text plus a savings estimate against the full Markdown handoff. */
-export function graphContext(graph, session, options) {
-  const text = contextText(graph, session, options);
+/**
+ * The context text plus a savings estimate against the full Markdown handoff. With a
+ * question (and optionally a budget) the text is scoped to it (card G9, src/scope.mjs).
+ */
+export function graphContext(graph, session, { question, budget, ...options } = {}) {
+  const text = question === undefined
+    ? contextText(graph, session, options)
+    : scopedText(graph, { question, budget }, (scoped, scope) => contextText(scoped, session, { ...options, scope }));
   const handoff = handoffMarkdown(session);
   const handoffTokens = estimateTokens(handoff);
   const graphTokens = estimateTokens(text);
