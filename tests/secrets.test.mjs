@@ -533,12 +533,15 @@ test('P4b review 3: every CLI mode prints exactly the expected output and exits 
   const id = imported.session.id;
   const report = await cli(['redact', id], port);
   assert.equal(report.code, 0);
+  assert.equal(report.stderr, '');
   assert.equal(report.stdout, 'line 1  github-token  40 characters  ghp_…\n1 possible secret in 1 line. Values are not shown; use --text for the redacted hand-off.\n');
   const json = await cli(['redact', id, '--json'], port);
   assert.equal(json.code, 0);
+  assert.equal(json.stderr, '');
   assert.deepEqual(JSON.parse(json.stdout), { sessionId: id, count: 1, lines: 1, findings: [{ line: 1, kind: 'github-token', length: 40, preview: 'ghp_…' }] });
   const text = await cli(['redact', id, '--text'], port);
   assert.equal(text.code, 0);
+  assert.equal(text.stderr, '');
   assert.equal(text.stdout, [
     '# Context Ledger handoff',
     '',
@@ -561,4 +564,39 @@ test('P4b review 3: every CLI mode prints exactly the expected output and exits 
     '~~~',
     '',
   ].join('\n'));
+});
+
+// Review round 4 regressions.
+
+test('P4b review 4: padded BEGIN lines, JSON-escaped AWS secrets, and escapes that end a value', () => {
+  const backslash = String.fromCodePoint(92);
+  for (const newline of ['\n', '\r\n']) {
+    const padded = `-----BEGIN ${pemType}-----  ${newline}${body('q1W2', 16)} ${newline}-----END ${pemType}-----\t`;
+    assert.equal(redactText(`a${newline}${padded}${newline}b`), `a${newline}[REDACTED private-key]\t${newline}b`, JSON.stringify(newline));
+  }
+  const secret = `${body('wJal', 9)}abc/`;
+  assert.equal(secret.length, 40);
+  for (const slash of [`${backslash}/`, `${backslash}u002F`]) {
+    const written = secret.slice(0, -1) + slash;
+    const text = `{"aws_secret_access_key":"${written}"}`;
+    assert.equal(redactText(text), '{"aws_secret_access_key":"[REDACTED aws-secret-access-key]"}', slash);
+  }
+  assert.equal(redactText(`{"Authorization":"Bearer abcdefgh123${backslash}nnext"}`), `{"Authorization":"Bearer [REDACTED bearer-token]${backslash}nnext"}`);
+  assert.equal(redactText(`api_key=Zt4Wq8Lm2Np6${backslash},other=1`), 'api_key=[REDACTED assigned-secret],other=1');
+});
+
+test('P4b review 4: a rejected outer value of the same rule keeps the real one inside it', () => {
+  const text = `aws_secret_access_key="x aws_secret_access_key=${fake['aws-secret']}"`;
+  assert.equal(redactText(text), 'aws_secret_access_key="x aws_secret_access_key=[REDACTED aws-secret-access-key]"');
+  const names = `token=${'token='.repeat(40000)}Zt4Wq8Lm2Np6`;
+  assert.deepEqual(findSecrets(names).map(({ start, end }) => [start, end]), [[6, names.length]]);
+});
+
+test('P4b review 4: long runs of spaces inside a key block stay fast', () => {
+  for (const size of [4096, 65536]) {
+    const text = `-----BEGIN ${pemType}-----\n${body('q1W2', 16)}\n${' '.repeat(size)}X\n`.repeat(8);
+    const started = performance.now();
+    findSecrets(text);
+    assert.ok(performance.now() - started < 1000, `${size} spaces took too long`);
+  }
 });

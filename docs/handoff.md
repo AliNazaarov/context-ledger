@@ -244,3 +244,11 @@ Next steps:
 
 1. After this merges, rerun the failed `runtime (windows-latest, Python 3.13)` job on any open PR still red from this flake.
 2. H8 (Backlog): keep each model call inside the read deadline as a whole, not per socket read, and map a deadline-capped connect timeout to 504 instead of 503.
+
+## Current checkpoint — P4b secret scanner and redaction diff (2026-11-17)
+
+Branch `ruslan/p4b-secret-scanner`. `src/secrets.mjs` finds text that looks like a credential: cloud, GitHub, model-provider, Slack and Stripe keys, JWTs, private keys, bearer tokens, and secret-looking values under names such as `password` or `api_key`. It redacts each one as `[REDACTED <kind>]`.
+
+`npm run ledger -- redact <session-id> [--json | --text]` reports line, kind, length and a known public prefix, never a value; `--text` prints the redacted hand-off. `ledger handoff`, the store, the browser and MCP are unchanged.
+
+Next owner: P4a can call `redactSession` before signing an export. The scanner is a heuristic. Codex ran four rounds and every finding is fixed, but round 4's fixes are not reviewed again, and a human security review is still owed.

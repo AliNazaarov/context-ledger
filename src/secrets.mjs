@@ -26,17 +26,52 @@ function runEnd(text, from, cls) {
 }
 
 /**
- * The end of a run that may contain backslash escapes (a value inside a JSON or quoted
- * string, such as \/ or \u002F): a backslash and the character after it belong to the
- * value, unless that character is a line break or a quote.
+ * The escape at i in a JSON or quoted string, decoded: a backslash and one character, or a
+ * backslash, u and four hex digits. Returns the character and how many characters it takes.
+ */
+function escapeAt(text, i) {
+  const backslash = String.fromCodePoint(92);
+  if (text[i] !== backslash || i + 1 >= text.length) return null;
+  if (text[i + 1] === 'u' && /^[0-9A-Fa-f]{4}$/u.test(text.slice(i + 2, i + 6))) {
+    return { character: String.fromCodePoint(parseInt(text.slice(i + 2, i + 6), 16)), length: 6 };
+  }
+  const named = { n: 10, r: 13, t: 9, b: 8, f: 12 }[text[i + 1]];
+  return { character: named === undefined ? text[i + 1] : String.fromCodePoint(named), length: 2 };
+}
+
+/** A quoted value with its escapes decoded, so a check sees the real characters. */
+function decoded(value) {
+  let out = '';
+  for (let i = 0; i < value.length;) {
+    const escape = escapeAt(value, i);
+    if (escape) {
+      out += escape.character;
+      i += escape.length;
+    } else {
+      out += value[i];
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * The end of a run inside a JSON or quoted string: plain characters of cls, and escapes
+ * whose decoded character is in cls. An escape that decodes to anything else, such as a
+ * line break or a quote, ends the value, so the text after it survives.
  */
 function escapedRunEnd(text, from, cls) {
   let end = from;
   while (end < text.length) {
-    // A backslash before a line break or a quote ends the value: the quote closes the string.
-    if (text[end] === '\\' && end + 1 < text.length && !/[\n\r"'`]/u.test(text[end + 1])) end += 2;
-    else if (cls.test(text[end])) end += 1;
-    else break;
+    const escape = escapeAt(text, end);
+    if (escape) {
+      if (!cls.test(escape.character)) break;
+      end += escape.length;
+    } else if (cls.test(text[end])) {
+      end += 1;
+    } else {
+      break;
+    }
   }
   return end;
 }
@@ -74,7 +109,7 @@ const simpleRules = [
  * value is then read whole, quoted or not.
  */
 const valueRules = [
-  { kind: 'aws-secret-access-key', lead: /\baws_secret_access_key\b["']?\s{0,8}[:=]\s{0,8}/giu, cls: /[A-Za-z0-9/+=]/u, plain: true, accept: value => /^[A-Za-z0-9/+=]{40}$/u.test(value) },
+  { kind: 'aws-secret-access-key', lead: /\baws_secret_access_key\b["']?\s{0,8}[:=]\s{0,8}/giu, cls: /[A-Za-z0-9/+=]/u, accept: value => /^[A-Za-z0-9/+=]{40}$/u.test(value) },
   // Bearer values of eight characters or more, as a bare header or inside JSON or a
   // quoted string; shorter ones are too likely to be examples.
   { kind: 'bearer-token', lead: /\bAuthorization["']?\s{0,8}:\s{0,8}["']?\s{0,8}Bearer\s{1,8}/giu, cls: /[A-Za-z0-9._~+/=-]/u, accept: value => value.length >= 8 },
@@ -141,7 +176,8 @@ function privateKeys(text) {
   const begin = /-----BEGIN ((?:[A-Z0-9]{1,16} ){0,3})PRIVATE KEY-----/gu;
   for (let match = begin.exec(text); match; match = begin.exec(text)) {
     const endLine = `-----END ${match[1]}PRIVATE KEY-----`;
-    let end = match.index + match[0].length;
+    // Spaces or tabs may follow the BEGIN marker on its line.
+    let end = runEnd(text, match.index + match[0].length, /[ \t]/u);
     let blankAllowed = false;
     while (end < text.length) {
       const lineStart = text[end] === '\r' && text[end + 1] === '\n' ? end + 2 : text[end] === '\n' ? end + 1 : -1;
@@ -149,9 +185,12 @@ function privateKeys(text) {
       const newline = text.indexOf('\n', lineStart);
       const lineEnd = newline === -1 ? text.length : text[newline - 1] === '\r' ? newline - 1 : newline;
       // Trailing spaces or tabs do not change what a line is; offsets stay the original ones.
-      const line = text.slice(lineStart, lineEnd).replace(/[ \t]+$/u, '');
+      let trimmed = lineEnd;
+      while (trimmed > lineStart && (text[trimmed - 1] === ' ' || text[trimmed - 1] === '\t')) trimmed -= 1;
+      const line = text.slice(lineStart, trimmed);
       if (line === endLine) {
-        end = lineEnd;
+        // The span ends with the END marker; padding after it is left as it was.
+        end = trimmed;
         break;
       }
       if (/^[A-Za-z-]{1,32}: \S/u.test(line)) {
@@ -199,16 +238,19 @@ function candidates(text) {
         end = quotedEnd(text, start, quote);
       } else {
         const cls = rule.cls ?? unquoted;
+        // Escapes count only inside a string: a bearer value after a quoted header such as
+        // "Authorization": "Bearer …". A bare value ends at its first character outside cls.
+        const inString = /["']\s{0,8}Bearer\s{1,8}$/iu.test(match[0]);
         // Reuse the end of the run this start lies in, so nested names in one long run do
         // not each scan its rest again.
-        if (cached && cached.cls === cls && start >= cached.from && start < cached.end) end = cached.end;
+        if (cached && cached.cls === cls && cached.inString === inString && start >= cached.from && start < cached.end) end = cached.end;
         else {
-          end = rule.plain ? runEnd(text, start, cls) : escapedRunEnd(text, start, cls);
-          cached = { cls, from: start, end };
+          end = inString ? escapedRunEnd(text, start, cls) : runEnd(text, start, cls);
+          cached = { cls, from: start, end, inString };
         }
       }
       const value = text.slice(start, end);
-      if (value && rule.accept(value)) {
+      if (value && rule.accept(decoded(value))) {
         all.push({ kind: rule.kind, start, end, rank: 2 + simpleRules.length + index, prefix: 0 });
         pattern.lastIndex = Math.max(pattern.lastIndex, end);
       }
