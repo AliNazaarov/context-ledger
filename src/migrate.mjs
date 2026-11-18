@@ -15,25 +15,36 @@ export const defaultProject = 'default';
 
 // Rows for one session's stored JSON messages, keyed by line: the JSON keeps neither raw
 // lines nor record UUIDs, so u: and h: keys cannot be derived from it (docs/evals.md, P1c).
+// text_json is the turn's JSON string literal as stored (->, not ->>), because a round trip
+// through SQLite text loses a NUL and everything after it, and lone surrogates.
 const legacyRows = (sessionId, messages, from = '') => `
-  SELECT ${sessionId}, m.key, json_extract(m.value, '$.line'), json_extract(m.value, '$.role'),
-    json_extract(m.value, '$.text'), 'l:' || json_extract(m.value, '$.line')
+  SELECT ${sessionId}, m.key, m.value ->> '$.line', m.value ->> '$.role', m.value -> '$.text',
+    'l:' || (m.value ->> '$.line')
   FROM ${from}json_each(${messages}) m`;
-const insertRows = 'INSERT INTO messages (session_id, seq, line, role, text, key)';
+const insertRows = 'INSERT INTO messages (session_id, seq, line, role, text_json, key)';
 // The stored messages of a session that version 3 cannot copy: not a JSON array of
-// { role, text, line } objects with a user or assistant role and a positive integer line.
+// { role, text, line } objects with a user or assistant role and a line from 1 to the
+// largest integer JavaScript reads exactly (Number.MAX_SAFE_INTEGER). json_type calls 2^63
+// an integer, but SQLite reads it as REAL 9.2e18, which the bound refuses.
 const unreadableMessages = `
   SELECT count(*) AS n FROM sessions s
   WHERE CASE WHEN json_valid(s.messages) THEN json_type(s.messages) <> 'array' OR EXISTS (
     SELECT 1 FROM json_each(s.messages) m
     WHERE m.type <> 'object'
-      OR coalesce(json_type(m.value, '$.role'), '') <> 'text' OR json_extract(m.value, '$.role') NOT IN ('user', 'assistant')
+      OR coalesce(json_type(m.value, '$.role'), '') <> 'text' OR (m.value ->> '$.role') NOT IN ('user', 'assistant')
       OR coalesce(json_type(m.value, '$.text'), '') <> 'text'
-      OR coalesce(json_type(m.value, '$.line'), '') <> 'integer' OR json_extract(m.value, '$.line') < 1
+      OR coalesce(json_type(m.value, '$.line'), '') <> 'integer'
+      OR (m.value ->> '$.line') NOT BETWEEN 1 AND 9007199254740991
   ) ELSE 1 END`;
+// Sessions whose rows are not exactly their stored messages: a row missing, extra or
+// different in position, line, role or text. Rows a step run before wrote are kept only
+// when they match; their keys are kept as they are.
 const unmatchedSessions = `
   SELECT count(*) AS n FROM sessions s
-  WHERE json_array_length(s.messages) <> (SELECT count(*) FROM messages r WHERE r.session_id = s.id)`;
+  WHERE json_array_length(s.messages) <> (SELECT count(*) FROM messages r WHERE r.session_id = s.id)
+    OR EXISTS (SELECT 1 FROM json_each(s.messages) m WHERE NOT EXISTS (
+      SELECT 1 FROM messages r WHERE r.session_id = s.id AND r.seq = m.key AND r.line = (m.value ->> '$.line')
+        AND r.role = (m.value ->> '$.role') AND r.text_json = (m.value -> '$.text')))`;
 const migrationFailed = 'A stored session has messages that cannot be moved to schema version 3. The file was not changed.';
 
 const refuseNewer = version => {
@@ -53,7 +64,8 @@ export function refuseNewerSchema(database) {
  * for listing. Version 2 adds projects and puts every session in one: existing
  * sessions go to the default project, which the step creates. Version 3 adds one
  * messages row per turn: each session's JSON messages are copied in order with l:<line>
- * keys, and the step fails unless every session gets one row per stored message.
+ * keys, and the step fails unless every session's rows are exactly its stored messages.
+ * A turn's text is kept as a JSON string literal (text_json), which is lossless.
  * Every step checks the schema itself, so it is safe to repeat and does not depend on
  * the order in which other branches add their own steps.
  *
@@ -136,7 +148,7 @@ export function migrate(database, bootstrap = () => {}) {
           seq INTEGER NOT NULL,
           line INTEGER NOT NULL,
           role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
-          text TEXT NOT NULL,
+          text_json TEXT NOT NULL,
           key TEXT NOT NULL,
           UNIQUE (session_id, key),
           UNIQUE (session_id, seq)

@@ -99,8 +99,9 @@ function parseTranscript(transcript, provider, sessionId) {
     const message = messageAt(record, provider, line);
     if (!message) continue;
     const uuid = provider === 'claude' ? record.uuid : undefined;
-    const fresh = typeof uuid === 'string' && uuidPattern.test(uuid) && !uuids.has(uuid);
-    if (fresh) uuids.add(uuid);
+    // UUIDs compare without case, so a repeat in another spelling is still a repeat.
+    const fresh = typeof uuid === 'string' && uuidPattern.test(uuid) && !uuids.has(uuid.toLowerCase());
+    if (fresh) uuids.add(uuid.toLowerCase());
     messages.push({ ...message, key: fresh ? 'u:' + uuid : lineKey(sessionId, line, rawLine) });
   }
 
@@ -202,13 +203,16 @@ export function openStore(path) {
     ON CONFLICT (id) DO NOTHING
   `);
   const insertMessage = database.prepare(`
-    INSERT INTO messages (session_id, seq, line, role, text, key) VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO messages (session_id, seq, line, role, text_json, key) VALUES (?, ?, ?, ?, ?, ?)
   `);
   const getSummary = database.prepare(`SELECT ${summaryColumns} FROM ${sessionRows} WHERE s.id = ?`);
-  const selectMessages = database.prepare('SELECT role, text, line, key FROM messages WHERE session_id = ? ORDER BY seq');
+  const selectMessages = database.prepare('SELECT role, text_json, line, key FROM messages WHERE session_id = ? ORDER BY seq');
   const selectLines = database.prepare('SELECT line FROM messages WHERE session_id = ? ORDER BY seq');
-  // Plain objects, as the JSON column gave, so callers and tests see ordinary messages.
-  const readMessages = id => selectMessages.all(id).map(({ role, text, line, key }) => ({ role, text, line, key }));
+  // Plain objects, as the JSON column gave. The text is a JSON string literal, because
+  // node:sqlite cuts a string at a NUL when reading and replaces lone surrogates when
+  // binding; the JSON form keeps every turn exactly as imported.
+  const readMessages = id => selectMessages.all(id)
+    .map(({ role, text_json: text, line, key }) => ({ role, text: JSON.parse(text), line, key }));
   const readDetail = id => {
     const row = getSummary.get(id);
     if (row) return { ...row, messages: readMessages(id) };
@@ -285,7 +289,7 @@ export function openStore(path) {
         // Rows first: the foreign key is deferred, and a session inserted with rows
         // already in place is left alone by the trigger for older builds.
         for (const [seq, message] of messages.entries()) {
-          insertMessage.run(id, seq, message.line, message.role, message.text, message.key);
+          insertMessage.run(id, seq, message.line, message.role, JSON.stringify(message.text), message.key);
         }
         const copy = messages.map(({ role, text, line }) => ({ role, text, line }));
         insert.run(id, provider, name, title, messages.length, JSON.stringify(copy), searchText, projectId.get(project).id);

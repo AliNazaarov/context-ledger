@@ -8,6 +8,8 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { schemaVersion } from '../src/migrate.mjs';
+import { handoffMarkdown } from '../src/handoff.mjs';
+import { briefingText } from '../src/mcp/common.mjs';
 import { openStore } from '../src/store.mjs';
 import { startMcp } from './mcp-client.mjs';
 
@@ -105,7 +107,8 @@ const plain = rows => rows.map(row => ({ ...row }));
 const rows = (database, sql, ...values) => plain(database.prepare(sql).all(...values));
 const schema = database => rows(database, 'SELECT type, name, sql FROM sqlite_master ORDER BY type, name');
 const messageRows = (database, sessionId) =>
-  rows(database, 'SELECT seq, line, role, text, key FROM messages WHERE session_id = ? ORDER BY seq', sessionId);
+  rows(database, 'SELECT seq, line, role, text_json, key FROM messages WHERE session_id = ? ORDER BY seq', sessionId)
+    .map(({ seq, line, role, text_json: text, key }) => ({ seq, line, role, text: JSON.parse(text), key }));
 const sessionId = (provider, transcript) => createHash('sha256').update(`${provider}${nul}`).update(transcript).digest('hex');
 // Recomputed here rather than imported, so the test checks the rule, not the code.
 const hashKey = (id, line, rawLine) =>
@@ -186,7 +189,7 @@ test('a new file is at schema version 3 with the messages table, its keys and th
     { name: 'seq', type: 'INTEGER', notnull: 1, pk: 0 },
     { name: 'line', type: 'INTEGER', notnull: 1, pk: 0 },
     { name: 'role', type: 'TEXT', notnull: 1, pk: 0 },
-    { name: 'text', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'text_json', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'key', type: 'TEXT', notnull: 1, pk: 0 },
   ]);
   const unique = rows(check, 'PRAGMA index_list(messages)').filter(index => index.unique === 1 && index.origin === 'u')
@@ -292,13 +295,13 @@ test('the version 3 step is safe to repeat: sessions that already have rows keep
       id INTEGER PRIMARY KEY,
       session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
       seq INTEGER NOT NULL, line INTEGER NOT NULL,
-      role TEXT NOT NULL CHECK (role IN ('user', 'assistant')), text TEXT NOT NULL, key TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('user', 'assistant')), text_json TEXT NOT NULL, key TEXT NOT NULL,
       UNIQUE (session_id, key), UNIQUE (session_id, seq)
     ) STRICT;`);
   // Rows a step run before wrote for the Codex session, with keys of their own.
-  const insert = partial.prepare('INSERT INTO messages (session_id, seq, line, role, text, key) VALUES (?, ?, ?, ?, ?, ?)');
-  insert.run(fixture.ali.id, 0, 1, 'user', 'Ali reviews the Orion outline.', 'h:kept-one');
-  insert.run(fixture.ali.id, 1, 2, 'assistant', 'Outline approved.', 'h:kept-two');
+  const insert = partial.prepare('INSERT INTO messages (session_id, seq, line, role, text_json, key) VALUES (?, ?, ?, ?, ?, ?)');
+  insert.run(fixture.ali.id, 0, 1, 'user', JSON.stringify('Ali reviews the Orion outline.'), 'h:kept-one');
+  insert.run(fixture.ali.id, 1, 2, 'assistant', JSON.stringify('Outline approved.'), 'h:kept-two');
   const json = rows(partial, 'SELECT id, messages FROM sessions ORDER BY rowid');
   partial.close();
   // A session with fewer rows than stored messages is not trusted: the step fails.
@@ -310,6 +313,24 @@ test('the version 3 step is safe to repeat: sessions that already have rows keep
   const shortBytes = await readFile(short);
   assert.throws(() => openStore(short), { message: migrationFailed });
   assert.ok((await readFile(short)).equals(shortBytes), 'the short file is unchanged');
+  // Review round 1: the right number of rows with different contents is not trusted either.
+  const changes = [
+    ['another line', "UPDATE messages SET line = 99 WHERE key = 'h:kept-two'"],
+    ['another role', "UPDATE messages SET role = 'user' WHERE key = 'h:kept-two'"],
+    ['another text', `UPDATE messages SET text_json = '${JSON.stringify('Outline rejected.')}' WHERE key = 'h:kept-two'`],
+    ['swapped order', "UPDATE messages SET seq = 1 - seq + 10 WHERE session_id IS NOT NULL; UPDATE messages SET seq = seq - 10"],
+  ];
+  for (const [name, sql] of changes) {
+    const changed = join(directory, `changed-${changes.findIndex(change => change[0] === name)}.sqlite`);
+    await copyFile(fixture.path, changed);
+    const edit = new DatabaseSync(changed);
+    edit.exec(sql);
+    assert.equal(edit.prepare('SELECT count(*) AS n FROM messages').get().n, 2, name);
+    edit.close();
+    const changedBytes = await readFile(changed);
+    assert.throws(() => openStore(changed), { message: migrationFailed }, name);
+    assert.ok((await readFile(changed)).equals(changedBytes), `${name}: the file is unchanged`);
+  }
 
   const store = openStore(fixture.path);
   keep(() => store.close());
@@ -335,6 +356,9 @@ test('a session whose stored messages cannot be copied fails the step and leaves
     ['line 0', JSON.stringify([{ ...turn, line: 0 }])],
     ['a string line', JSON.stringify([{ ...turn, line: '1' }])],
     ['a fractional line', JSON.stringify([{ ...turn, line: 1.5 }])],
+    // Review round 1: lines JavaScript cannot read exactly, including one SQLite reads as REAL.
+    ['line 2^53', JSON.stringify([{ ...turn, line: Number.MAX_SAFE_INTEGER + 1 }])],
+    ['line 2^63', '[{"role": "user", "text": "Synthetic turn", "line": 9223372036854775808}]'],
   ];
   for (const [name, messages] of variants) {
     const path = join(directory, `atomic-${variants.findIndex(variant => variant[0] === name)}.sqlite`);
@@ -423,6 +447,8 @@ test('imports key each turn by record UUID or by a hash of its session, line and
     claudeRecord('assistant', 'A number.', { uuid: 42 }),
     JSON.stringify({ type: 'summary', uuid: uuids[2], summary: 'Not a turn' }),
     claudeRecord('user', 'Third UUID after a non-turn used it.', { uuid: uuids[2] }),
+    // Review round 1: the UUID of line 2 again, in lower case, is a repeat.
+    claudeRecord('assistant', 'Repeats line 2 in lower case.', { uuid: uuids[1] }),
   ];
   const transcript = lines.join('\n');
   const summary = store.importTranscript({ provider: 'claude', source: 'keys.jsonl', transcript });
@@ -439,6 +465,7 @@ test('imports key each turn by record UUID or by a hash of its session, line and
     [7, hashKey(id, 7, lines[6])],
     [8, hashKey(id, 8, lines[7])],
     [10, `u:${uuids[2]}`],
+    [11, hashKey(id, 11, lines[10])],
   ]);
   assert.notEqual(keys[2][1], keys[3][1], 'identical turns on different lines get different keys');
   assert.match(keys[2][1], /^h:[a-f0-9]{32}$/u);
@@ -469,7 +496,7 @@ test('imports key each turn by record UUID or by a hash of its session, line and
   assert.deepEqual(other.get(id).messages, detail.messages);
   // Importing the same bytes again returns the stored session and writes nothing.
   assert.deepEqual(store.importTranscript({ provider: 'claude', source: 'keys.jsonl', transcript }), summary);
-  assert.equal(check.prepare('SELECT count(*) AS n FROM messages WHERE session_id = ?').get(id).n, 9);
+  assert.equal(check.prepare('SELECT count(*) AS n FROM messages WHERE session_id = ?').get(id).n, 10);
 });
 
 test('a session and its rows commit together or not at all', async t => {
@@ -488,8 +515,8 @@ test('a session and its rows commit together or not at all', async t => {
   const stored = store.importTranscript({ provider: 'claude', source: 'never.jsonl', transcript });
   assert.deepEqual(messageRows(check, stored.id).map(row => row.key), [`u:${uuids[0]}`]);
   // A row without its session fails at commit: the foreign key is deferred, not dropped.
-  assert.throws(() => check.exec(`BEGIN; INSERT INTO messages (session_id, seq, line, role, text, key)
-    VALUES ('${'9'.repeat(64)}', 0, 1, 'user', 'Orphan', 'l:1'); COMMIT;`), /FOREIGN KEY constraint failed/u);
+  assert.throws(() => check.exec(`BEGIN; INSERT INTO messages (session_id, seq, line, role, text_json, key)
+    VALUES ('${'9'.repeat(64)}', 0, 1, 'user', '"Orphan"', 'l:1'); COMMIT;`), /FOREIGN KEY constraint failed/u);
   check.exec('ROLLBACK');
   assert.equal(check.prepare('SELECT count(*) AS n FROM messages').get().n, 1);
 });
@@ -521,6 +548,40 @@ test('readers use the rows: the JSON column can hold anything without changing w
   assert.deepEqual(before.session.messages.map(message => message.key), uuids.map(uuid => `u:${uuid}`));
 });
 
+test('a NUL or a lone surrogate in a turn survives import, migration and an older build exactly', async t => {
+  // Review round 1: node:sqlite cuts a string at a NUL when reading it and replaces lone
+  // surrogates when binding, so text goes into rows as a JSON string literal.
+  const { directory, keep } = await scratchDirectory(t, 'ledger-p1c-lossless-');
+  const odd = [`before${nul}after`, `high ${String.fromCharCode(0xd800)} alone`, `low ${String.fromCharCode(0xdc00)} alone ${nul}`];
+  const transcript = odd.map((text, index) => claudeRecord(index % 2 ? 'assistant' : 'user', text, { uuid: uuids[index] })).join('\n');
+
+  // A fresh import.
+  const path = join(directory, 'ledger.sqlite');
+  const store = openStore(path);
+  keep(() => store.close());
+  const imported = store.importTranscript({ provider: 'claude', source: 'odd.jsonl', transcript });
+  assert.deepEqual(store.get(imported.id).messages.map(message => message.text), odd);
+  const graph = store.publishGraph({ version: 2, sessionId: imported.id, party: 'leo',
+    nodes: [{ id: 'odd', kind: 'goal', label: 'Odd text', evidenceLines: [2] }], edges: [] });
+  assert.ok(store.getGraphContext(graph.id).meter.handoffCharacters > 0);
+
+  // A migrated version 2 session whose stored JSON holds the same turns.
+  const fixture = await oldLedger(directory, 2);
+  const setup = new DatabaseSync(fixture.path);
+  const stored = odd.map((text, index) => ({ role: index % 2 ? 'assistant' : 'user', text, line: index + 1 }));
+  setup.prepare('UPDATE sessions SET messages = ?, message_count = ? WHERE id = ?').run(JSON.stringify(stored), odd.length, fixture.ali.id);
+  setup.close();
+  const migrated = openStore(fixture.path);
+  keep(() => migrated.close());
+  assert.deepEqual(migrated.get(fixture.ali.id).messages.map(message => message.text), odd);
+
+  // A session that a build from before versions inserts.
+  const older = new DatabaseSync(path);
+  keep(() => older.close());
+  older.prepare(oldInsertSession).run('7'.repeat(64), 'claude', 'old.jsonl', 'Old', odd.length, JSON.stringify(stored), 'old');
+  assert.deepEqual(store.get('7'.repeat(64)).messages.map(message => message.text), odd);
+});
+
 async function startServer(database) {
   const child = spawn(process.execPath, ['src/server.mjs'], {
     env: { ...process.env, PORT: '0', CONTEXT_LEDGER_DB: database },
@@ -539,10 +600,15 @@ test('the session route returns each message with its key, and MCP session_read 
   const { directory, keep } = await scratchDirectory(t, 'ledger-p1c-http-');
   const server = await startServer(join(directory, 'ledger.sqlite'));
   keep(() => server.stop());
+  // A fourth turn with text the handoff must escape: a fence run and a right-to-left override.
+  const escaped = `Fence ~~~ inside, then ${String.fromCodePoint(0x202e)}override.`;
+  const fourth = '0b6e7d1a-1111-4222-8333-ddddeeeeffff';
+  const transcript = `${leoTranscript}
+${claudeRecord('assistant', escaped, { uuid: fourth })}`;
   const imported = await fetch(server.origin + '/api/import', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: server.origin },
-    body: JSON.stringify({ provider: 'claude', source: 'leo.jsonl', transcript: leoTranscript }),
+    body: JSON.stringify({ provider: 'claude', source: 'leo.jsonl', transcript }),
   });
   assert.equal(imported.status, 200);
   const { session: summary } = await imported.json();
@@ -553,6 +619,7 @@ test('the session route returns each message with its key, and MCP session_read 
     { role: 'user', text: 'Plan the synthetic Orion demo.', line: 1, key: `u:${uuids[0]}` },
     { role: 'assistant', text: 'Draft the Orion outline first.', line: 3, key: `u:${uuids[1]}` },
     { role: 'user', text: 'Then rehearse it twice.', line: 4, key: `u:${uuids[2]}` },
+    { role: 'assistant', text: escaped, line: 5, key: `u:${fourth}` },
   ]);
 
   const client = startMcp(server.port);
@@ -564,7 +631,10 @@ test('the session route returns each message with its key, and MCP session_read 
   const turns = await client.call(2, 'session_read', { sessionId: summary.id });
   assert.equal(turns.isError, undefined, turns.content[0].text);
   const [{ text }] = turns.content;
-  assert.deepEqual([...text.matchAll(/^## (\w+) · line (\d+)$/gmu)].map(match => `${match[1]} ${match[2]}`),
-    ['user 1', 'assistant 3', 'user 4']);
-  for (const uuid of uuids) assert.ok(!text.includes(uuid), 'keys are not shown in session_read');
+  // Review round 1: the whole page is what session_read rendered before keys existed,
+  // the handoff of the same messages without their keys.
+  const withoutKeys = { ...session, messages: session.messages.map(({ role, text: body, line }) => ({ role, text: body, line })) };
+  assert.equal(text, briefingText(handoffMarkdown(withoutKeys)));
+  assert.ok(!text.includes(String.fromCodePoint(0x202e)), 'the override is escaped');
+  for (const uuid of [...uuids, fourth]) assert.ok(!text.includes(uuid), 'keys are not shown in session_read');
 });
