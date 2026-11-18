@@ -1386,3 +1386,25 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## U2 — Brand and mascot (defined 2026-11-17)
+
+A brand guide for the console (U1), the video (U3) and other pages, built on the CTM site's existing brand: `docs/brand/brand.md`, `docs/brand/tokens.css`, and an original mascot, Pip, in three poses (`pip.svg`, `pip-working.svg`, `pip-waiting.svg`) that match the console's agent states.
+
+### What must hold
+
+- The brand colours are the CTM site's own (Deep Charcoal, Electric Violet, Acid Lime, Paper); no second palette.
+- Every text and background pair in the light (console) and dark (site) sets passes WCAG AA, 4.5:1. That includes the quoted and inferred marks on their fills and white text on the primary. White on lime is kept out, as the site's rule says.
+- No state is told by colour alone: each mark and agent state also has a word or a pose.
+- Pip is original. It takes Capy's warmth as a reference only, with no copied assets or look.
+- Pip's SVGs can be served under the console's content security policy as they are: small, titled for screen readers, no scripts, outside links, embedded images or fonts, and only brand colours.
+
+### What is tested
+
+`tests/brand.test.mjs` checks the site's colours, contrast for every pair in both sets, the SVG rules above, and that the guide's file links exist. The poses were also rendered with Playwright on Paper and on Charcoal and checked by eye.
+
+### Acceptance
+
+- The four suites pass.
+- A read-only review by Codex of the guide, the tokens and the SVGs; findings fixed or recorded here.
+- A person on the team signs off on Pip's look before the console and video use it.
