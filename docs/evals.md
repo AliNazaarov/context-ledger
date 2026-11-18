@@ -1415,3 +1415,51 @@ Card P1b on `ruslan/p1b-projects`, from `main` 3a17536. The design is `docs/arch
 | HTTP | `POST /api/import` accepts `project`. `GET /api/sessions?project=acme` filters, with and without `limit`; a bad or repeated `project` gets 400 with fixed text. The Host and Origin checks are unchanged: a cross-origin import with a project is still 403 and creates nothing. |
 | CLI | `npm run ledger -- search --project acme <query>` sends `project` and prints only that project's sessions; an invalid slug is refused before any request. |
 | Nothing else changes | No new dependency. No raw control or format characters in `src/` or `tests/`. All four suites pass. |
+
+**Results — P1b (2026-11-17):** every row passes on Windows. The tests are in `tests/projects.test.mjs` (12 tests); `tests/migrate.test.mjs` and `tests/list-api.test.mjs` were adjusted as described below.
+
+- **Schema version 2 — passed.** `src/migrate.mjs` adds `projects (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, created_at TEXT NOT NULL) STRICT`, the `default` project (name `Default`, a random 32-hex ID), `sessions.project_id REFERENCES projects(id)`, the index `sessions_project_id` and the trigger `sessions_project`. `schemaVersion` is 2. In a STRICT table SQLite also marks the primary key `NOT NULL`, which the test records.
+- **Version 1 file — passed.** The test writes the version 1 DDL and rows itself (no projects), copying created_at and party before the version 1 triggers exist. After opening, every session, graph, room and choice row is unchanged, every session is in `default`, graphs and rooms read back as published, and a second open changes neither schema nor rows.
+- **Unversioned file — passed.** A 19f6522 file goes straight to version 2. `tests/migrate.test.mjs` now asserts `schemaVersion` instead of 1, compares the version 0 session columns (the table now also has `project_id`), and bumps its "newer" file to `schemaVersion + 1`.
+- **Safe to repeat — passed.** A version 1 file with a `projects` table and a `default` row already in place migrates without a second `default`, and its sessions join the existing row.
+- **Atomic — passed.** A table named `sessions_project_id` makes the step fail; the file stays at version 1 with its schema and session columns unchanged.
+- **Newer files — passed.** Version 3 is refused with the existing message and its bytes are unchanged. Three cases came from the review (below): a newer file without the version 0 tables, a file that a newer build upgrades between this build's first version read and its next step, and a current file that opens while another connection holds the write lock.
+- **Older build writes — passed.** The 19f6522 insert, which names no project, lands in `default` through the trigger.
+- **Import names its project — passed.** `acme` is created once and reused, no `project` or `project: null` gives `default`, a 64-character slug is accepted, and 13 invalid values (upper case, a space, `a--b`, edge hyphens, `_`, empty, 65 characters, a zero-width space, a number, an object, an array, `true`) are refused with fixed text and nothing written. The project and the session commit in one `BEGIN IMMEDIATE` transaction.
+- **Same bytes, second project — passed.** The response is the stored `acme` summary with the same ID, and there is no `beta` row. The same text from Codex is a different session (the provider is part of the ID) and goes to `beta`.
+- **Search filters by project — passed.** `list` and `listSessionsPage` filter by project alone and combined with the query and the provider; paging inside `acme` returns its sessions newest first, and an unknown valid slug returns nothing. Summaries from import, list, page and `get` carry `project`.
+- **HTTP — passed.** `POST /api/import` takes `project`; `GET /api/sessions?project=` filters with and without `limit`. A bad, empty or repeated `project` is 400 with fixed text. A cross-origin import is 403 and writes no session or project; a wrong Host is 403.
+- **CLI — passed.** `ledger search --project acme vega` prints only `acme` sessions. Invalid or repeated `--project` is refused before any request: the test points the CLI at port 1, where nothing listens, and gets the slug message, not "Cannot reach".
+- **Nothing else changes — passed.** No new dependency, and no raw control or format characters in `src/` or `tests/`. One existing test changed: `tests/list-api.test.mjs` checked that 120 short sessions fit one 40,000-character MCP result. With `"project": "default"` on every row, 120 no longer fit, so it now uses 110, which is still more than one 100-row ledger page.
+- **Not done here:** the browser always imports into `default` and shows no project; MCP `session_search` returns the project but cannot filter by it; sessions cannot be moved between projects; there is no project listing route.
+
+**Codex review (read-only), four rounds.**
+
+Round 1, on 21b0811:
+
+- **Medium — fixed (1c7b988).** `GET /api/sessions?project=` with an empty value listed every project. It is now a 400 like any invalid slug, with and without `limit`.
+- **Medium — fixed (1c7b988, completed in de69cec).** `openStore` ran its DDL before `migrate()` checked the version, so a newer file without the old tables changed before it was refused. This predates P1b. A newer file with only a `messages` table now keeps its bytes.
+- **Low — fixed (1c7b988).** No test showed that a failed session insert leaves no project behind. A test trigger now aborts the insert after the project is created; neither row persists and the next import commits.
+- **Low — fixed (1c7b988, made deterministic in de69cec).** The second lookup under the lock was untested. Two processes now race the same bytes into `left` and `right`; both get the winner's summary and only the winner's project exists.
+
+Round 2, on 1c7b988:
+
+- **Medium — fixed (de69cec).** The version check still ran outside the write lock, so a newer build could upgrade the file between the check and the DDL. The version 0 DDL, including the room tables (now `roomsSchema` in `src/rooms.mjs`), runs inside `migrate()`'s `BEGIN IMMEDIATE`, after the version is read again. This first took the lock on every open, which round 3 corrected.
+- **Medium — fixed (de69cec).** `parseArgs` kept only the last `--project`, so `--project BadSlug --project good` sent a request. A repeated `--project` is now refused.
+- **Low — fixed (de69cec).** The race test signalled readiness before the first lookup and relied on a 750 ms sleep. Each child now stops at its import's `BEGIN IMMEDIATE` until both are there.
+- **Low — fixed (de69cec).** The duplicate test checked that `beta` had no sessions, not that it did not exist. It now reads `projects`.
+
+Round 3, on de69cec:
+
+- **Medium — fixed (44df0b1).** Taking `BEGIN IMMEDIATE` on every open meant a writer holding the lock could stall a store opening a current file for the 5-second busy timeout, then fail it. A version 2 file now opens with no lock and no DDL. The lock, the second version read and the version 0 DDL happen only when a migration may run, so DDL still never runs without a version check under the lock. A new test opens a current file while another connection holds the lock.
+- **Low — fixed (44df0b1).** The upgrade-race test relied on a 750 ms sleep, so a slow child could read version 3 first and pass even against 1c7b988. The child now stops right after its first version read, for a version 1 and a version 2 file. The holder drops `room_choices` and moves the file to version 3, and only then is the child let go. At version 1 the child is refused under the lock; at version 2 it runs no DDL and fails on the missing table. In both cases `room_choices` is not recreated.
+
+Round 4, on 44df0b1:
+
+- **Medium — fixed (7349ba6).** With no lock on a current file, a newer build could upgrade it between the first version read and the end of `openStore`. If the upgrade kept the tables, the store opened on a newer schema. The version is now read again after the statements are prepared, and a newer file is refused. The upgrade-race test has a third case: a version bump that keeps every table, which is refused with the newer-schema message.
+- **Low:** none.
+- **Known limit, not fixed:** an upgrade by a newer build while this store stays open is not detected. Catching it would mean holding a lock for the store's whole life, which would block every other writer. The fix in round 4 was not reviewed again by Codex.
+
+Each regression test was checked by removing its fix (eleven mutations across the four rounds); each mutation fails at least its own test.
+
+**Suites (Windows, 7349ba6):** `npm run -s test:graph` 9/9; node 203/204 (one skipped; the `main` baseline was 191/192); Playwright 13/13; Python runtime 192 run, OK (50 skipped).

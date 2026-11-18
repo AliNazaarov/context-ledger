@@ -235,3 +235,17 @@ Next steps:
 2. G10: a person checks the 82 labels in `evals/handoff/labelled.json`, then live runs (`node evals/handoff/run.mjs --agent claude --model M --runs 10`, the same for codex, then `--summary`). Check token and cost parsing on the first live Claude run.
 3. Still owed from earlier: Ali's review of the runtime changes from cycle 9, the human review of PR #8's schema migration, and Ali's decision on `VLLM_NGRAM=1` (cycle 11).
 4. PR #3 (Ali's draft M0 benchmark, based on `feature/semantic-graph`) was left open: it is Ali's and conflicts with its base.
+
+## Current checkpoint — P1b projects (2026-11-17)
+
+Card P1b on `ruslan/p1b-projects`, from `main` 3a17536. The P1 split (PR #37) is not on `main` yet, so this branch adds its own P1b board row. The eval, its results and four rounds of Codex review are in the P1b section of [the eval log](evals.md).
+
+- **Schema version 2** (`src/migrate.mjs`): a `projects` table (`id`, unique `slug`, `name`, `created_at`), `sessions.project_id` and a `default` project that existing sessions join. The `sessions_project` trigger puts a session inserted without a project, including by an older build, in `default`. The steps follow the version 1 style: each checks the schema, is safe to repeat, and runs in one transaction.
+- **Opening a file:** a current file opens with no lock and no DDL, and the version is read again before the store is returned. Otherwise the store takes `BEGIN IMMEDIATE`, reads the version again, refuses a newer one, creates the version 0 tables (`bootstrap`, which now includes `roomsSchema` from `src/rooms.mjs`), then migrates.
+- **Store, API and CLI:** `importTranscript({ ..., project })` takes a slug (`^[a-z0-9]+(?:-[a-z0-9]+)*$`, at most 64 characters, default `default`) and creates the project on first use. Stored bytes keep their project and nothing is created. Summaries carry `project`. `list`, `listSessionsPage`, `GET /api/sessions?project=` and `ledger search --project` filter by it.
+
+Next steps:
+
+1. A human reviews the migration to version 2 (AGENTS.md section 4, step 4); the review of PR #8's migration to version 1 is also still owed.
+2. When PR #37 lands, keep one P1b row on the board (this branch's or #37's) and set it from the PR state.
+3. Not in this card: a project picker in the browser (it imports into `default`), a `project` filter on MCP `session_search`, a project list route, and moving sessions between projects. P1c (message rows) and P1d (delete and retention) build on `projects` and `sessions.project_id`.
