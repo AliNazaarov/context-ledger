@@ -1386,3 +1386,12 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## P1a — Storage engine decision (evidence collected 2026-11-17)
+
+ADR-003 picked better-sqlite3 because `node:sqlite` had no FTS5. P1a checks whether that is still true, before any dependency is added.
+
+- **What is tested:** `tests/sqlite-fts5-probe.test.mjs` creates an FTS5 table in memory, runs one `MATCH` query, and reports the Node version, platform, SQLite version and whether FTS5 works. It never fails when FTS5 is missing.
+- **Expected result:** a probe line on every system that runs the Node suites.
+- **Results:** Node 22.14.0 on Windows (local) has SQLite 3.47.2 and no FTS5. Node 22.23.4 on Linux (CI) has SQLite 3.53.4 with FTS5. Public reports agree: 22.19.0 has none and 22.22.2 has it.
+- **Outcome:** a proposed revision of ADR-003 in `docs/architecture.md` §5.1: stay on `node:sqlite`, probe FTS5 at open, fall back to `instr` search with a named warning. It is accepted when the user approves the PR.

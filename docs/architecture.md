@@ -183,6 +183,24 @@ Search is a v1 feature, and without FTS5 it has no ranking, snippets or acceptab
 
 Open sets WAL, `busy_timeout = 5000`, `foreign_keys = ON` and `secure_delete = ON`; CLI and server share the file through short single-writer transactions.
 
+### 5.1 Storage engine decision, revisited (card P1a, 2026-11-17)
+
+**Proposed: stay on `node:sqlite`.** ADR-003 chose better-sqlite3 because Node 22.14's `node:sqlite` had no FTS5. That reason no longer holds for current Node 22 builds:
+
+| Build | SQLite | FTS5 | Source |
+| --- | --- | --- | --- |
+| Node 22.14.0, win32-x64 (local) | 3.47.2 | no | `tests/sqlite-fts5-probe.test.mjs` |
+| Node 22.23.4, linux-x64 (CI, `setup-node` 22) | 3.53.4 | yes | the same probe in CI, 2026-11-17 |
+| Node 22.19.0, linux-x64 | — | no | public reports (codegraph #1532) |
+| Node 22.22.2 | — | yes | public reports (openclaw #62328) |
+
+The first 22.x release with FTS5 lies between 22.19 and 22.22.2. It is not pinned here, so the code must probe rather than trust a version number.
+
+- **Decision:** keep `node:sqlite` and add no runtime dependency. At open, probe FTS5 with `CREATE VIRTUAL TABLE … USING fts5` on an in-memory database. With FTS5, P1c's message rows get an FTS5 index (ranking and snippets). Without it, search keeps today's `instr` matching, and the server, CLI and `ledger doctor` name the "degraded search" mode and the Node upgrade that fixes it. CI keeps one job without FTS5 (or a switch that forces the fallback), so both paths stay tested.
+- **Why not better-sqlite3:** it is a native binary per platform and Node ABI. That is the riskiest part of an `npx` install on three systems (the wave-5 gate), and it breaks AGENTS.md's "no build step, dependencies only with an ADR". Its synchronous API is close to `node:sqlite`'s, so switching later stays cheap if `node:sqlite` proves unstable or too slow.
+- **Still open:** the same probe on Windows and macOS CI runners (P5a, #38, runs Node suites on all three, so its first run after this lands records them); and whether `package.json` should require a minimum Node 22.x once the first release with FTS5 is known.
+- **Accepted when:** P1's owner (the user, who approved the P1 takeover) approves the pull request that lands this section. Until then, ADR-003 stands as written and no dependency is added either way.
+
 **Storage port.** Every method is async, so a Postgres implementation needs no caller changes.
 
 ```ts
@@ -277,7 +295,7 @@ Each is accepted once P1's owner approves this design (see the note at the top).
 
 1. Local-first, no egress in v1 [cloud ingest, day-one sync].
 2. One in-process `createLedger` core behind CLI, HTTP and MCP [CLI as HTTP client, MCP daemon].
-3. better-sqlite3 with FTS5, §5 [`node:sqlite`, custom index, wasm].
+3. ~~better-sqlite3 with FTS5, §5 [`node:sqlite`, custom index, wasm].~~ **Proposed revision (P1a, 2026-11-17):** `node:sqlite`, with FTS5 when the running Node has it and `instr` search with a named "degraded search" warning when it does not; see §5.1 [better-sqlite3, custom index, wasm].
 4. Session is `provider:uuid`; message key is the record UUID or a line-and-bytes hash [whole-file hash breaks on append; line-only misses rewrites].
 5. Forward-only migrations with backups; refuse newer schemas [`IF NOT EXISTS` drift, untested down-migrations].
 6. Append-only, hash-chained review events; state is a fold [mutable status columns].
