@@ -1,9 +1,10 @@
 import { constants, open } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { handoffMarkdown } from './handoff.mjs';
-import { terminalJson } from './text.mjs';
+import { inlineText, terminalJson } from './text.mjs';
 
 const usage = 'Usage: npm run ledger -- search [--provider claude|codex] [query]\n' +
+  '       npm run ledger -- import --provider claude|codex <file.jsonl>\n' +
   '       npm run ledger -- handoff <session-id>\n' +
   '       npm run ledger -- graph publish <packet.json>\n' +
   '       npm run ledger -- graph read <graph-id>';
@@ -23,6 +24,19 @@ function command(argv) {
     const query = new URLSearchParams({ q: positionals.join(' ') });
     if (values.provider) query.set('provider', values.provider);
     return { action, path: '/api/sessions?' + query };
+  }
+  if (action === 'import') {
+    let parsed;
+    try {
+      parsed = parseArgs({ args, options: { provider: { type: 'string' } }, allowPositionals: true });
+    } catch {
+      // parseArgs quotes the bad option in its message, so print the usage instead.
+      throw new Error(usage);
+    }
+    const { values, positionals } = parsed;
+    if (!['claude', 'codex'].includes(values.provider)) throw new Error('Provider must be claude or codex.');
+    if (positionals.length !== 1) throw new Error(usage);
+    return { action, provider: values.provider, filePath: positionals[0] };
   }
   if (action === 'handoff' && args.length === 1 && /^[a-f0-9]{64}$/.test(args[0])) {
     return { action, path: '/api/sessions/' + args[0] };
@@ -63,8 +77,33 @@ async function readGraphPacket(packetPath) {
   }
 }
 
+/**
+ * Card I1: import a transcript file straight into the ledger database, read as a stream,
+ * so files over the 8 MiB HTTP limit can be imported. The server need not be running.
+ */
+async function importFile(provider, filePath) {
+  const { openStore, InputError } = await import('./store.mjs');
+  let store;
+  try {
+    store = openStore(process.env.CONTEXT_LEDGER_DB ?? '.context-ledger/ledger.sqlite');
+  } catch {
+    // The underlying error names the database path, so it is not shown.
+    throw new Error('Cannot open the ledger database.');
+  }
+  try {
+    const { skipped, ...session } = await store.importTranscriptFile({ provider, path: filePath });
+    console.log(terminalJson(skipped ? { session, skipped } : { session }));
+  } catch (error) {
+    // Store messages are fixed sentences; anything else may carry a path, so it is not shown.
+    throw error instanceof InputError ? error : new Error('Import failed.');
+  } finally {
+    try { store.close(); } catch { /* the import result or error above is what matters */ }
+  }
+}
+
 async function main() {
-  const { action, path, packetPath } = command(process.argv.slice(2));
+  const { action, path, packetPath, provider, filePath } = command(process.argv.slice(2));
+  if (action === 'import') return importFile(provider, filePath);
   const port = Number(process.env.PORT ?? 4317);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT.');
   const origin = `http://127.0.0.1:${port}`;
@@ -102,6 +141,7 @@ async function main() {
 }
 
 main().catch(error => {
-  console.error(error.message);
+  // Escaped, in case a message ever carries text from the command line or a file.
+  console.error(error.message.split('\n').map(inlineText).join('\n'));
   process.exitCode = 1;
 });
