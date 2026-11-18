@@ -12,6 +12,7 @@
 import { spawn } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
+import { clientTokenFile, readTokenFile } from '../../src/token.mjs';
 import { gradeSlice } from './grade.mjs';
 import {
   chooseModel, delta, kvBytesPerToken, kvDtypeMismatch, measureReads, nvidiaSmiArgs, parsePrometheus, parseRepeat, snapshot,
@@ -35,6 +36,9 @@ const { values } = parseArgs({
 const sets = { questions: './questions.json', heldout: './heldout.json', fresh: './fresh.json' };
 if (!sets[values.set]) throw new Error('--set must be questions, heldout or fresh.');
 const ledger = process.env.LEDGER ?? 'http://127.0.0.1:4317';
+// The ledger's access token, from the file next to CONTEXT_LEDGER_DB (the repository's
+// .context-ledger/ledger.sqlite by default).
+const token = await readTokenFile(clientTokenFile());
 const vllm = values.vllm.replace(/\/+$/u, '');
 const set = JSON.parse(await readFile(new URL(sets[values.set], import.meta.url), 'utf8'));
 const repeat = parseRepeat(values.repeat);
@@ -48,7 +52,7 @@ else kvBytesPerToken({ num_hidden_layers: 1, num_attention_heads: 1, head_dim: 1
 async function ask(question) {
   const response = await fetch(`${ledger}/api/latent/read`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Origin: ledger },
+    headers: { 'Content-Type': 'application/json', Origin: ledger, Authorization: `Bearer ${token}` },
     body: JSON.stringify({ paths: set.paths, question: question.question, budgetTokens: 400, workers: 3 }),
     signal: AbortSignal.timeout(300_000),
   });

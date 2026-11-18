@@ -4,6 +4,7 @@
 // or evals/latent/fixture-library for the fresh set.
 import { readFile, writeFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
+import { clientTokenFile, readTokenFile } from '../../src/token.mjs';
 import { gradeSlice, summarize } from './grade.mjs';
 
 const { values } = parseArgs({
@@ -12,13 +13,16 @@ const { values } = parseArgs({
 const sets = { questions: './questions.json', heldout: './heldout.json', fresh: './fresh.json' };
 if (!sets[values.set]) throw new Error('--set must be questions, heldout or fresh.');
 const ledger = process.env.LEDGER ?? 'http://127.0.0.1:4317';
+// The ledger's access token, from the file next to CONTEXT_LEDGER_DB (the repository's
+// .context-ledger/ledger.sqlite by default).
+const token = await readTokenFile(clientTokenFile());
 const set = JSON.parse(await readFile(new URL(sets[values.set], import.meta.url), 'utf8'));
 const repeat = Math.max(1, Number(values.repeat) || 1);
 
 async function ask(question) {
   const response = await fetch(`${ledger}/api/latent/read`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Origin: ledger },
+    headers: { 'Content-Type': 'application/json', Origin: ledger, Authorization: `Bearer ${token}` },
     body: JSON.stringify({ paths: set.paths, question: question.question, budgetTokens: 400, workers: 3 }),
     signal: AbortSignal.timeout(300_000),
   });

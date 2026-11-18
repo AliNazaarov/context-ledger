@@ -1,5 +1,7 @@
 // The HTTP client to the running ledger on loopback. Errors are fixed texts or the
-// ledger's own short, single-line messages.
+// ledger's own short, single-line messages. Every request carries the ledger's access
+// token, read from its file on each call because the ledger makes a new one per start.
+import { clientTokenFile, readTokenFile } from '../token.mjs';
 import { ToolError } from './common.mjs';
 
 export function ledgerPort() {
@@ -19,11 +21,20 @@ export function validLedgerMessage(message) {
   return typeof message === 'string' && message.length > 0 && message.length <= 200 && !/[\p{C}\p{Zl}\p{Zp}]/u.test(message);
 }
 
+// Fixed sentences: they never name the token or the file's path.
+export const noToken = 'Cannot read the Context Ledger access token. Start the ledger with npm start, and give this MCP server the same CONTEXT_LEDGER_DB as the ledger (an absolute path).';
+export const refusedToken = 'Context Ledger refused the access token. Check that PORT and CONTEXT_LEDGER_DB match the running ledger.';
+
 export async function ledger(path, { body, notFound, timeoutMs = 5000 } = {}) {
-  const init = { redirect: 'error', signal: AbortSignal.timeout(timeoutMs) };
+  const token = await readTokenFile(clientTokenFile());
+  const init = { redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers: {} };
+  // Without a readable token the request still goes out, so a ledger that is not
+  // running gives the "Cannot reach" message and a running one gives noToken.
+  if (token !== undefined) init.headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) {
     init.method = 'POST';
-    init.headers = { 'Content-Type': 'application/json', Origin: origin };
+    init.headers['Content-Type'] = 'application/json';
+    init.headers.Origin = origin;
     init.body = body;
   }
   let response;
@@ -38,6 +49,10 @@ export async function ledger(path, { body, notFound, timeoutMs = 5000 } = {}) {
       throw new ToolError(`Cannot reach Context Ledger on port ${port}. Start it with npm start.`);
     }
     throw new ToolError(`Context Ledger request to port ${port} failed (for example, a redirect, which is refused).`);
+  }
+  if (response.status === 401) {
+    await response.body?.cancel().catch(() => {});
+    throw new ToolError(token === undefined ? noToken : refusedToken);
   }
   if (response.status === 404 && notFound) {
     await response.body?.cancel().catch(() => {});

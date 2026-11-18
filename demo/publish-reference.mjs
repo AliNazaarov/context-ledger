@@ -2,18 +2,24 @@
 // Stage fallback: publish the reference graphs for the imported demo transcripts on a
 // running ledger and open their room, without any agent.
 //   PORT=4317 node demo/publish-reference.mjs
+// It reads the ledger's access token from the file next to CONTEXT_LEDGER_DB (the
+// repository's .context-ledger/ledger.sqlite by default).
+import { clientTokenFile, readTokenFile } from '../src/token.mjs';
 import { aliReference, leoReference } from './reference-graphs.mjs';
 
 const port = Number(process.env.PORT ?? 4317);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT.');
 const origin = `http://127.0.0.1:${port}`;
+const token = await readTokenFile(clientTokenFile());
+const auth = token === undefined ? {} : { Authorization: `Bearer ${token}` };
 
 async function api(path, body) {
-  const init = body === undefined ? {} : {
-    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify(body),
+  const init = body === undefined ? { headers: auth } : {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin, ...auth }, body: JSON.stringify(body),
   };
   const response = await fetch(origin + path, init);
   const data = await response.json().catch(() => ({}));
+  if (response.status === 401) throw new Error('The ledger refused the request: start it with npm start, with the same CONTEXT_LEDGER_DB as this script.');
   if (!response.ok) throw new Error(`${path}: HTTP ${response.status} ${data.error ?? ''}`);
   return data;
 }

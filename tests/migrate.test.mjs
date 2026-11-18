@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { openStore } from '../src/store.mjs';
+import { bearer, ledgerToken } from './ledger-auth.mjs';
 import { startMcp } from './mcp-client.mjs';
 
 // Cycle 10 F3. A version 0 file is built here with the DDL of 19f6522, the last build
@@ -276,7 +277,7 @@ async function startServer(database) {
   for await (const chunk of child.stdout) {
     output += chunk;
     const match = output.match(/listening at (http:\/\/127\.0\.0\.1:(\d+))/);
-    if (match) return { origin: match[1], port: Number(match[2]), stop: async () => { child.kill(); await once(child, 'exit'); } };
+    if (match) return { origin: match[1], port: Number(match[2]), headers: bearer(await ledgerToken(database)), mcpEnv: { CONTEXT_LEDGER_DB: database }, stop: async () => { child.kill(); await once(child, 'exit'); } };
   }
   throw new Error('Server exited before listening: ' + output);
 }
@@ -298,16 +299,16 @@ test('a migrated ledger serves the same graph list over HTTP and MCP after a res
   });
   const fixture = await versionZero(directory);
   server = await startServer(fixture.path);
-  const first = await (await fetch(server.origin + '/api/graphs?limit=2')).json();
+  const first = await (await fetch(server.origin + '/api/graphs?limit=2', { headers: server.headers })).json();
   assert.equal(first.graphs.length, 2);
   assert.equal(first.next, fixture.aliGraph.id);
-  const graph = await (await fetch(server.origin + '/api/graphs/' + fixture.v1.id)).json();
+  const graph = await (await fetch(server.origin + '/api/graphs/' + fixture.v1.id, { headers: server.headers })).json();
   assert.deepEqual(graph, { graph: fixture.v1 });
   await server.stop();
   server = await startServer(fixture.path);
-  assert.deepEqual(await (await fetch(server.origin + '/api/graphs?limit=2')).json(), first);
+  assert.deepEqual(await (await fetch(server.origin + '/api/graphs?limit=2', { headers: server.headers })).json(), first);
 
-  client = startMcp(server.port);
+  client = startMcp(server.port, server.mcpEnv);
   const listed = await client.call(1, 'graph_list', { limit: 2 });
   assert.deepEqual(JSON.parse(listed.content[0].text), { more: { after: fixture.aliGraph.id,
     note: 'More graphs match. Call graph_list again with the same filters and after set to more.after.' }, graphs: first.graphs });

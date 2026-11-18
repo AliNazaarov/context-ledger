@@ -44,7 +44,7 @@ test('graph CLI publishes raw JSON to its local origin and reads the response as
   t.after(() => new Promise(resolve => server.close(resolve)));
   const port = server.address().port;
   const cli = (...args) => execute(process.execPath, ['src/cli.mjs', 'graph', ...args], {
-    env: { ...process.env, PORT: String(port) },
+    env: { ...process.env, PORT: String(port), CONTEXT_LEDGER_DB: join(directory, 'none.sqlite') },
   });
 
   const published = await cli('publish', packetPath);
@@ -105,7 +105,7 @@ test('graph and search JSON escape terminal controls and bidi characters lossles
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
-  const env = { ...process.env, PORT: String(server.address().port) };
+  const env = { ...process.env, PORT: String(server.address().port), CONTEXT_LEDGER_DB: join(tmpdir(), 'context-ledger-no-ledger', 'none.sqlite') };
 
   const outputs = [
     [await execute(process.execPath, ['src/cli.mjs', 'graph', 'read', graphId], { env }), graph],
