@@ -27,7 +27,7 @@ test('D2: the Capy guide matches the code and the README', () => {
   // Review round 1: the guide says first that tool output is stored in Capy's cloud.
   assert.ok(guide.indexOf('## Read this first: what leaves your computer') > 0);
   assert.ok(guide.indexOf('what leaves your computer') < guide.indexOf('## Steps'));
-  assert.match(guide, /stored in its cloud/u);
+  assert.match(guide, /tool output" in its cloud/u);
   assert.match(readme, /^## Negotiation room$/mu, 'the README section on room decisions the guide links to');
   assert.ok(guide.includes('../../README.md#negotiation-room'));
   // The note for AGENTS.md names only tools the server has.
