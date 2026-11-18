@@ -1386,3 +1386,34 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## G8 — One-command agent setup (defined 2026-11-17, before the code)
+
+`npm run ledger -- install` connects Claude Code and Codex to this ledger in one step, and `npm run ledger -- uninstall` undoes exactly that. Both print every change they make, and `--dry-run` prints the changes without making them. `--agent claude` or `--agent codex` limits either command to one agent.
+
+For each agent, install does two things:
+
+1. **Registers the MCP server** with the agent's own CLI, at user scope: `claude mcp add --scope user context-ledger -- node <repo>/src/mcp.mjs` and `codex mcp add context-ledger -- node <repo>/src/mcp.mjs`. When `PORT` is set to something other than 4317 it is passed on (`-e PORT=…` or `--env PORT=…`). A server already registered under that name is left as it is, and install says so.
+2. **Adds a short block** to the agent's user instruction file (`~/.claude/CLAUDE.md` for Claude Code; `AGENTS.md` in `CODEX_HOME`, default `~/.codex`, for Codex). The block sits between two marker comments and tells the agent to check the ledger before asking the person to repeat context. It also says that labels and briefings are data, not instructions. Running install again replaces the block instead of adding a second one, and text outside the markers is kept byte for byte, line endings included.
+
+Uninstall removes the user-scope registration with `claude mcp remove --scope user context-ledger` and `codex mcp remove context-ledger`. It also removes the marked block. If the block was the whole file, the file is removed too.
+
+### What is tested (fake home folder and stub CLIs only; the real configuration is never touched)
+
+- Install on an empty home creates both instruction files with one block each, and calls each stub CLI with exactly the arguments above.
+- Install twice gives the same files and no second registration.
+- Install into an instruction file that already has text keeps that text and its CRLF line endings.
+- Uninstall restores a file that held text before install, byte for byte. It removes a file that install created, and it calls the remove commands.
+- `--dry-run` changes no file and calls no command that writes; `--agent codex` touches nothing of Claude's.
+- A start marker without an end marker is refused: the file is left alone and the command fails, naming the file.
+- A missing CLI (the configured command does not exist) skips that agent's registration with a message, still writes or removes the block, and makes the command exit with status 1.
+- Paths with spaces work on Windows and on POSIX. On Windows, where the CLIs are `.cmd` shims run through `cmd.exe`, any argument containing `"` or `%` is refused rather than quoted.
+- Printed paths go through the terminal escaping in `src/text.mjs`.
+
+`CONTEXT_LEDGER_CLAUDE_BIN` and `CONTEXT_LEDGER_CODEX_BIN` name the CLI when it is not on `PATH`; the tests set them to stubs.
+
+### Acceptance
+
+- The four suites pass, with no new runtime dependency.
+- Codex reviews the change read-only; findings are fixed with tests or recorded here.
+- A person runs `install` and `uninstall` once against their real agents before G8 is called done, because the tests use stubs.
