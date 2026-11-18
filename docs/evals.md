@@ -1430,8 +1430,8 @@ All tests use synthetic transcripts.
 
 - **Same session as the browser.** For the same file, the command stores exactly what the browser import stores: the same session ID (SHA-256 of the provider, a NUL and the decoded text), title, messages, line numbers and skip report. Checked on files with CRLF line ends, a byte-order mark, blank lines, no final line break, unreadable lines (I2), and multi-byte characters split across read chunks. Importing a file both ways gives one session.
 - **Larger than 8 MiB.** A synthetic Claude Code file of more than 20 MiB, mostly tool output, imports and keeps its user and assistant messages with their line numbers.
-- **Long lines.** A single line of several MiB, read in many chunks, is parsed as one line. A line longer than 64 MiB is skipped and counted like an unreadable line, without being joined in memory.
-- **Bounded sessions.** More than 64 MiB of message text in one file is refused with a clear message, since one session is still one database row until P1.
+- **Long lines.** A single line of several MiB, read in many chunks, is parsed as one line. A line longer than 64 MiB (in UTF-8 bytes) is skipped and counted like an unreadable line, without being joined in memory.
+- **Bounded sessions.** More than 64 MiB of messages in one file, counted as stored in UTF-8 bytes, is refused with a clear message, since one session is still one database row until P1.
 - **Refusals.** A missing file, a folder, a file with nothing readable, or a provider other than claude or codex is refused with a short message and exit code 1, and nothing is stored. Errors never echo the path or the file's text.
 - **Output.** The command prints the session summary (and the skip report, if any) as escaped JSON, like `search`.
 - **The browser points to it.** A file of 8 MiB or more, or one whose request would pass 8 MiB once quoted as JSON, is refused in the browser with a message that names the command.
@@ -1453,3 +1453,9 @@ All tests use synthetic transcripts.
   - (low) A FIFO was opened before the check. The path is now checked first, the descriptor again after opening, and closing never hides the first error.
   - (low) There was no test of the CLI and a running server on one database. One now imports the same file both ways at once and finds one session.
   - (low) A file under 8 MiB could still be too large once quoted. The browser now measures the request and shows the same hint, since the server refuses it before reading and the browser would only see a failed fetch.
+- **Codex, round 2** (of b7baa96): the round 1 fixes hold, with two medium and three low findings:
+  - (medium) Both 64 MiB limits counted UTF-16 code units, so CJK text could pass them at about 72 MiB. Both now count UTF-8 bytes, with tests on wide characters.
+  - (medium) Many tiny messages were bounded only by their text. The budget now counts each message as stored, with its role, line and JSON syntax.
+  - (low) The browser hint said the file itself was 8 MiB or more, and read the provider after an await. It now says the import is over the browser's 8 MiB limit, with the provider taken at submit time.
+  - (low) CLI error lines kept line breaks and joiners. Every message other than the usage text is now escaped onto one line by `terminalLine` in `src/text.mjs`.
+  - (low) The shared-database test cannot force both writers past the duplicate check at once. Not changed: the store is synchronous within a process, SQLite serialises writers across processes, and the insert is `ON CONFLICT (id) DO NOTHING`, so the race ends in one row by construction.

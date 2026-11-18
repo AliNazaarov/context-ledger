@@ -1,7 +1,7 @@
 import { constants, open } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { handoffMarkdown } from './handoff.mjs';
-import { inlineText, terminalJson } from './text.mjs';
+import { terminalJson, terminalLine } from './text.mjs';
 
 const usage = 'Usage: npm run ledger -- search [--provider claude|codex] [query]\n' +
   '       npm run ledger -- import --provider claude|codex <file.jsonl>\n' +
@@ -141,7 +141,8 @@ async function main() {
 }
 
 main().catch(error => {
-  // Escaped, in case a message ever carries text from the command line or a file.
-  console.error(error.message.split('\n').map(inlineText).join('\n'));
+  // The usage text is ours and spans lines; any other message is escaped onto one line, in
+  // case it ever carries text from the command line or a file.
+  console.error(error.message === usage ? usage : terminalLine(error.message));
   process.exitCode = 1;
 });

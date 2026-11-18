@@ -70,10 +70,12 @@ const skippedLinesShown = 10;
  * line numbers in the file, so citations stay true. A file with no readable line at all is
  * still refused, since it is not JSONL.
  */
-// Card I1: what one session may hold until P1 stores one row per message. A line longer
-// than the line limit is skipped like an unreadable one, before it is ever joined.
-export const maxMessageCharacters = 64 * 1024 * 1024;
-export const maxLineCharacters = 64 * 1024 * 1024;
+// Card I1: what one session may hold until P1 stores one row per message, in UTF-8 bytes.
+// The message budget counts each message as stored (text, role, line and JSON syntax), so
+// it bounds many small messages as well as a few large ones. A line longer than the line
+// limit is skipped like an unreadable one, before it is ever joined.
+export const maxMessageBytes = 64 * 1024 * 1024;
+export const maxLineBytes = 64 * 1024 * 1024;
 
 function transcriptParser(provider) {
   const messages = [];
@@ -85,7 +87,7 @@ function transcriptParser(provider) {
   };
   let readable = 0;
   let line = 0;
-  let characters = 0;
+  let bytes = 0;
   return {
     /** One line of the file, in order, without its line break. */
     add(rawLine) {
@@ -103,9 +105,9 @@ function transcriptParser(provider) {
       readable += 1;
       const message = messageAt(record, provider, line);
       if (!message) return;
-      characters += message.text.length;
-      if (characters > maxMessageCharacters) {
-        throw new InputError('This transcript has more than 64 MiB of message text, more than one session can hold.');
+      bytes += Buffer.byteLength(JSON.stringify(message), 'utf8') + 1;
+      if (bytes > maxMessageBytes) {
+        throw new InputError('This transcript has more than 64 MiB of messages, more than one session can hold.');
       }
       messages.push(message);
     },
@@ -134,7 +136,7 @@ function parseTranscript(transcript, provider) {
  * decodes it (UTF-8, a leading byte-order mark dropped, bad bytes replaced), so the
  * session ID matches a browser import of the same file.
  */
-async function parseTranscriptFile(path, provider, { lineLimit = maxLineCharacters } = {}) {
+async function parseTranscriptFile(path, provider, { lineLimit = maxLineBytes } = {}) {
   const unreadable = () => new InputError('Cannot read the transcript file.');
   const notAFile = () => new InputError('The transcript must be a regular file.');
   // The path is checked before it is opened, so a FIFO or device is never opened; the
@@ -164,7 +166,7 @@ async function parseTranscriptFile(path, provider, { lineLimit = maxLineCharacte
   let tooLong = false;
   const append = piece => {
     if (tooLong || !piece) return;
-    length += piece.length;
+    length += Buffer.byteLength(piece, 'utf8');
     if (length > lineLimit) {
       tooLong = true;
       fragments = [];

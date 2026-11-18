@@ -137,13 +137,13 @@ importForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const file = transcriptFile.files[0];
   if (!file || importButton.disabled) return;
-  const tooLarge = () => 'Import failed. This transcript is 8 MiB or more; import it with: npm run ledger -- import --provider '
-    + `${sourceAgent.value} <file>`;
+  const provider = sourceAgent.value;
+  const tooLarge = () => "Import failed. This import is over the browser's 8 MiB limit; import it with: npm run ledger -- import --provider "
+    + `${provider} <file>`;
   if (file.size >= maxImportBytes) {
     importStatus.textContent = tooLarge();
     return;
   }
-  const provider = sourceAgent.value;
   const readerAtImport = readerRequest;
   importButton.disabled = true;
   importStatus.textContent = 'Importing transcript…';

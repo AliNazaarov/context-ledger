@@ -5,7 +5,8 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { maxMessageCharacters, openStore } from '../src/store.mjs';
+import { maxMessageBytes, openStore } from '../src/store.mjs';
+import { terminalLine } from '../src/text.mjs';
 
 // Card I1: import a transcript file by path, read as a stream. Synthetic transcripts only.
 const claudeLine = (role, text) => JSON.stringify({ type: role, message: { role, content: text } });
@@ -83,14 +84,40 @@ test('I1 review: a line at the line limit is read and a longer one is skipped an
   assert.deepEqual(tighter.skipped, { count: 2, lines: [1, 2] });
 });
 
-test('I1 review: more message text than one session can hold is refused with a clear message', async t => {
+test('I1 review: more messages than one session can hold are refused, counted in UTF-8 bytes', async t => {
   const directory = await folder(t);
-  const path = join(directory, 'huge-text.jsonl');
-  const half = 'z'.repeat(maxMessageCharacters / 2 + 1);
-  await writeFile(path, [claudeLine('user', half), claudeLine('assistant', half)].join('\n'));
+  const message = 'This transcript has more than 64 MiB of messages, more than one session can hold.';
+  // Round 2: CJK text is three bytes a character, so 24 Mi characters are about 72 MiB.
+  const cjk = join(directory, 'cjk.jsonl');
+  const third = String.fromCodePoint(0x6f22).repeat(Math.ceil(maxMessageBytes / 3 / 2) + 1);
+  await writeFile(cjk, [claudeLine('user', third), claudeLine('assistant', third)].join('\n'));
   const store = openStore(':memory:');
-  await assert.rejects(store.importTranscriptFile({ provider: 'claude', path }), { message: 'This transcript has more than 64 MiB of message text, more than one session can hold.' });
+  await assert.rejects(store.importTranscriptFile({ provider: 'claude', path: cjk }), { message });
+  // Round 2: many small messages count their stored size too, not only their text.
+  const small = join(directory, 'small.jsonl');
+  const line = claudeLine('user', 'k');
+  const count = Math.ceil(maxMessageBytes / JSON.stringify({ role: 'user', text: 'k', line: 9_999_999 }).length) + 1;
+  await writeFile(small, (line + '\n').repeat(count));
+  await assert.rejects(store.importTranscriptFile({ provider: 'claude', path: small }), { message });
   assert.deepEqual(store.list('', null), []);
+});
+
+test('I1 review: the line limit counts UTF-8 bytes', async t => {
+  const directory = await folder(t);
+  const path = join(directory, 'bytes.jsonl');
+  const wide = claudeLine('user', String.fromCodePoint(0x6f22).repeat(20));
+  await writeFile(path, [wide, claudeLine('assistant', 'After.')].join('\n'));
+  const store = openStore(':memory:');
+  // The line is under 100 characters but over 100 bytes.
+  assert.ok(wide.length < 100 && Buffer.byteLength(wide) > 100);
+  const summary = await store.importTranscriptFile({ provider: 'claude', path }, { lineLimit: 100 });
+  assert.deepEqual(summary.skipped, { count: 1, lines: [1] });
+});
+
+test('I1 review: the CLI error line escapes line breaks and joiners too', () => {
+  const zwj = String.fromCodePoint(0x200d);
+  const line = terminalLine(`one${String.fromCodePoint(10)}two${zwj}`);
+  assert.equal(line, 'one\\u000atwo\\u200d');
 });
 
 test('I1 review: the title is the same as before for long and odd first messages', () => {
