@@ -296,10 +296,10 @@ Wave 1: ADRs 2–6 and 11, migrations 0001–0002, token auth, purge. Wave 2: gr
 
 ## 11. Where `main` stands against this design (2026-11-17)
 
-Written when the design landed on `main`, so the wave-1 cards start from what exists.
+This records the `main` baseline (at the time this design landed) that the wave-1 cards start from. Where it differs from sections 1–10, this section is the current state.
 
-- **Schema versions.** `src/migrate.mjs` already uses `PRAGMA user_version`: version 1 adds `created_at` and `party` to graphs and `created_at` to rooms. The design's `0001_init` and `0002_import_v0` must start at version 2 and treat today's version-1 file as the legacy input.
-- **Storage engine.** `main` still runs on `node:sqlite` with no FTS5, and search uses `instr` over `search_text`. ADR-003 (better-sqlite3) is the open decision of card P1a.
+- **Schema versions.** The current schema is version 1, kept in `PRAGMA user_version` by `src/migrate.mjs`. It adds `created_at` and `party` to graphs and `created_at` to rooms, and an unversioned file is upgraded to it when a store opens it. Section 4's `0001_init` therefore cannot be version 1: the migration sequence must be renumbered from version 2 (P1b's projects first) and must accept a version-1 file as its legacy input.
+- **Storage engine.** `main` uses `node:sqlite` and searches `search_text` with `instr`; it has no FTS5 index. Section 5 calls better-sqlite3 "chosen", but that choice (ADR-003) is still open: card P1a decides between keeping `node:sqlite` and adopting better-sqlite3 with FTS5.
 - **Wave 2 is partly built.** The stdio MCP server (`src/mcp/*`) and graph v2 with parties, links and rooms (`src/graph.mjs`, `src/rooms.mjs`) exist. Citations are still file line numbers, not message keys, and there are no projects.
-- **Import.** Transcripts are imported only on the user's request: in the browser below 8 MiB, and from a path with `ledger import` (I1, PR #35), with unreadable lines skipped and counted (I2, PR #33) and Codex agent messages kept (I3, PR #34). A session is still one row holding all its messages as JSON, which is what P1c replaces.
+- **Import.** On `main`, import happens only on the user's request, through `POST /api/import`. The browser takes a selected file under 8 MiB, the server caps the whole JSON request at 8 MiB, and one malformed line rejects the import. In open PRs: I2 (#33) skips and reports malformed lines; I1 (#35, on top of I2) adds `ledger import --provider claude|codex <file>`, which streams a file into SQLite without the server; I3 (#34) keeps plain-text Codex messages between agents and never stores encrypted content. A session is still one row holding all its messages as JSON, which is what P1c replaces.
 - **Not started:** projects, per-message rows and stable keys, delete and retention, the loopback token, review events, redaction, signing and licensing.
