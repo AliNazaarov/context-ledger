@@ -117,10 +117,14 @@ function sandbox(t, { codexHome } = {}) {
     return path;
   };
   const state = join(root, 'stub');
-  const env = { ...process.env, HOME: home, USERPROFILE: home, STUB_STATE: state,
+  const kept = Object.fromEntries(['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'ComSpec', 'TEMP', 'TMP', 'windir']
+    .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
+  const env = { ...kept, HOME: home, USERPROFILE: home, STUB_STATE: state,
     CONTEXT_LEDGER_CLAUDE_BIN: wrapper('claude'), CONTEXT_LEDGER_CODEX_BIN: wrapper('codex') };
-  for (const key of ['CODEX_HOME', 'PORT', 'STUB_BROKEN']) delete env[key];
-  if (codexHome) env.CODEX_HOME = join(root, codexHome);
+  if (codexHome) {
+    env.CODEX_HOME = join(root, codexHome);
+    mkdirSync(env.CODEX_HOME, { recursive: true });
+  }
   const codexDir = env.CODEX_HOME ?? join(home, '.codex');
   const files = { claude: join(home, '.claude', 'CLAUDE.md'), codex: join(codexDir, 'AGENTS.md') };
   const ledger = (...args) => spawnSync(process.execPath, [cli, ...args], { env, encoding: 'utf8' });
@@ -456,6 +460,8 @@ test('review round 4: a relative CODEX_HOME is the same folder for Codex and for
     seen.push(args);
     return args[1] === 'get' ? { status: 1, stdout: '', output: "Error: No MCP server named 'context-ledger' found." } : { status: 0, stdout: '', output: '' };
   };
+  mkdirSync(join(box.root, 'profile dir'));
+  mkdirSync(join(box.root, 'other dir'));
   const cwd = process.cwd();
   process.chdir(box.root);
   try {
@@ -509,4 +515,32 @@ test('the home folder comes from the environment passed in, never from the real 
 // Runs last: no test in this file may have touched the real instruction files.
 test('the real ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md are byte for byte as they were', () => {
   assert.deepEqual(realFiles.map(path => (existsSync(path) ? readFileSync(path) : null)), realBefore);
+});
+
+test('review round 5: a CODEX_HOME that does not exist is refused before Codex is asked', t => {
+  const box = sandbox(t);
+  box.env.CODEX_HOME = join(box.root, 'no such profile');
+  const result = box.ledger('install', '--agent', 'codex');
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /CODEX_HOME is set to .*no such profile, which does not exist; Codex refuses it/u);
+  assert.deepEqual(box.calls(), []);
+  assert.equal(existsSync(box.env.CODEX_HOME), false);
+});
+
+test('review round 5: a longer message that contains Claude\'s duplicate line does not count', t => {
+  const box = sandbox(t);
+  box.write(box.files.claude, `Rules${nl}`);
+  for (const output of ['MCP server context-ledger already exists in user config backup', 'Note: MCP server context-ledger already exists in user config']) {
+    const run = () => ({ status: 1, stdout: '', output, detail: output });
+    const { ok } = setupAgents({ mode: 'install', agents: ['claude'], env: box.env, run });
+    assert.equal(ok, false, output);
+  }
+  const exact = () => ({ status: 1, stdout: '', output: 'MCP server context-ledger already exists in user config', detail: '' });
+  assert.equal(setupAgents({ mode: 'install', agents: ['claude'], env: box.env, run: exact }).ok, true);
+});
+
+test('review round 5: the printed Codex remove command names the CODEX_HOME it is for', t => {
+  const box = sandbox(t, { codexHome: 'codex profile' });
+  const result = box.ledger('uninstall', '--agent', 'codex');
+  assert.match(result.stdout, /remove it with CODEX_HOME set to .*codex profile with: /u);
 });

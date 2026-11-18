@@ -1439,3 +1439,14 @@ If the server step fails for a reason other than a missing CLI, the instruction 
   - (low) An existing Codex HTTP entry was not recognised. It is now.
   - Accepted, not changed: the high finding that a registration made in another terminal between `get` and `add` is replaced. Codex's suggested fix, printing the add command instead, would drop automatic registration, which is the point of the card. The window is one CLI call long and is recorded above as a known limit.
 - **Incident, found and fixed while writing the round 4 tests:** three in-process tests called `setupAgents` with a sandbox environment, but `agentTargets` took the home folder from `os.homedir()`, which reads the real one. They wrote the block into the real `~/.claude/CLAUDE.md` (19:17) and `~/.codex/AGENTS.md` (19:29) on the reviewer's own machine. No real CLI was run, because those tests used fake CLIs. Both files were backed up and the exact block was removed with the module's own `withoutBlock`; each file is now a byte-for-byte prefix of its backup. The home folder now comes only from the environment passed in (`homeOf`). An environment without one is refused. The last test in `tests/install.test.mjs` checks that the real files are byte for byte as they were before the run.
+- **Round 5** (of 05ba804): the HTTP fix and the fake-home fix hold. Medium findings, fixed in the next commit:
+  - The snapshot read bytes and mode separately from the identity. Now one open file gives both, and the path must still name that file.
+  - Claude's duplicate answer now counts only as the whole line.
+  - A `CODEX_HOME` that does not exist is refused before Codex is asked, as Codex refuses it.
+  - A relative CLI path is resolved to an absolute one, because the CLI runs from the home folder.
+  - The printed Codex remove command names its `CODEX_HOME`.
+  - Test children get an allow-listed environment (no `NODE_OPTIONS`).
+  - Accepted: the real-file guard still reads the default instruction files of the person running the tests. An isolated ambient home would be stronger, but every in-process call now passes an explicit fake home, and an environment without a home is refused.
+  - No sixth round was run; the findings had narrowed to edge races each round.
+- **Suites (Windows):** `npm run -s test:graph` 9/9; node 219/221 (two skipped: the existing one and the symbolic-link test, which this Windows account cannot run), was 191/192 on `main`; Playwright 13/13; Python runtime 192 run, 50 skipped, OK.
+- **Still owed before Done:** a person runs `install` against their real Claude Code and Codex, then `uninstall` and the two printed remove commands, on Windows and on macOS or Linux.

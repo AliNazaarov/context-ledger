@@ -12,7 +12,7 @@
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
-  accessSync, chmodSync, closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync,
+  accessSync, fstatSync, readSync, chmodSync, closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync,
   realpathSync, renameSync, statSync, unlinkSync, writeSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -63,6 +63,7 @@ export function agentTargets(env = process.env) {
   return {
     claude: {
       key: 'claude',
+      env,
       name: 'Claude Code',
       envName: 'CONTEXT_LEDGER_CLAUDE_BIN',
       bin: env.CONTEXT_LEDGER_CLAUDE_BIN || 'claude',
@@ -73,7 +74,8 @@ export function agentTargets(env = process.env) {
       add: ['mcp', 'add', ...(port ? ['-e', `PORT=${port}`] : []), '--scope', 'user', serverName, '--', ...server],
       remove: ['mcp', 'remove', '--scope', 'user', serverName],
       // Claude's own answer for a name its user scope has; any other failure stops install.
-      exists: /MCP server "?context-ledger"? already exists in user config/iu,
+      // The whole line, so a longer message that contains it does not count.
+      exists: /^(?:Error: )?MCP server "?context-ledger"? already exists in user config\.?$/mu,
     },
     codex: {
       key: 'codex',
@@ -82,6 +84,7 @@ export function agentTargets(env = process.env) {
       bin: env.CONTEXT_LEDGER_CODEX_BIN || 'codex',
       // Resolved here once; setupAgents gives Codex the same absolute path.
       instructions: join(env.CODEX_HOME ? resolve(env.CODEX_HOME) : join(home, '.codex'), 'AGENTS.md'),
+      codexHome: env.CODEX_HOME ? resolve(env.CODEX_HOME) : undefined,
       // `codex mcp add` replaces an entry of the same name, so install asks first.
       get: ['mcp', 'get', serverName, '--json'],
       add: ['mcp', 'add', serverName, ...(port ? ['--env', `PORT=${port}`] : []), '--', ...server],
@@ -107,7 +110,8 @@ export function findCommand(bin, { platform = process.platform, env = process.en
   const directories = hasDirectory ? [''] : (env.PATH ?? env.Path ?? '').split(separator).filter(Boolean);
   for (const directory of directories) {
     for (const extension of extensions) {
-      const candidate = directory ? join(directory, bin + extension) : bin + extension;
+      // Absolute, because the CLI then runs from the home folder.
+      const candidate = resolve(directory ? join(directory, bin + extension) : bin + extension);
       if (isExecutableFile(candidate, windows)) return candidate;
     }
   }
@@ -233,12 +237,34 @@ function readFileText(path) {
     if (error.code === 'ENOENT' && !link) return null;
     throw new InstallError(`Cannot read ${shown(path)} (${shown(error.code ?? 'error')}).`);
   }
+  // Bytes and mode come from one open file, and the path must still name that file, so a
+  // swap during the read is not taken as the original (G8 review round 5).
   let bytes;
+  let opened;
   try {
-    bytes = readFileSync(real);
+    const descriptor = openSync(real, 'r');
+    try {
+      opened = fstatSync(descriptor);
+      bytes = Buffer.alloc(opened.size);
+      let read = 0;
+      while (read < bytes.length) {
+        const count = readSync(descriptor, bytes, read, bytes.length - read, read);
+        if (!count) break;
+        read += count;
+      }
+      bytes = bytes.subarray(0, read);
+    } finally {
+      closeSync(descriptor);
+    }
   } catch (error) {
     if (error.code === 'ENOENT') return null;
     throw new InstallError(`Cannot read ${shown(path)} (${shown(error.code ?? 'error')}).`);
+  }
+  const identity = identityOf(path);
+  const now = statSync(path);
+  // Inode and mode, not device: on Windows a path stat reports device 0, an open file its real one.
+  if (now.ino !== opened.ino || now.mode !== opened.mode) {
+    throw new InstallError(`${shown(path)} changed while it was being read; nothing was changed in it. Run the command again.`);
   }
   const bom = bytes.subarray(0, 3).equals(utf8Bom);
   const body = bom ? bytes.subarray(3) : bytes;
@@ -253,7 +279,7 @@ function readFileText(path) {
   } catch {
     throw new InstallError(`${shown(path)} is not valid UTF-8; nothing was changed in it.`);
   }
-  return { real, bytes, bom, text, link, mode: statSync(real).mode & 0o777, identity: identityOf(path) };
+  return { real, bytes, bom, text, link, mode: opened.mode & 0o777, identity };
 }
 
 const encode = (text, bom) => (bom ? Buffer.concat([utf8Bom, Buffer.from(text, 'utf8')]) : Buffer.from(text, 'utf8'));
@@ -352,6 +378,9 @@ const missingLine = (target, what) => `${shown(target.bin)} was not found, so th
 function installServer(target, dryRun, run) {
   const command = args => shown([target.bin, ...args].join(' '));
   if (target.key === 'codex') {
+    if (target.codexHome && !existsSync(target.codexHome)) {
+      return { ok: false, stop: true, line: `CODEX_HOME is set to ${shown(target.codexHome)}, which does not exist; Codex refuses it. Create the folder or unset CODEX_HOME.` };
+    }
     const state = probeCodex(target, run);
     if (state.missing) return { ok: false, line: missingLine(target, 'registered') };
     if (state.unsafe) return { ok: false, stop: true, line: 'a path holds " or %, which cmd.exe cannot be given safely; register the server by hand (see README).' };
@@ -359,7 +388,7 @@ function installServer(target, dryRun, run) {
     if (state.present) return { ok: true, line: `${serverName} is already registered; left as it is.` };
     if (dryRun) return { ok: true, line: `would run ${command(target.add)}` };
   } else if (dryRun) {
-    if (!findCommand(target.bin)) return { ok: false, line: missingLine(target, 'registered') };
+    if (!findCommand(target.bin, { env: target.env })) return { ok: false, line: missingLine(target, 'registered') };
     return { ok: true, line: `would run ${command(target.add)} (Claude Code refuses it when the name is already registered at user scope)` };
   }
   const result = run(target.bin, target.add);
@@ -391,7 +420,8 @@ function setupOne(target, mode, dryRun, run) {
       return { ok: false, lines };
     }
   } else {
-    say(`MCP server: not removed by this command. If install registered it, remove it with: ${shown([target.bin, ...target.remove].join(' '))}`);
+    const where = target.codexHome ? ` with CODEX_HOME set to ${shown(target.codexHome)}` : '';
+    say(`MCP server: not removed by this command. If install registered it, remove it${where} with: ${shown([target.bin, ...target.remove].join(' '))}`);
   }
   if (plan.note) {
     say('Instructions: ' + plan.note);
