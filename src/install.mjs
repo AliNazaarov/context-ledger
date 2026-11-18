@@ -16,7 +16,7 @@ import {
   realpathSync, renameSync, statSync, unlinkSync, writeSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, extname, join } from 'node:path';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inlineText } from './text.mjs';
 
@@ -45,9 +45,18 @@ export class InstallError extends Error {}
 
 const shown = value => inlineText(String(value));
 
+/**
+ * The home folder as the given environment names it, the way os.homedir() reads it, so
+ * an environment passed in (a test's fake home) is never mixed with the real one.
+ */
+export function homeOf(env = process.env, platform = process.platform) {
+  const named = platform === 'win32' ? env.USERPROFILE : env.HOME;
+  return named || (env === process.env ? homedir() : (() => { throw new InstallError('No home folder in this environment.'); })());
+}
+
 /** The two agents, with their CLI, instruction file and MCP commands. */
 export function agentTargets(env = process.env) {
-  const home = homedir();
+  const home = homeOf(env);
   const port = env.PORT && env.PORT !== defaultPort ? env.PORT : undefined;
   if (port !== undefined && (!/^[1-9]\d{0,4}$/u.test(port) || Number(port) > 65535)) throw new InstallError('Invalid PORT.');
   const server = ['node', mcpPath];
@@ -63,14 +72,16 @@ export function agentTargets(env = process.env) {
       // -e takes every value up to the next option, so it must not sit just before the name.
       add: ['mcp', 'add', ...(port ? ['-e', `PORT=${port}`] : []), '--scope', 'user', serverName, '--', ...server],
       remove: ['mcp', 'remove', '--scope', 'user', serverName],
-      exists: /already exists/iu,
+      // Claude's own answer for a name its user scope has; any other failure stops install.
+      exists: /MCP server "?context-ledger"? already exists in user config/iu,
     },
     codex: {
       key: 'codex',
       name: 'Codex',
       envName: 'CONTEXT_LEDGER_CODEX_BIN',
       bin: env.CONTEXT_LEDGER_CODEX_BIN || 'codex',
-      instructions: join(env.CODEX_HOME || join(home, '.codex'), 'AGENTS.md'),
+      // Resolved here once; setupAgents gives Codex the same absolute path.
+      instructions: join(env.CODEX_HOME ? resolve(env.CODEX_HOME) : join(home, '.codex'), 'AGENTS.md'),
       // `codex mcp add` replaces an entry of the same name, so install asks first.
       get: ['mcp', 'get', serverName, '--json'],
       add: ['mcp', 'add', serverName, ...(port ? ['--env', `PORT=${port}`] : []), '--', ...server],
@@ -121,7 +132,7 @@ function isExecutableFile(path, windows) {
  * it is refused. On POSIX the CLI is run directly, with no shell.
  * Returns { status, stdout, output, detail } or { missing: true } or { unsafe: true }.
  */
-export function runAgent(bin, args, { platform = process.platform, env = process.env, cwd = homedir() } = {}) {
+export function runAgent(bin, args, { platform = process.platform, env = process.env, cwd = homeOf(env, platform) } = {}) {
   const path = findCommand(bin, { platform, env });
   if (!path) return { missing: true };
   const options = { encoding: 'utf8', env, cwd, timeout: commandTimeoutMs, windowsHide: true };
@@ -153,7 +164,9 @@ function probeCodex(target, run) {
     try {
       const entry = JSON.parse(result.stdout);
       const transport = entry?.transport;
-      if (entry?.name === serverName && typeof transport?.command === 'string' && Array.isArray(transport.args)) return { present: true };
+      const stdio = typeof transport?.command === 'string' && Array.isArray(transport.args);
+      const http = transport?.type === 'streamable_http' && typeof transport.url === 'string';
+      if (entry?.name === serverName && (stdio || http)) return { present: true };
     } catch {
       // Falls through to the failure below.
     }
@@ -240,12 +253,31 @@ function readFileText(path) {
   } catch {
     throw new InstallError(`${shown(path)} is not valid UTF-8; nothing was changed in it.`);
   }
-  return { real, bytes, bom, text, link, mode: statSync(real).mode & 0o777 };
+  return { real, bytes, bom, text, link, mode: statSync(real).mode & 0o777, identity: identityOf(path) };
 }
 
 const encode = (text, bom) => (bom ? Buffer.concat([utf8Bom, Buffer.from(text, 'utf8')]) : Buffer.from(text, 'utf8'));
 
+/**
+ * What the path is at this moment: a link or not, and the file it reaches (device,
+ * inode, mode). Bytes alone miss a file swapped for a link to the same bytes, or a
+ * mode change (G8 review round 4).
+ */
+function identityOf(path) {
+  try {
+    const link = lstatSync(path);
+    const target = statSync(path);
+    return [link.isSymbolicLink(), link.dev, link.ino, target.dev, target.ino, target.mode].join('|');
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
 function assertUnchanged(file, path) {
+  if ((file ? file.identity : null) !== identityOf(path)) {
+    throw new InstallError(`${shown(path)} changed while it was being updated; nothing was written to it. Run the command again.`);
+  }
   let now = null;
   try {
     now = readFileSync(file?.real ?? path);
@@ -384,7 +416,9 @@ function setupOne(target, mode, dryRun, run) {
  */
 export function setupAgents({ mode, agents = ['claude', 'codex'], dryRun = false, env = process.env, run }) {
   const targets = agentTargets(env);
-  const runner = run ?? ((bin, args) => runAgent(bin, args, { env }));
+  // A relative CODEX_HOME means the same folder to Codex as to the instruction step.
+  const childEnv = env.CODEX_HOME ? { ...env, CODEX_HOME: resolve(env.CODEX_HOME) } : env;
+  const runner = run ?? ((bin, args) => runAgent(bin, args, { env: childEnv }));
   const lines = [];
   let ok = true;
   for (const key of agents) {

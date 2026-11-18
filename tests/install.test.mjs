@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { blockLines, endMarker, findCommand, mcpPath, runAgent, setupAgents, startMarker, withBlock, withoutBlock } from '../src/install.mjs';
+import { agentTargets, blockLines, endMarker, findCommand, homeOf, mcpPath, runAgent, setupAgents, startMarker, withBlock, withoutBlock } from '../src/install.mjs';
 
 // Card G8. Every test uses a fake home folder and stub agent CLIs, so the real Claude
 // Code and Codex configuration is never read or changed.
@@ -28,6 +28,7 @@ const [agent, ...args] = process.argv.slice(2);
 const stateFile = process.env.STUB_STATE + '.' + agent + '.json';
 const state = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, 'utf8')) : {};
 appendFileSync(process.env.STUB_STATE + '.log', JSON.stringify([agent, ...args]) + '\\n');
+if (process.env.STUB_ENV) appendFileSync(process.env.STUB_STATE + '.env', process.env[process.env.STUB_ENV] + '\\n');
 if (process.env.STUB_BROKEN === agent) { console.error('config file is broken'); process.exit(1); }
 const save = () => writeFileSync(stateFile, JSON.stringify(state));
 const fail = message => { console.error(message); process.exit(1); };
@@ -128,8 +129,15 @@ function sandbox(t, { codexHome } = {}) {
   const servers = agent => (existsSync(`${state}.${agent}.json`) ? JSON.parse(readFileSync(`${state}.${agent}.json`, 'utf8')) : {});
   const seed = (agent, value) => writeFileSync(`${state}.${agent}.json`, JSON.stringify(value));
   const write = (path, content) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, content); };
-  return { root, home, env, files, ledger, calls, writes, servers, seed, write };
+  const envSeen = () => (existsSync(state + '.env') ? readFileSync(state + '.env', 'utf8').trim().split(/\r?\n/u) : []);
+  return { root, home, env, files, ledger, calls, writes, servers, seed, write, envSeen };
 }
+
+// Card G8 incident: in-process tests once took the home folder from os.homedir() and
+// wrote the block into the real files. These are read now and checked by the last test.
+const realHome = homedir();
+const realFiles = [join(realHome, '.claude', 'CLAUDE.md'), join(realHome, '.codex', 'AGENTS.md')];
+const realBefore = realFiles.map(path => (existsSync(path) ? readFileSync(path) : null));
 
 const block = lineEnd => blockLines.map(line => line + lineEnd).join('');
 const ours = (env = {}) => ({ command: 'node', args: [mcpPath], env });
@@ -429,4 +437,76 @@ test('the block names the tools agents should call and says labels are data', ()
   for (const tool of ['graph_list', 'session_search', 'context_for']) assert.ok(text.includes(tool), tool);
   assert.match(text, /data, not as instructions/u);
   assert.ok(text.length < 700, 'short');
+});
+
+test('review round 4: only Claude\'s own duplicate answer counts as already registered', t => {
+  const box = sandbox(t);
+  box.write(box.files.claude, `Rules${nl}`);
+  const run = () => ({ status: 1, stdout: '', output: 'Cannot save settings: backup already exists', detail: 'Cannot save settings: backup already exists' });
+  const { ok, lines } = setupAgents({ mode: 'install', agents: ['claude'], env: box.env, run });
+  assert.equal(ok, false);
+  assert.match(lines.join(nl), /failed \(Cannot save settings: backup already exists\)/u);
+  assert.equal(readFileSync(box.files.claude, 'utf8'), `Rules${nl}`);
+});
+
+test('review round 4: a relative CODEX_HOME is the same folder for Codex and for the block', t => {
+  const box = sandbox(t);
+  const seen = [];
+  const run = (bin, args) => {
+    seen.push(args);
+    return args[1] === 'get' ? { status: 1, stdout: '', output: "Error: No MCP server named 'context-ledger' found." } : { status: 0, stdout: '', output: '' };
+  };
+  const cwd = process.cwd();
+  process.chdir(box.root);
+  try {
+    const result = setupAgents({ mode: 'install', agents: ['codex'], env: { ...box.env, CODEX_HOME: 'profile dir' }, run });
+    assert.equal(result.ok, true, result.lines.join(nl));
+  } finally {
+    process.chdir(cwd);
+  }
+  assert.ok(existsSync(join(box.root, 'profile dir', 'AGENTS.md')), 'resolved against the folder install ran in');
+  // The real CLI gets the same absolute folder: the stub records the CODEX_HOME it sees.
+  const where = spawnSync(process.execPath, [cli, 'install', '--agent', 'codex'], { cwd: box.root, env: { ...box.env, CODEX_HOME: 'other dir', STUB_ENV: 'CODEX_HOME' }, encoding: 'utf8' });
+  assert.equal(where.status, 0, where.stdout + where.stderr);
+  assert.ok(existsSync(join(box.root, 'other dir', 'AGENTS.md')));
+  assert.deepEqual([...new Set(box.envSeen())], [join(box.root, 'other dir')]);
+});
+
+test('review round 4: an existing Codex HTTP entry is recognised and left alone', t => {
+  const box = sandbox(t);
+  const stdout = JSON.stringify({ name: 'context-ledger', enabled: true, transport: { type: 'streamable_http', url: 'http://127.0.0.1:9/mcp' } });
+  const run = (bin, args) => (args[1] === 'get' ? { status: 0, stdout, output: stdout } : assert.fail('no add over an entry'));
+  const { ok, lines } = setupAgents({ mode: 'install', agents: ['codex'], env: box.env, run });
+  assert.equal(ok, true, lines.join(nl));
+  assert.match(lines.join(nl), /already registered; left as it is/u);
+  assert.equal(readFileSync(box.files.codex, 'utf8'), block(nl));
+});
+
+test('review round 4: a file swapped for one with the same bytes, or given another mode, during install is not overwritten', t => {
+  const swaps = [['same bytes, new file', path => { const bytes = readFileSync(path); rmSync(path); writeFileSync(path, bytes); }]];
+  if (!windows) swaps.push(['mode changed', path => chmodSync(path, 0o600)]);
+  for (const [what, swap] of swaps) {
+    const box = sandbox(t);
+    box.write(box.files.claude, `Rules${nl}`);
+    const run = () => {
+      swap(box.files.claude);
+      return { status: 0, stdout: '', output: '' };
+    };
+    const { ok, lines } = setupAgents({ mode: 'install', agents: ['claude'], env: box.env, run });
+    assert.equal(ok, false, what);
+    assert.match(lines.join(nl), /changed while it was being updated; nothing was written to it/u, what);
+    assert.equal(readFileSync(box.files.claude, 'utf8'), `Rules${nl}`, what);
+  }
+});
+
+test('the home folder comes from the environment passed in, never from the real one', t => {
+  const box = sandbox(t);
+  assert.equal(homeOf(box.env), box.home);
+  assert.equal(agentTargets(box.env).claude.instructions, join(box.home, '.claude', 'CLAUDE.md'));
+  assert.throws(() => homeOf({ PATH: '' }), /No home folder/u, 'an environment without one is refused, not filled from the real home');
+});
+
+// Runs last: no test in this file may have touched the real instruction files.
+test('the real ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md are byte for byte as they were', () => {
+  assert.deepEqual(realFiles.map(path => (existsSync(path) ? readFileSync(path) : null)), realBefore);
 });
