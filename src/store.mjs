@@ -3,12 +3,14 @@ import { mkdirSync } from 'node:fs';
 import { basename, dirname, win32 } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { graphContext } from './context.mjs';
-import { InputError } from './errors.mjs';
+import { ConflictError, InputError } from './errors.mjs';
 import { canonicalPacket, validateGraph } from './graph.mjs';
 import { migrate } from './migrate.mjs';
 import { mountRooms } from './rooms.mjs';
 
-export { InputError };
+export { ConflictError, InputError };
+
+const secureDeleteModes = ['OFF', 'ON', 'FAST'];
 
 const summaryColumns = 'id, provider, source, title, message_count AS messageCount';
 const codexContextKinds = new Set([
@@ -154,6 +156,8 @@ export function openStore(path) {
     ON CONFLICT (id) DO NOTHING
   `);
   const getGraph = database.prepare('SELECT payload FROM graphs WHERE id = ?');
+  const countCitingGraphs = database.prepare('SELECT count(*) AS graphs FROM graphs WHERE session_id = ?');
+  const deleteSessionRow = database.prepare('DELETE FROM sessions WHERE id = ?');
   const readGraph = id => {
     const row = getGraph.get(id);
     if (row) return { id, ...JSON.parse(row.payload) };
@@ -240,6 +244,41 @@ export function openStore(path) {
     get(id) {
       const row = getDetail.get(id);
       if (row) return { ...row, messages: JSON.parse(row.messages) };
+    },
+
+    /**
+     * Delete one imported session: true when it was deleted, false when there is no
+     * such session. Refused with a ConflictError while any graph cites it; rooms refer
+     * to graphs, so a session in a room is refused through its graph. The whole
+     * transcript, its title and its search text are in this one row.
+     */
+    deleteSession(id) {
+      // SQLite leaves deleted rows' bytes in free space unless secure_delete is on.
+      // Turn it on for this delete only, so the transcript text is overwritten.
+      const previous = database.prepare('PRAGMA secure_delete').get().secure_delete;
+      database.exec('PRAGMA secure_delete = ON');
+      try {
+        // IMMEDIATE takes the write lock first, so no graph can cite the session
+        // between the check and the delete.
+        database.exec('BEGIN IMMEDIATE');
+        let deleted = false;
+        try {
+          if (getSummary.get(id)) {
+            const { graphs } = countCitingGraphs.get(id);
+            if (graphs > 0) {
+              throw new ConflictError(`This session is cited by ${graphs} ${graphs === 1 ? 'graph' : 'graphs'}, so it cannot be deleted.`, { graphs });
+            }
+            deleted = deleteSessionRow.run(id).changes === 1;
+          }
+          database.exec('COMMIT');
+        } catch (error) {
+          database.exec('ROLLBACK');
+          throw error;
+        }
+        return deleted;
+      } finally {
+        database.exec(`PRAGMA secure_delete = ${secureDeleteModes[previous] ?? 'OFF'}`);
+      }
     },
 
     publishGraph(packet) {

@@ -5,6 +5,7 @@ import { terminalJson } from './text.mjs';
 
 const usage = 'Usage: npm run ledger -- search [--provider claude|codex] [query]\n' +
   '       npm run ledger -- handoff <session-id>\n' +
+  '       npm run ledger -- delete <session-id>\n' +
   '       npm run ledger -- graph publish <packet.json>\n' +
   '       npm run ledger -- graph read <graph-id>';
 const maxGraphPacketBytes = 8 * 1024 * 1024;
@@ -26,6 +27,9 @@ function command(argv) {
   }
   if (action === 'handoff' && args.length === 1 && /^[a-f0-9]{64}$/.test(args[0])) {
     return { action, path: '/api/sessions/' + args[0] };
+  }
+  if (action === 'delete' && args.length === 1 && /^[a-f0-9]{64}$/.test(args[0])) {
+    return { action, path: '/api/sessions/' + args[0], sessionId: args[0] };
   }
   if (action === 'graph' && args.length === 2) {
     const [operation, value] = args;
@@ -64,15 +68,16 @@ async function readGraphPacket(packetPath) {
 }
 
 async function main() {
-  const { action, path, packetPath } = command(process.argv.slice(2));
+  const { action, path, packetPath, sessionId } = command(process.argv.slice(2));
   const port = Number(process.env.PORT ?? 4317);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT.');
   const origin = `http://127.0.0.1:${port}`;
-  const publish = packetPath === undefined ? {} : {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Origin: origin },
-    body: await readGraphPacket(packetPath),
-  };
+  let publish = {};
+  if (packetPath !== undefined) {
+    publish = { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: await readGraphPacket(packetPath) };
+  } else if (action === 'delete') {
+    publish = { method: 'DELETE', headers: { Origin: origin } };
+  }
   let response;
   try {
     response = await fetch(origin + path, {
@@ -80,7 +85,10 @@ async function main() {
       redirect: 'error',
       signal: AbortSignal.timeout(5000),
     });
-  } catch {
+  } catch (error) {
+    if (action === 'delete' && error?.name === 'TimeoutError') {
+      throw new Error('Context Ledger did not answer within 5 seconds. The session may or may not be deleted; search to check.');
+    }
     throw new Error(`Cannot reach Context Ledger on port ${port}. Start it with npm start.`);
   }
   if (response.status === 404) throw new Error(action === 'graph' ? 'Graph not found.' : 'Session not found.');
@@ -91,9 +99,21 @@ async function main() {
         throw new Error(problem.error);
       }
     }
+    if (action === 'delete' && response.status === 409) {
+      // Built from the count alone, so no text from the server reaches the terminal.
+      const graphs = (await response.json().catch(() => null))?.graphs;
+      if (Number.isSafeInteger(graphs) && graphs > 0) {
+        throw new Error(`Session is cited by ${graphs} ${graphs === 1 ? 'graph' : 'graphs'}, so it was not deleted.`);
+      }
+    }
     throw new Error(`Context Ledger returned HTTP ${response.status}.`);
   }
   const data = await response.json();
+  if (action === 'delete') {
+    if (data?.deleted !== sessionId) throw new Error('Context Ledger returned an unexpected response.');
+    console.log(`Deleted session ${sessionId}.`);
+    return;
+  }
   if (action === 'graph') {
     console.log(terminalJson(data));
     return;

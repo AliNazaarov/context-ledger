@@ -226,11 +226,41 @@ test('the server request table answers every probe as before', async t => {
     await expect(`long ${prefix}${suffix}`, state.get(`${prefix}${'a'.repeat(65)}${suffix}`), 404, notFound);
     await expect(`trailing ${prefix}${suffix}`, state.get(`${prefix}${leo.id}${suffix}/`), 404, notFound);
     for (const method of ['POST', 'PUT', 'DELETE']) {
+      // Node's client sends a DELETE body unframed unless a length is given, and
+      // /api/sessions/:id now has a DELETE route, so the server would read those
+      // bytes as a second, malformed request. Give the length (P1d).
+      const length = method === 'DELETE' ? { 'Content-Length': '2' } : {};
       await expect(`${method} ${prefix}id${suffix}`, raw(port, { method, path: `${prefix}${leoGraph.id}${suffix}`, body: '{}',
-        headers: { 'Content-Type': 'application/json', Origin: origin } }), 404, notFound);
+        headers: { 'Content-Type': 'application/json', Origin: origin, ...length } }), 404, notFound);
     }
   }
   await expect('GET /api/graphs/<session id>', state.get(`/api/graphs/${leo.id}`), 404, notFound);
+
+  // P1d: DELETE /api/sessions/:id. The loop above still gets 404 for DELETE on
+  // /api/sessions/<graph id>, now from the handler (no such session) instead of from
+  // having no route. Origin comes first, then the ID, then the citing graphs.
+  const cara = (await expect('POST /api/import cara', state.post('/api/import', { provider: 'claude', source: 'cara.jsonl',
+    transcript: JSON.stringify({ type: 'user', message: { role: 'user', content: 'Cara drafts the synthetic Vega notes.' } }) }), 200)).body.session;
+  const remove = (id, headers = { Origin: origin }) => raw(port, { method: 'DELETE', path: `/api/sessions/${id}`, headers });
+  const sameOrigin = { error: 'Deleting a session requires the same origin.' };
+  await expect('DELETE session foreign Origin', remove(cara.id, { Origin: 'https://foreign.example' }), 403, sameOrigin);
+  await expect('DELETE session Origin of the other local name', remove(cara.id, { Origin: `http://localhost:${port}` }), 403, sameOrigin);
+  await expect('DELETE session no Origin', remove(cara.id, {}), 403, sameOrigin);
+  await expect('DELETE unknown session needs the Origin', remove(hex('e'), {}), 403, sameOrigin);
+  await expect('DELETE session foreign Host', raw(port, { method: 'DELETE', path: `/api/sessions/${cara.id}`,
+    headers: { Host: 'evil.example', Origin: 'http://evil.example' } }), 403, { error: 'Unrecognized local host.' });
+  for (const [label, id] of [['unknown', hex('e')], ['upper', hex('A')], ['short', 'a'.repeat(63)], ['long', 'a'.repeat(65)]]) {
+    await expect(`DELETE ${label} session`, remove(id), 404, notFound);
+  }
+  await expect('DELETE session trailing slash', remove(`${cara.id}/`), 404, notFound);
+  await expect('DELETE /api/sessions', raw(port, { method: 'DELETE', path: '/api/sessions', headers: { Origin: origin } }), 404, notFound);
+  await expect('DELETE cited session', remove(leo.id), 409, { error: 'This session is cited by 1 graph, so it cannot be deleted.', graphs: 1 });
+  await expect('cited session still there', state.get(`/api/sessions/${leo.id}`), 200);
+  await expect('PATCH session', raw(port, { method: 'PATCH', path: `/api/sessions/${cara.id}`, headers: { Origin: origin } }), 404, notFound);
+  await expect('DELETE session', remove(cara.id), 200, { deleted: cara.id });
+  await expect('GET deleted session', state.get(`/api/sessions/${cara.id}`), 404, notFound);
+  await expect('DELETE deleted session', remove(cara.id), 404, notFound);
+  await expect('search after delete', state.get('/api/sessions?q=vega'), 200, { sessions: [] });
 
   // The decisions route: Sec-Fetch-Site first, then the write checks, then the room.
   const decisions = `/api/rooms/${room.id}/decisions`;
