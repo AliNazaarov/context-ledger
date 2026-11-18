@@ -9,21 +9,33 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { canonicalJson, keyFingerprint, normalizeFingerprint, verifyBundle, writeBundle } from '../src/sign.mjs';
+import { handoffMarkdown } from '../src/handoff.mjs';
+import {
+  canonicalJson, daclAllowsOnly, keyFingerprint, normalizeFingerprint, verifyBundle, writeBundle,
+} from '../src/sign.mjs';
+import { openStore } from '../src/store.mjs';
 
 const cp = (...points) => String.fromCodePoint(...points);
 const BS = cp(92);
 const u = hex => BS + 'u' + hex;
-const sessionId = 'a'.repeat(64);
-const session = {
-  id: sessionId,
-  provider: 'claude',
-  source: 'synthetic-p4a.jsonl',
-  messages: [
-    { role: 'user', line: 1, text: 'Synthetic: ship the signed hand-off on Friday.' },
-    { role: 'assistant', line: 2, text: 'Synthetic: noted, Friday, with the verify command.' },
-  ],
-};
+const transcript = [
+  JSON.stringify({ type: 'user', message: { role: 'user', content: 'Synthetic: ship the signed hand-off on Friday.' } }),
+  JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'Synthetic: noted, Friday, with the verify command.' } }),
+].join('\n');
+
+// Import the synthetic transcript into a ledger database, as the server's import does.
+function seedLedger(path) {
+  const store = openStore(path);
+  try {
+    const { id } = store.importTranscript({ provider: 'claude', source: 'synthetic-p4a.jsonl', transcript });
+    return store.get(id);
+  } finally {
+    store.close();
+  }
+}
+
+const session = seedLedger(':memory:');
+const sessionId = session.id;
 
 function run(args, env = {}) {
   return new Promise(resolve => {
@@ -54,17 +66,20 @@ function tempFolder(t) {
   return folder;
 }
 
-// One key and one signed bundle per test, all in a temporary folder.
+// One key, one seeded ledger database and one signed bundle per test, all in a temporary
+// folder. --sign reads the database; the fake server on PORT only serves plain `handoff`.
 async function signedBundle(t) {
   const folder = tempFolder(t);
-  const env = { CONTEXT_LEDGER_DB: join(folder, 'data', 'ledger.sqlite'), PORT: await fakeLedger(t) };
+  const database = join(folder, 'data', 'ledger.sqlite');
+  const env = { CONTEXT_LEDGER_DB: database, PORT: await fakeLedger(t) };
   const keygen = await run(['keygen'], env);
   assert.equal(keygen.code, 0, keygen.stderr);
+  seedLedger(database);
   const bundle = join(folder, 'bundle');
   const signed = await run(['handoff', sessionId, '--sign', bundle], env);
   assert.equal(signed.code, 0, signed.stderr);
   const privateKey = createPrivateKey(readFileSync(join(folder, 'data', 'signing-key.pem')));
-  return { folder, env, bundle, fingerprint: keygen.stdout.trim(), privateKey };
+  return { folder, database, env, bundle, fingerprint: keygen.stdout.trim(), privateKey };
 }
 
 let copies = 0;
@@ -190,8 +205,9 @@ test('keygen refuses an in-memory database location', async () => {
 
 test('a signing key file other users can read is refused on POSIX', { skip: process.platform === 'win32' }, async t => {
   const folder = tempFolder(t);
-  const env = { CONTEXT_LEDGER_DB: join(folder, 'ledger.sqlite'), PORT: await fakeLedger(t) };
+  const env = { CONTEXT_LEDGER_DB: join(folder, 'ledger.sqlite') };
   assert.equal((await run(['keygen'], env)).code, 0);
+  seedLedger(env.CONTEXT_LEDGER_DB);
   execFileSync('chmod', ['644', join(folder, 'signing-key.pem')]);
   const result = await run(['handoff', sessionId, '--sign', join(folder, 'bundle')], env);
   assert.equal(result.code, 1);
@@ -705,4 +721,155 @@ test('without pipefail, a missing PEM gives the empty-input hash, which no finge
   const printed = result.stdout.match(/= ?([0-9a-f]{64})/)[1];
   assert.equal(printed, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
   assert.notEqual(printed, normalizeFingerprint(context.fingerprint));
+});
+
+// --- Security review of PR #44 ----------------------------------------------------------
+
+const onWindows = process.platform === 'win32';
+const system32 = name => join(process.env.SystemRoot ?? 'C:' + BS + 'Windows', 'System32', name);
+const icacls = (...args) => execFileSync(system32('icacls.exe'), args, { stdio: 'ignore', windowsHide: true });
+const everyone = 'S-1-1-0';
+const users = 'S-1-5-32-545';
+
+function windowsSid() {
+  const output = execFileSync(system32('whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { windowsHide: true });
+  return /"(S-1-[0-9-]+)"\s*$/.exec(output.toString('latin1'))[1];
+}
+
+// The DACL of a file in SDDL form, read independently of src/sign.mjs.
+function savedDacl(t, path) {
+  const out = join(tempFolder(t), 'acl');
+  icacls(path, '/save', out);
+  return readFileSync(out).toString('utf16le').split(/\r?\n/)[1];
+}
+
+test('daclAllowsOnly accepts only this account, SYSTEM and Administrators', () => {
+  const me = 'S-1-5-21-1-2-3-1001';
+  const ace = (sid, type = 'A', flags = '') => '(' + type + ';' + flags + ';FA;;;' + sid + ')';
+  assert.equal(daclAllowsOnly('D:PAI' + ace(me), me), true);
+  assert.equal(daclAllowsOnly('D:AI' + ace('SY', 'A', 'ID') + ace('BA', 'A', 'ID') + ace(me, 'A', 'ID'), me), true);
+  assert.equal(daclAllowsOnly('D:P' + ace('S-1-5-18') + ace('S-1-5-32-544') + ace(me), me), true);
+  assert.equal(daclAllowsOnly('D:P' + ace('WD', 'D') + ace(me), me), true, 'a deny entry grants nothing');
+  assert.equal(daclAllowsOnly('D:P', me), true, 'an empty DACL grants nothing');
+  for (const other of ['WD', 'BU', 'AU', 'IU', 'OW', 'CO', everyone, users, 'S-1-5-21-1-2-3-1002']) {
+    assert.equal(daclAllowsOnly('D:PAI' + ace(me) + ace(other), me), false, other);
+    assert.equal(daclAllowsOnly('D:AI' + ace(other, 'A', 'ID') + ace(me, 'A', 'ID'), me), false, other);
+  }
+  for (const odd of ['', 'D:NO_ACCESS_CONTROL', 'O:BAG:SYD:PAI' + ace(me), 'D:PAI' + ace(me) + 'S:AI',
+    'D:PAI(A;;FA;;' + me + ')', 'D:PAI(XA;;FA;;;' + me + ';(@User.x == 1))', 'D:PAI' + ace(me) + ' ']) {
+    assert.equal(daclAllowsOnly(odd, me), false, odd);
+  }
+});
+
+test('keygen restricts the key to this account on Windows, even in a folder others can read', { skip: !onWindows }, async t => {
+  const folder = tempFolder(t);
+  const data = join(folder, 'data');
+  mkdirSync(data);
+  // The review's scenario: a ledger folder whose inherited access list lets other accounts read.
+  icacls(data, '/grant', '*' + everyone + ':(OI)(CI)R', '*' + users + ':(OI)(CI)R');
+  assert.match(savedDacl(t, data), /;;;WD\)/);
+  const env = { CONTEXT_LEDGER_DB: join(data, 'ledger.sqlite') };
+  const keygen = await run(['keygen'], env);
+  assert.equal(keygen.code, 0, keygen.stderr);
+  const keyPath = join(data, 'signing-key.pem');
+  assert.equal(savedDacl(t, keyPath), 'D:PAI(A;;FA;;;' + windowsSid() + ')');
+  assert.deepEqual(readdirSync(data), ['signing-key.pem'], 'no staging file is left');
+
+  seedLedger(env.CONTEXT_LEDGER_DB);
+  const signed = await run(['handoff', sessionId, '--sign', join(folder, 'bundle')], env);
+  assert.equal(signed.code, 0, signed.stderr);
+});
+
+test('a signing key file other accounts can read is refused on Windows', { skip: !onWindows }, async t => {
+  const folder = tempFolder(t);
+  const env = { CONTEXT_LEDGER_DB: join(folder, 'ledger.sqlite') };
+  assert.equal((await run(['keygen'], env)).code, 0);
+  seedLedger(env.CONTEXT_LEDGER_DB);
+  const keyPath = join(folder, 'signing-key.pem');
+  let attempt = 0;
+  const sign = () => run(['handoff', sessionId, '--sign', join(folder, 'bundle-' + (attempt += 1))], env);
+  const refused = async label => {
+    const result = await sign();
+    assert.equal(result.code, 1, label);
+    assert.match(result.stderr, /Other accounts can read the signing key file\. Restrict it to your account with icacls/, label);
+    assert.ok(!existsSync(join(folder, 'bundle-' + attempt)), label);
+  };
+
+  icacls(keyPath, '/grant', '*' + everyone + ':R');
+  await refused('Everyone');
+  icacls(keyPath, '/remove:g', '*' + everyone);
+  icacls(keyPath, '/grant', '*' + users + ':R');
+  await refused('Users');
+  icacls(keyPath, '/remove:g', '*' + users);
+
+  // Inheritance switched back on, under a folder that grants Everyone read.
+  icacls(folder, '/grant', '*' + everyone + ':(OI)(CI)R');
+  icacls(keyPath, '/inheritance:e');
+  await refused('inherited from the folder');
+  icacls(keyPath, '/inheritance:r');
+
+  const accepted = await sign();
+  assert.equal(accepted.code, 0, accepted.stderr);
+  assert.equal(savedDacl(t, keyPath), 'D:PAI(A;;FA;;;' + windowsSid() + ')');
+});
+
+test('handoff --sign reads the ledger database and never contacts PORT', async t => {
+  const folder = tempFolder(t);
+  const database = join(folder, 'data', 'ledger.sqlite');
+  const env = { CONTEXT_LEDGER_DB: database };
+  const keygen = await run(['keygen'], env);
+  assert.equal(keygen.code, 0, keygen.stderr);
+  seedLedger(database);
+
+  // Whatever answers on PORT (here a forged session with the right ID) is never asked.
+  let requests = 0;
+  const forged = { ...session, messages: [{ role: 'user', line: 1, text: 'Synthetic forgery from PORT.' }] };
+  const server = createServer((request, response) => {
+    requests += 1;
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify({ session: forged }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+
+  const bundle = join(folder, 'bundle');
+  const signed = await run(['handoff', sessionId, '--sign', bundle], { ...env, PORT: String(server.address().port) });
+  assert.equal(signed.code, 0, signed.stderr);
+  assert.equal(requests, 0, 'the server on PORT was not contacted');
+  const markdown = readFileSync(join(bundle, 'handoff.md'), 'utf8');
+  assert.equal(markdown, handoffMarkdown(session) + '\n');
+  assert.ok(!markdown.includes('forgery'));
+  assert.deepEqual(await problemsOf(bundle, { fingerprint: keygen.stdout.trim() }), []);
+
+  // No server at all, and a PORT that is not even a port number.
+  const offline = await run(['handoff', sessionId, '--sign', join(folder, 'offline')], { ...env, PORT: 'none' });
+  assert.equal(offline.code, 0, offline.stderr);
+  assert.equal(readFileSync(join(folder, 'offline', 'handoff.md'), 'utf8'), markdown);
+});
+
+test('handoff --sign needs the ledger database and the session in it, and says so in fixed words', async t => {
+  const folder = tempFolder(t);
+  const database = join(folder, 'ledger.sqlite');
+  const env = { CONTEXT_LEDGER_DB: database };
+  assert.equal((await run(['keygen'], env)).code, 0);
+
+  const noDatabase = await run(['handoff', sessionId, '--sign', join(folder, 'a')], env);
+  assert.equal(noDatabase.code, 1);
+  assert.equal(noDatabase.stderr, 'No ledger database. Import a session first, or set CONTEXT_LEDGER_DB.\n');
+  assert.ok(!existsSync(database), 'no empty database is created');
+  assert.ok(!existsSync(join(folder, 'a')));
+
+  writeFileSync(database, 'Synthetic: not a database. ' + cp(0x1b) + '[31m');
+  const broken = await run(['handoff', sessionId, '--sign', join(folder, 'b')], env);
+  assert.equal(broken.code, 1);
+  assert.match(broken.stderr, /^Cannot open the ledger database\.$/m);
+  assert.ok(!broken.stderr.includes(cp(0x1b)));
+  assert.ok(!existsSync(join(folder, 'b')));
+
+  rmSync(database);
+  seedLedger(database);
+  const unknown = await run(['handoff', 'b'.repeat(64), '--sign', join(folder, 'c')], env);
+  assert.equal(unknown.code, 1);
+  assert.match(unknown.stderr, /^Session not found\.$/m);
+  assert.ok(!existsSync(join(folder, 'c')));
 });

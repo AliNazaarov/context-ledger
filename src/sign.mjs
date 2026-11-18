@@ -4,9 +4,11 @@
 import {
   createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign, verify,
 } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
-import { link, lstat, mkdir, open, readdir, realpath, rmdir, unlink } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, rmdir, unlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
 import { terminalLabel } from './text.mjs';
 
 export const bundleFormat = 'context-ledger-signed-handoff';
@@ -81,9 +83,14 @@ export function normalizeFingerprint(text) {
   return hex;
 }
 
+/** The ledger database the server opens: CONTEXT_LEDGER_DB, or the default under the cwd. */
+export function ledgerDatabasePath(env = process.env) {
+  return env.CONTEXT_LEDGER_DB ?? '.context-ledger/ledger.sqlite';
+}
+
 /** The signing key lives beside the ledger database. */
 export function signingKeyPath(env = process.env) {
-  const database = env.CONTEXT_LEDGER_DB ?? '.context-ledger/ledger.sqlite';
+  const database = ledgerDatabasePath(env);
   if (database === '' || database === ':memory:') {
     throw new Error('Set CONTEXT_LEDGER_DB to a file path to keep a signing key beside it.');
   }
@@ -102,7 +109,7 @@ export async function generateSigningKey(path) {
   // Write a temporary file in the same folder, then hard-link it into place: link()
   // never replaces an existing file, and an interrupted run leaves only the temporary
   // file, never a partial key under the real name. 0600 where the OS has POSIX modes;
-  // on Windows the file takes the folder's access list instead.
+  // on Windows the access list is restricted to this account (below).
   const staging = join(dirname(path), basename(path) + '.' + randomBytes(8).toString('hex') + '.tmp');
   let file;
   try {
@@ -112,6 +119,10 @@ export async function generateSigningKey(path) {
   }
   // Only a staging file this call created is ever removed.
   try {
+    // A new Windows file inherits its folder's access list, which can let other accounts
+    // read it. Restrict the still-empty file before any key byte is written. A hard link
+    // shares the file's access list, so the real name never has a wider one.
+    if (process.platform === 'win32') await restrictToCurrentAccount(staging);
     try {
       await file.writeFile(privateKey.export({ type: 'pkcs8', format: 'pem' }));
       await file.sync();
@@ -181,6 +192,7 @@ export async function loadSigningKey(path) {
   if (process.platform !== 'win32' && (read.mode & 0o077) !== 0) {
     throw new Error('Other users can read the signing key file. Restrict it with chmod 600.');
   }
+  if (process.platform === 'win32') await checkCurrentAccountOnly(path);
   let key;
   try {
     if (read.tooLarge) throw new Error('too large');
@@ -190,6 +202,97 @@ export async function loadSigningKey(path) {
   }
   if (key.asymmetricKeyType !== 'ed25519') throw new Error('The signing key is not an Ed25519 key.');
   return key;
+}
+
+// --- Windows access lists -------------------------------------------------------
+
+// SYSTEM and the Administrators group can take any file on Windows, as root can on POSIX,
+// so they do not count as other accounts. SDDL writes them as SY and BA.
+const rootLike = ['SY', 'S-1-5-18', 'BA', 'S-1-5-32-544'];
+const denyAceTypes = new Set(['D', 'OD', 'XD']);
+const sidPattern = /^S-1-\d+(?:-\d+)+$/;
+const keyAccessHelp = 'Other accounts can read the signing key file. Restrict it to your account with ' +
+  'icacls <key file> /inheritance:r /grant:r "%USERNAME%:F" (see docs/signed-handoff.md).';
+
+/**
+ * True when a DACL in SDDL form, as `icacls /save` writes it, allows access to no account
+ * but `sid`, SYSTEM and Administrators. Deny entries are skipped. A null DACL, a form this
+ * parser does not know, or an allow entry for any other account (Everyone, Users, another
+ * user) gives false, so the check fails closed.
+ */
+export function daclAllowsOnly(sddl, sid) {
+  const match = /^D:([A-Z_]*)((?:\([^()]*\))*)$/.exec(sddl);
+  if (!match || match[1].includes('NO_ACCESS_CONTROL')) return false;
+  const allowed = new Set([sid, ...rootLike]);
+  for (const [, ace] of match[2].matchAll(/\(([^()]*)\)/g)) {
+    const fields = ace.split(';');
+    if (fields.length < 6) return false;
+    if (denyAceTypes.has(fields[0])) continue;
+    if (!allowed.has(fields[5])) return false;
+  }
+  return true;
+}
+
+// The tools come from System32 by full path and run without a shell, so the arguments
+// reach them as they are.
+function runWindowsTool(name, args) {
+  const tool = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', name);
+  return new Promise((done, fail) => {
+    execFile(tool, args, { encoding: 'buffer', windowsHide: true, timeout: 15000 }, (error, stdout) => {
+      if (error) fail(error);
+      else done(stdout);
+    });
+  });
+}
+
+// The SID of the account running this process. whoami prints "domain\name","S-1-5-..." in
+// the console code page; the SID itself is ASCII, and unlike a name it is unambiguous.
+async function currentAccountSid() {
+  const output = (await runWindowsTool('whoami.exe', ['/user', '/fo', 'csv', '/nh'])).toString('latin1');
+  const sid = /"([^"]*)"\s*$/.exec(output)?.[1];
+  if (!sid || !sidPattern.test(sid)) throw new Error('No account SID.');
+  return sid;
+}
+
+// The file's DACL in SDDL form, which does not depend on the display language. icacls
+// /save writes it to a file, so it goes into a new temporary folder that is first
+// restricted to this account.
+async function readDacl(path, sid) {
+  const folder = await mkdtemp(join(tmpdir(), 'ledger-acl-'));
+  try {
+    await runWindowsTool('icacls.exe', [folder, '/inheritance:r', '/grant:r', '*' + sid + ':(OI)(CI)F']);
+    const saved = join(folder, 'acl');
+    await runWindowsTool('icacls.exe', [resolve(path), '/save', saved]);
+    let text = (await readFile(saved)).toString('utf16le');
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    // The first line names the file, the second holds the DACL.
+    return text.split(/\r?\n/)[1] ?? '';
+  } finally {
+    await rm(folder, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// Remove the inherited entries and grant this account alone full control, then check it.
+async function restrictToCurrentAccount(path) {
+  try {
+    const sid = await currentAccountSid();
+    await runWindowsTool('icacls.exe', [resolve(path), '/inheritance:r', '/grant:r', '*' + sid + ':F']);
+    if (daclAllowsOnly(await readDacl(path, sid), sid)) return;
+  } catch {
+    // Reported below with one fixed message.
+  }
+  throw new Error('Cannot restrict the signing key file to your account.');
+}
+
+async function checkCurrentAccountOnly(path) {
+  let allowsOnly;
+  try {
+    const sid = await currentAccountSid();
+    allowsOnly = daclAllowsOnly(await readDacl(path, sid), sid);
+  } catch {
+    throw new Error('Cannot check which accounts can read the signing key file.');
+  }
+  if (!allowsOnly) throw new Error(keyAccessHelp);
 }
 
 // --- Signing --------------------------------------------------------------------

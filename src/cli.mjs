@@ -1,8 +1,9 @@
-import { constants, open } from 'node:fs/promises';
+import { constants, lstat, open } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { handoffMarkdown } from './handoff.mjs';
 import {
-  buildBundle, generateSigningKey, loadSigningKey, normalizeFingerprint, signingKeyPath, verifyBundle, writeBundle,
+  buildBundle, generateSigningKey, ledgerDatabasePath, loadSigningKey, normalizeFingerprint, signingKeyPath,
+  verifyBundle, writeBundle,
 } from './sign.mjs';
 import { terminalJson, terminalLabel } from './text.mjs';
 
@@ -99,6 +100,50 @@ async function verifyCommand(dir, fingerprint) {
   }
 }
 
+// Read one session straight from the ledger database, in this process (design ADR-2: one
+// core behind CLI, HTTP and MCP). Signing never asks whatever answers on PORT for the
+// content it signs.
+async function readLedgerSession(databasePath, sessionId) {
+  try {
+    await lstat(databasePath);
+  } catch (error) {
+    // Never create an empty database just to find no session in it.
+    if (error.code === 'ENOENT') throw new Error('No ledger database. Import a session first, or set CONTEXT_LEDGER_DB.');
+    throw new Error('Cannot open the ledger database.');
+  }
+  // Loaded only here: node:sqlite prints an experimental warning when it loads.
+  const { openStore } = await import('./store.mjs');
+  let store;
+  try {
+    store = openStore(databasePath);
+  } catch (error) {
+    // The newer-schema refusal is a fixed sentence with a schema number; keep it.
+    if (/^This ledger database was written by a newer Context Ledger \(schema \d+\)\./.test(error?.message)) throw error;
+    throw new Error('Cannot open the ledger database.');
+  }
+  try {
+    let session;
+    try {
+      session = store.get(sessionId);
+    } catch {
+      throw new Error('Cannot read the ledger database.');
+    }
+    if (session?.id !== sessionId) throw new Error('Session not found.');
+    return session;
+  } finally {
+    store.close();
+  }
+}
+
+async function signCommand(sessionId, signDir) {
+  // Load the key first, so a missing key fails before anything is read or written.
+  const privateKey = await loadSigningKey(signingKeyPath());
+  const session = await readLedgerSession(ledgerDatabasePath(), sessionId);
+  const bundle = buildBundle({ sessionId, markdown: handoffMarkdown(session) + '\n', privateKey });
+  await writeBundle(signDir, bundle);
+  console.log('Signed hand-off written to ' + terminalLabel(signDir) + '\nKey fingerprint: ' + bundle.fingerprint);
+}
+
 async function main() {
   const { action, path, packetPath, sessionId, signDir, dir, fingerprint } = command(process.argv.slice(2));
   if (action === 'keygen') {
@@ -109,8 +154,10 @@ async function main() {
     await verifyCommand(dir, fingerprint);
     return;
   }
-  // Load the key first, so a missing key fails before anything is fetched or written.
-  const privateKey = signDir === undefined ? undefined : await loadSigningKey(signingKeyPath());
+  if (action === 'handoff' && signDir !== undefined) {
+    await signCommand(sessionId, signDir);
+    return;
+  }
   const port = Number(process.env.PORT ?? 4317);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT.');
   const origin = `http://127.0.0.1:${port}`;
@@ -148,13 +195,6 @@ async function main() {
   }
   if (action === 'graph') {
     console.log(terminalJson(data));
-    return;
-  }
-  if (privateKey) {
-    if (data.session?.id !== sessionId) throw new Error('Context Ledger returned a different session.');
-    const bundle = buildBundle({ sessionId, markdown: handoffMarkdown(data.session) + '\n', privateKey });
-    await writeBundle(signDir, bundle);
-    console.log('Signed hand-off written to ' + terminalLabel(signDir) + '\nKey fingerprint: ' + bundle.fingerprint);
     return;
   }
   console.log(action === 'search' ? terminalJson(data.sessions) : handoffMarkdown(data.session));

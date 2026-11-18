@@ -15,17 +15,19 @@ Signing does not redact anything. The bundle holds the same Markdown as `npm run
    It prints the key's fingerprint and nothing else, for example `fd78 8b7d 761e ... 5d10` (16 groups of 4 hex digits). The private key is saved as `signing-key.pem` beside the ledger database: in `.context-ledger/` by default, or in the folder of `CONTEXT_LEDGER_DB` when that is set. `keygen` never replaces an existing key.
 
    - On Linux and macOS the key file is created with mode 0600, and signing refuses a key file that other users can read.
-   - On Windows the file has no POSIX mode, and the ledger does not check or change its access list. It takes the access list of its folder, which for a folder in your user profile normally means only you (and administrators) can read it. Keep the ledger data folder out of shared or synced folders, and check it with `icacls .context-ledger\signing-key.pem` if other accounts use the machine. Anyone who can read the key can sign bundles that pass your fingerprint.
+   - On Windows the file has no POSIX mode, so `keygen` sets its access list instead: it removes the entries inherited from the folder and gives your account alone full control (`icacls <file> /inheritance:r /grant:r *<your SID>:F`, run directly, without a shell). It does this while the file is still empty, before any key byte is written, so the key never has the folder's wider list, even in a shared folder. Signing then refuses a key file whose access list allows any other account (Everyone, Users, Authenticated Users, another user) to open it, with `Other accounts can read the signing key file.` SYSTEM and the Administrators group are allowed, as root is on Linux: they can take any file anyway. To fix a refused key, run `icacls <key file> /inheritance:r /grant:r "%USERNAME%:F"`. The check reads the access list with `icacls /save` (into a temporary folder restricted to you), so it does not depend on the display language. Anyone who can read the key can sign bundles that pass your fingerprint, so still keep the ledger data folder out of synced folders.
    - `keygen` writes the key to a temporary file (`signing-key.pem.<random>.tmp`) and then hard-links it into place, so it can never replace a key or leave half a key under the real name. That needs a file system with hard links (NTFS, APFS, ext4 and the like; not FAT or exFAT). If `keygen` is killed midway, a `.tmp` file holding a private key can stay behind: delete it. Git ignores both names.
    - The key is not encrypted with a passphrase yet (design section 6; card P4b). Anyone who can read the file can sign as you, so back it up like any other private key.
 
 2. Give the fingerprint to the people who will receive your hand-offs through a channel other than the bundle itself: in person, on a call, or in a message they already trust. The fingerprint is what proves the bundle came from you; the key inside the bundle cannot prove that on its own.
 
-3. With the ledger running (`npm start`), sign a hand-off into a new folder:
+3. Sign a hand-off into a new folder:
 
    ```sh
    npm run ledger -- handoff <session-id> --sign <new-folder>
    ```
+
+   `--sign` reads the session straight from the ledger database (`CONTEXT_LEDGER_DB`, or `.context-ledger/ledger.sqlite` by default, the same file `npm start` opens), so the server does not need to be running. It never asks a server on `PORT` for the content it signs: whatever answered on that port would otherwise get the user's real signature. Plain `handoff` without `--sign` still asks the running server.
 
    The folder must not exist yet; nothing is ever overwritten. If a write fails, the files this run created are removed again (best effort: it checks that each file and the folder are still the ones it created, but a process that can rename entries in the parent folder could race that check, so sign into a folder only you can write). Signing and `verify` need a path they can resolve; on Windows an SMB share that hides one of the parent folders is refused. A run that is killed midway can leave a partial folder, which `verify` refuses: delete it and sign again. Send the whole folder (for example as a zip).
 
