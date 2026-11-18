@@ -1443,3 +1443,22 @@ Terms used below. A **party** is the `party` of a version 2 graph (the session I
   - (medium) The new flash assertion sampled the opacity once and could catch the fade-in. It now waits up to 2 s for an opacity above 0.5. The console spec then passed three runs in a row.
   - Accepted: an answer still closes a question reused with the same ID, words, recipient and cited lines from another transcript (that is the same question as far as the graph can tell). The pop kept after a meter reply and the proof following a transcript switch have no browser test.
 - **Suites (Windows):** `npm run -s test:graph` 9/9; node 214/215 (one skipped), was 191/192 on `main`; Python runtime 192 run, 50 skipped, OK; Playwright 17/17 (4 new).
+
+## U3 — 60-second demo video (defined 2026-11-17)
+
+Stacked on U1 (`ruslan/console-v0`), because the video shows the console. The card asks to script and record the install, two agents, the graph growing, and a click-through to a cited line, on synthetic transcripts only.
+
+### What this card delivers, and what a person must still do
+
+- **Delivered:** the shot list and voice-over (`docs/video/u3-script.md`), timed to 60 seconds, and `demo/record-console.mjs`. The script records the console part as raw 1280×720 footage: the bundled synthetic Orbit recording played to the end, and the proof of one decision opened. A run on Windows gave 42 seconds, checked frame by frame: the office, the cards popping in with flash lines, and the cited lines L27 and L28 highlighted.
+- **For a person:** the terminal shots, the voice-over and the cut, which need a microphone and a screen recorder. Also the install shot, which waits for G8 (`ledger install`) or uses the README's two `mcp add` commands until then.
+
+### What is tested
+
+`tests/video.test.mjs`: the five shots run from 0:00 to 1:00 with no gap or overlap; the voice-over is at most 130 words; the script keeps the "estimate" label and the synthetic-data rule; the decision and question the script shows exist in the demo recording; and the recorder parses.
+
+### Acceptance
+
+- The four suites pass.
+- Codex reviews the script and the recorder read-only; findings are fixed or recorded here.
+- A person records and cuts the video, and links it here.
