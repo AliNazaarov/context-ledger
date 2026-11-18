@@ -37,31 +37,32 @@ export function questionTerms(question) {
   };
 }
 
+// A space joins the two letters: it cannot occur inside a word.
+const pairsOf = letters => letters.slice(1).map((letter, index) => `${letters[index]} ${letter}`);
+
 function nodeText(node) {
   const text = [node.label, node.id.replace(/[-_.]/gu, ' '), node.kind, node.to].filter(Boolean).join(' ');
   const words = wordsOf(text);
-  return { text: words.join(' '), words };
+  // Pairs of whole letters (each with its marks), so a pair never ends inside a letter.
+  return { words, pairs: new Set(words.flatMap(word => pairsOf(lettersOf(word)))) };
 }
 
 // Four letters or more compare by their first four, so "decided" finds a decision; a
-// three-letter word must start a word ("gpu" finds "GPU time", not "upgpu").
-const asciiMatch = (term, words) => words.some(word => isAscii(word) && word.startsWith(term.length >= 4 ? term.slice(0, 4) : term));
-// Another script: two letters in a row of the word, one of them outside ASCII, must be in
-// the node's text. A one-letter word must be a whole word of the node.
-const foreignMatch = (word, text, words) => {
+// three-letter word must start a word ("gpu" finds "GPU time" and "GPU時", not "upgpu").
+const asciiMatch = (term, words) => words.some(word => word.startsWith(term.length >= 4 ? term.slice(0, 4) : term));
+// Another script: two letters in a row of the word, one of them outside ASCII, must be two
+// letters in a row of the node. A one-letter word must be a whole word of the node.
+const foreignMatch = (word, { words, pairs }) => {
   const letters = lettersOf(word);
   if (letters.length === 1) return words.includes(word);
-  return letters.slice(1).some((letter, index) => {
-    const pair = letters[index] + letter;
-    return !isAscii(pair) && text.includes(pair);
-  });
+  return pairsOf(letters).some(pair => !isAscii(pair) && pairs.has(pair));
 };
 
 /** How many of the question's words a node matches, each word counted once. */
 export function nodeScore(node, terms) {
-  const { text, words } = nodeText(node);
-  return terms.ascii.filter(term => asciiMatch(term, words)).length
-    + terms.foreign.filter(word => foreignMatch(word, text, words)).length;
+  const text = nodeText(node);
+  return terms.ascii.filter(term => asciiMatch(term, text.words)).length
+    + terms.foreign.filter(word => foreignMatch(word, text)).length;
 }
 
 /**

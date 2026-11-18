@@ -323,6 +323,7 @@ test('the context route checks question and budget with fixed messages', async t
 
   const bad = [
     ['?question=', 'question must be 1 to 500 characters.'],
+    ['?question=%20%20%20', 'question must be 1 to 500 characters.'],
     [`?question=${'x'.repeat(501)}`, 'question must be 1 to 500 characters.'],
     [`?question=${encodeURIComponent(String.fromCodePoint(0x1d400).repeat(501))}`, 'question must be 1 to 500 characters.'],
     ['?question=port&budget=50', /^budget is below the smallest briefing of this graph, about \d+ tokens\.$/u],
@@ -361,4 +362,20 @@ test('the context route checks question and budget with fixed messages', async t
   assert.ok(pages.length > 1, 'the scoped briefing needed more than one page');
   const whole = await fetch(`${origin}/api/graphs/${bigGraph.id}/context?question=port+note&budget=100000`).then(response => ({ body: response.json() })).then(async r => ({ body: await r.body }));
   assert.equal(pages.join('\n'), whole.body.context.text);
+});
+
+test('review round 2: ASCII words find mixed-script labels, and letter pairs end at whole letters', () => {
+  const cp = (...points) => String.fromCodePoint(...points);
+  const mixed = { edges: [], nodes: [
+    { id: 'a', kind: 'goal', label: `GPU${cp(0x6642)} booked` },
+    { id: 'b', kind: 'goal', label: 'café open' },
+    { id: 'c', kind: 'goal', label: 'cafeteria open' },
+  ] };
+  assert.deepEqual(rankNodes(mixed, 'gpu').matched, ['a']);
+  assert.deepEqual(rankNodes(mixed, 'caf').matched, ['b', 'c'], 'an ASCII prefix finds both');
+  assert.deepEqual(rankNodes(mixed, 'café').matched, ['b'], 'the other-script word still skips cafeteria');
+  // a + i with macron, against a + i with macron and an acute: the second letter differs.
+  const imacron = cp(0x69, 0x304);
+  const marked = { edges: [], nodes: [{ id: 'm', kind: 'goal', label: `a${imacron}${cp(0x301)}` }, { id: 'n', kind: 'goal', label: `a${imacron}` }] };
+  assert.deepEqual(rankNodes(marked, `a${imacron}`).matched, ['n']);
 });
