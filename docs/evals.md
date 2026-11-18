@@ -1397,14 +1397,28 @@ A brand guide for the console (U1), the video (U3) and other pages, built on the
 - Every text and background pair in the light (console) and dark (site) sets passes WCAG AA, 4.5:1. That includes the quoted and inferred marks on their fills and white text on the primary. White on lime is kept out, as the site's rule says.
 - No state is told by colour alone: each mark and agent state also has a word or a pose.
 - Pip is original. It takes Capy's warmth as a reference only, with no copied assets or look.
-- Pip's SVGs can be served under the console's content security policy as they are: small, titled for screen readers, no scripts, outside links, embedded images or fonts, and only brand colours.
+- Pip's SVGs can be inlined under the console's content security policy as they are: small, named with aria-label (no IDs to clash), presentation attributes only, no scripts, styles, outside resources or fonts, and only the palette plus three documented illustration shades.
 
 ### What is tested
 
-`tests/brand.test.mjs` checks the site's colours, contrast for every pair in both sets, the SVG rules above, and that the guide's file links exist. The poses were also rendered with Playwright on Paper and on Charcoal and checked by eye.
+`tests/brand.test.mjs` checks the site's colours (Soft Violet included), contrast for every pair the guide names in both sets, that the dark set sets every one of those variables itself, that the ratios the guide prints are the computed ones, the SVG rules above with an allowlist of elements, attributes and colours, and that the guide's file links exist. It does not check the CTM site's stylesheet itself, or how Pip looks. The poses were also rendered with Playwright on Paper and on Charcoal and checked by eye.
 
 ### Acceptance
 
 - The four suites pass.
 - A read-only review by Codex of the guide, the tokens and the SVGs; findings fixed or recorded here.
 - A person on the team signs off on Pip's look before the console and video use it.
+
+### U2 review (2026-11-17)
+
+- **Codex, round 1** (of the first U2 commit): one high finding, five medium, five low. All are fixed in the next commit:
+  - (high) The guide said the console could serve the SVGs as they are. Its policy has no , so the guide now says to inline them, as U1's office module builds its figures, and what image files would need.
+  - (medium) The dark set inherited the light badge fills (1.6:1). It now sets dark fills and every text, fill and button variable itself.
+  - (medium) The dark strong violet failed on Charcoal (3.1:1). Links, link hover, button fill, button hover and button text now have their own pairs.
+  - (medium) Inlined Pips shared the title ID . Each file now names itself with  and has no IDs.
+  - (medium) At small sizes the pose is lost. Every state now also shows its word, and the lime spark is marked as decoration.
+  - (low) The waiting pose now keeps the tag, and the working pose is described as reading it.
+  - (low) The off-palette cheek colour is gone, and the illustration shades are listed and tested.
+  - (low) Savings claims now point to BENCHMARKS.md instead of naming two figures.
+  - (low) The test is stricter: exact pose names, printed ratios, and an element and attribute allowlist.
+  - (low) Codex saw low resemblance to Capy's capybara, but a plausible one to Tinky Winky (purple round body, pale belly, head ornament, carried item). Pip is now an index card with a folded corner and ruled lines, which ties it to the ledger and drops the round body and belly. The guide says to avoid both. The human sign-off stays, with a side-by-side check.
