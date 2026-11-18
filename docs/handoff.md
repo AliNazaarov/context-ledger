@@ -246,5 +246,5 @@ Branch `ruslan/g11-graph-diff`. `GET /api/graphs/:id/diff?from=:otherId` and the
 
 Next steps:
 
-1. "Newest" is by party name, and party names are self-asserted. Another session publishing under the same party name shows up as a newer graph. Rooms keyed to sessions as well would fix that once P1's projects exist.
+1. Party names are self-asserted. A newer graph from another transcript under the same party name is shown, marked unverified and without the form button. Lineage across transcripts needs P1's projects.
 2. The console (U1, #22) could flash only the changed nodes, using the diff instead of its own comparison.

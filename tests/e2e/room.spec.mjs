@@ -189,9 +189,10 @@ test('a room says when a party has published a newer graph, and what changed', a
   const newer = await publish(request, baseURL, revised);
   await page.reload();
   const update = page.getByRole('region', { name: 'Newer graph from leo' });
-  await expect(update).toContainText(`leo has published a newer graph (${newer.id.slice(0, 12)}…): 2 changed`);
-  await expect(update.locator('li')).toHaveText([/^Changed goal: /u, /^Changed action: Record the demo on Sunday$/u]);
-  await expect(update.locator('li').first().locator('bdi')).toHaveText(`${label} demo live by 19:00`);
+  await expect(update).toContainText(`leo has published a newer graph (${newer.id.slice(0, 12)}…): 2 changed, 1 action no longer ready`);
+  // A readiness change wins over the generic "Changed" row for the same node.
+  await expect(update.locator('li')).toHaveText([/^No longer ready action: Record the demo on Sunday$/u, /^Changed goal: /u]);
+  await expect(update.locator('li').nth(1).locator('bdi')).toHaveText(`${label} demo live by 19:00`);
   expect(await update.locator('b').count()).toBe(0);
 
   await update.getByRole('button', { name: "Use leo's newer graph" }).click();
@@ -200,4 +201,34 @@ test('a room says when a party has published a newer graph, and what changed', a
   await page.getByRole('button', { name: 'Open room' }).click();
   await expect(page.locator('#room-status')).toContainText('3 proposals');
   await expect(page.getByRole('region', { name: 'Newer graph from leo' })).toHaveCount(0);
+});
+
+test('a diff that answers after the person opened another room does not touch the new room', async ({ page, request, baseURL }, testInfo) => {
+  const tag = `#g11-race-${testInfo.repeatEachIndex}-${Date.now()}`;
+  const first = await publishPair(request, baseURL, `GPU A ${tag}`);
+  const revised = leoPacket(first.leo.packet.sessionId, first.ali.id);
+  revised.nodes = revised.nodes.map(node => (node.id === 'orbit-demo' ? { ...node, label: `Demo A ${tag}` } : node));
+  await publish(request, baseURL, revised);
+  const second = await publishPair(request, baseURL, `GPU B ${tag}`);
+
+  // Hold room A's diff until room B is open.
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  await page.route('**/diff?from=*', async route => { await held; await route.continue(); });
+  await page.goto('/');
+  await page.getByLabel('First graph ID').fill(first.leo.id);
+  await page.getByLabel('Second graph ID').fill(first.ali.id);
+  await page.getByRole('button', { name: 'Open room' }).click();
+  await expect(page.getByRole('region', { name: 'Newer graph from leo' }).first()).toBeVisible();
+
+  await page.getByLabel('First graph ID').fill(second.leo.id);
+  await page.getByLabel('Second graph ID').fill(second.ali.id);
+  await page.getByRole('button', { name: 'Open room' }).click();
+  await expect(page.locator('#room-status')).toContainText('3 proposals');
+  await expect(page.getByRole('region', { name: 'Party ali' })).toContainText(`GPU B ${tag}`);
+  const before = await page.locator('#room-updates').innerHTML();
+  release();
+  await page.waitForTimeout(300);
+  expect(await page.locator('#room-updates').innerHTML()).toBe(before);
+  await expect(page.locator('#room-updates')).not.toContainText(`Demo A ${tag}`);
 });

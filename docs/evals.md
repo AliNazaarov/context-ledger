@@ -1413,3 +1413,20 @@ The room view uses it: a room is tied to two snapshots, so when a newer graph of
 
 - The four suites pass, with no new runtime dependency.
 - Codex reviews the change read-only; findings are fixed with tests or recorded here.
+
+### G11 results (2026-11-17)
+
+- **Built:** `src/diff.mjs` (the diff and its counts); `GET /api/graphs/:id/diff?from=:otherId` and the store's `diffGraphs`; the MCP tool `graph_diff`, paged by item; `newerGraphs` in rooms; and the room view's notice, which lists changed labels and has a button that fills the form.
+- **Tests:** `tests/diff.test.mjs` (11), the pinned tool list and required arguments, and two Playwright tests in `tests/e2e/room.spec.mjs` (a newer graph, and a diff that answers after another room was opened).
+- **Codex review, round 1** (of the first G11 commit), eight findings, fixed in 39556a9:
+  - (medium) A graph from another transcript under the same party name was offered as the room's update. It is now marked `sameSession: false`, shown as unverified, and has no form button.
+  - (medium) A reused node ID could fake a supersession or an answer. Both now need the real edge and kind.
+  - (medium) A removed ready action was missing from `readyActionsLost`.
+  - (low) The room summary left out answered questions and ready changes.
+  - (low) `graph_diff` was outside the tool-list bound. It now has a bound of its own.
+  - (low) Unknown parameters were accepted. The route now takes only `from`.
+  - (low) Weak assertions were tightened.
+  - (low) No paging or race test existed for the new room data. Both are added in round 2.
+- **Round 2** (of 39556a9): most fixes hold. One medium finding: a later graph from another session hid the room's own same-session update. Same session and other sessions are now looked up separately, and both can show. Two low findings: a lost ready action took the name of a node that reused its ID, and readiness rows were hidden behind "Changed". Both are fixed, with the paging-across-sections and browser race tests asked for.
+- **Suites (Windows):** `npm run -s test:graph` 9/9; node 202/203 (one skipped), was 191/192 on `main`; Playwright 15/15 (two new); Python runtime 192 run, 50 skipped, OK.
+- **Known limit:** party names are self-asserted. A graph from another transcript is shown, marked unverified, but not offered.

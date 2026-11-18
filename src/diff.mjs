@@ -34,6 +34,8 @@ export function diffGraphs(older, newer) {
   const after = keyed(b.nodes, node => node.id);
   const labelOf = id => after.get(id) ?? before.get(id);
   const named = ids => ids.map(id => brief(labelOf(id)));
+  // What was lost is named as it was, even when its ID now names another node.
+  const namedBefore = ids => ids.map(id => brief(before.get(id)));
 
   const changed = [];
   for (const node of b.nodes) {
@@ -70,7 +72,7 @@ export function diffGraphs(older, newer) {
     openedQuestions: named(missingFrom(newer.openQuestionIds, older.openQuestionIds)),
     readyActionsGained: named(missingFrom(newer.readyActionIds, older.readyActionIds)),
     // A ready action that was removed is lost too; its label comes from the older graph.
-    readyActionsLost: named(missingFrom(older.readyActionIds, newer.readyActionIds)),
+    readyActionsLost: namedBefore(missingFrom(older.readyActionIds, newer.readyActionIds)),
     edges: setDiff(a.edges, b.edges, edgeKey, compareBy('type', 'from', 'to')),
     links: setDiff(a.links ?? [], b.links ?? [], linkKey, compareBy('type', 'graph', 'from', 'to')),
   };

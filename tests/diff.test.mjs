@@ -153,6 +153,9 @@ test('a room names the newer graph of a party that published again', () => {
     nodes: [{ id: 'port', kind: 'decision', label: 'Port 9999', evidenceLines: [1] }] });
   const marked = store.getRoom(current.id).newerGraphs;
   assert.deepEqual(marked.map(entry => [entry.graphId, entry.sameSession]), [[impostor.id, false]]);
+  // Review round 2: on the older room, the other transcript does not hide leo's own newer graph.
+  const both = store.getRoom(room.id).newerGraphs;
+  assert.deepEqual(both.map(entry => [entry.graphId, entry.sameSession]), [[v2.id, true], [impostor.id, false]]);
   store.close();
 });
 
@@ -272,4 +275,44 @@ test('the diff route checks its parameters with fixed messages', async t => {
     [`?from=${a.id}&extra=1`, 400, { error: 'The diff takes one from parameter and no other.' }],
     [`?from=${'e'.repeat(64)}`, 404, { error: 'Not found.' }],
   ]) assert.deepEqual(await get(query), { status, body }, query.slice(0, 40));
+});
+
+test('review round 2: a question that became an offer is not answered, and a lost action keeps its old name', () => {
+  const graph = (id, nodes) => ({ id, packet: { version: 2, party: 'leo', nodes, edges: [] },
+    currentDecisionIds: [], openQuestionIds: nodes.filter(node => node.kind === 'question').map(node => node.id),
+    readyActionIds: nodes.filter(node => node.kind === 'action').map(node => node.id) });
+  const diff = diffGraphs(
+    graph('a', [{ id: 'q', kind: 'question', to: 'ali', status: 'open', label: 'Which box?', evidenceLines: [1] },
+      { id: 'r', kind: 'action', status: 'pending', label: 'Record it', evidenceLines: [1] }]),
+    graph('b', [{ id: 'q', kind: 'offer', label: 'Box offered', evidenceLines: [1] },
+      { id: 'r', kind: 'goal', label: 'Recorded', evidenceLines: [1] }]),
+  );
+  assert.deepEqual(diff.answeredQuestions, []);
+  assert.deepEqual(diff.readyActionsLost, [{ id: 'r', kind: 'action', label: 'Record it' }]);
+});
+
+test('review round 2: a long diff pages across section boundaries and merges back in order', async t => {
+  const { store, v1, v2 } = setup();
+  const diff = store.diffGraphs(v2.id, v1.id);
+  store.close();
+  const node = (prefix, index) => ({ id: `${prefix}-${index}`, kind: 'goal', label: `${prefix} ${'L'.repeat(180)}` });
+  diff.nodes.added = Array.from({ length: 150 }, (_, index) => node('added', index));
+  diff.nodes.changed = Array.from({ length: 150 }, (_, index) => ({ ...node('changed', index), changes: { label: { from: 'a', to: 'b' } } }));
+  const ledger = await fakeLedger(t, () => ({ body: { diff } }));
+  const client = startMcp(ledger.port);
+  t.after(() => client.close());
+  const sections = { added: [], changed: [], removed: [] };
+  let crossed = false;
+  for (let id = 1, fromItem = 1; ; id += 1) {
+    const page = JSON.parse((await client.call(id, 'graph_diff', { graphId: v2.id, fromGraphId: v1.id, fromItem })).content[0].text);
+    for (const key of Object.keys(sections)) sections[key].push(...(page.diff.nodes?.[key] ?? []));
+    if (page.diff.nodes?.added?.length && page.diff.nodes?.changed?.length) crossed = true;
+    if (!page.more) break;
+    fromItem = page.more.fromItem;
+    assert.ok(id < 30);
+  }
+  assert.ok(crossed, 'one page held the end of one section and the start of the next');
+  assert.deepEqual(sections.added, diff.nodes.added);
+  assert.deepEqual(sections.changed, diff.nodes.changed);
+  assert.deepEqual(sections.removed, diff.nodes.removed);
 });

@@ -263,9 +263,9 @@ async function fillUpdate(list, update, generation) {
       ...diff.nodes.removed.map(node => ['Removed', node]),
       ...diff.supersededDecisions.map(node => ['Superseded', node]),
       ...diff.answeredQuestions.map(node => ['Answered', node]),
-      ...diff.nodes.changed.map(node => ['Changed', node]),
       ...diff.readyActionsGained.map(node => ['Now ready', node]),
       ...diff.readyActionsLost.map(node => ['No longer ready', node]),
+      ...diff.nodes.changed.map(node => ['Changed', node]),
     ].filter(([, node]) => !seen.has(node.id) && seen.add(node.id));
     renderRows(list, rows.slice(0, 12), ([what, node]) => {
       const item = document.createElement('li');
