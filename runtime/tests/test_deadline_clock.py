@@ -6,6 +6,8 @@ tests make the timeout fire with the deadline still ahead, so they do not depend
 on the clock's resolution.
 """
 
+import io
+import itertools
 import socket
 import time
 import unittest
@@ -40,7 +42,52 @@ class CappedTimeoutTest(unittest.TestCase):
         # The deadline (5 s away) is below the client's own 30 s timeout, so it set
         # this call's timeout. The socket times out while remaining() is still > 0.
         run = run_with(VllmClient("http://127.0.0.1:9", "m", timeout=30), 5)
-        error = self.call(run, raise_timeout)
+        timeouts = []
+
+        def record_then_time_out(request, *args, timeout=None, **kwargs):
+            timeouts.append(timeout)
+            raise_timeout()
+
+        error = self.call(run, record_then_time_out)
+        self.assertGreater(run.remaining(), 0)
+        self.assertEqual((error.status, error.message), (504, DEADLINE))
+        # The socket got what was left of the deadline, not the client's 30 s.
+        self.assertEqual(len(timeouts), 1)
+        self.assertLessEqual(timeouts[0], 5)
+
+    def test_timeout_on_the_folded_retry_is_504_with_time_left(self):
+        # A chat template refuses the system message, and the folded retry times out.
+        run = run_with(VllmClient("http://127.0.0.1:9", "m", timeout=30), 5)
+        timeouts = []
+
+        def refuse_then_time_out(request, *args, timeout=None, **kwargs):
+            timeouts.append(timeout)
+            if len(timeouts) == 1:
+                body = io.BytesIO(b"system role not supported")
+                raise urllib.error.HTTPError(request.full_url, 400, "bad", {}, body)
+            raise_timeout()
+
+        error = self.call(run, refuse_then_time_out)
+        self.assertGreater(run.remaining(), 0)
+        self.assertEqual((error.status, error.message), (504, DEADLINE))
+        self.assertEqual(len(timeouts), 2)
+        self.assertLessEqual(timeouts[1], timeouts[0])
+        self.assertLessEqual(timeouts[0], 5)
+
+    def test_folded_retry_with_no_budget_left_is_504(self):
+        # The refusal itself uses up the call's budget, so the retry is never sent.
+        run = run_with(VllmClient("http://127.0.0.1:9", "m", timeout=30), 5)
+        calls = []
+
+        def slow_refusal(request, *args, **kwargs):
+            calls.append(request)
+            body = io.BytesIO(b"system role not supported")
+            raise urllib.error.HTTPError(request.full_url, 400, "bad", {}, body)
+
+        clock = itertools.chain([0.0], itertools.repeat(6.0))  # 6 s pass during the refusal
+        with mock.patch("latent_pool.vllm_client.time.perf_counter", lambda: next(clock)):
+            error = self.call(run, slow_refusal)
+        self.assertEqual(len(calls), 1)
         self.assertGreater(run.remaining(), 0)
         self.assertEqual((error.status, error.message), (504, DEADLINE))
 

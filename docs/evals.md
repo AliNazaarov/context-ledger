@@ -957,7 +957,7 @@ Source: a review of the project map (floorplan) against CI, the handoff notes an
 
 ### H7 — Windows deadline flake (`ruslan/windows-deadline-flake`, defined 2026-11-17, before the fix)
 
-On the Windows CI runner (Python 3.13), `DeadlineBeforeNextCallTest.test_only_the_reader_runs_and_the_read_returns_504` (`runtime/tests/test_limits.py`) and `DeadlineTest.test_model_call_timeout_is_capped_by_the_deadline` (`runtime/tests/test_review_fixes.py`) fail at random with `502 {'error': 'Model server timed out.'}` instead of 504. They failed PRs #29–#32, none of which touch `runtime/`. Cause: `_Run.call` passes what is left of the read deadline as the model call's timeout, then turns the timeout's 502 into a 504 only if `remaining()` is at or below 0 after the call. Windows socket timeouts and `time.monotonic()` both tick at about 15.6 ms, so the socket can time out while the clock still shows a little time left.
+On the Windows CI runner (Python 3.13), `DeadlineBeforeNextCallTest.test_only_the_reader_runs_and_the_read_returns_504` (`runtime/tests/test_limits.py`), and `DeadlineTest.test_model_call_timeout_is_capped_by_the_deadline` and `DeadlineTest.test_late_read_is_504_and_stops_calling_the_model` (`runtime/tests/test_review_fixes.py`, the last seen in a rerun of PR #29, run 44237430567) fail at random with `502 {'error': 'Model server timed out.'}` instead of 504. They failed PRs #29–#32, none of which touch `runtime/`. Cause: `_Run.call` passes what is left of the read deadline as the model call's timeout, then turns the timeout's 502 into a 504 only if `remaining()` is at or below 0 after the call. The socket's wait is timed by the operating system, not by `time.monotonic()`, so on Windows the socket can time out while the pool's clock still shows a little time left. (The first draft of this entry blamed a shared 15.6 ms tick; Codex pointed out that Python 3.13 on Windows reads `time.monotonic()` from `QueryPerformanceCounter`, so only the socket side is coarse.)
 
 | Eval | Expected |
 | --- | --- |
@@ -966,7 +966,17 @@ On the Windows CI runner (Python 3.13), `DeadlineBeforeNextCallTest.test_only_th
 | Other 502s unchanged | A non-timeout 502 (for example HTTP 500 from the model server) stays 502 when the deadline capped the timeout and time is left, and still becomes 504 when the deadline has passed, as before. |
 | Suites | `python -m unittest discover -s tests -t .` in `runtime/` passes on Windows and in WSL; the node suite and graph checks are unchanged. The PR's `runtime (windows-latest, Python 3.13)` job is green, and rerunning the failed job on PRs #29–#32 passes. |
 
-**Results — H7:** pending.
+**Results — H7 (2026-11-17):** the first three rows pass locally. The last row's CI part is in the PR.
+
+- **Timeout capped by the deadline is 504:** pass. `runtime/tests/test_deadline_clock.py` makes the socket time out at once with the deadline still 5 s ahead, which is a stronger case than a few milliseconds. The client's own timeout is 30 s. It checks that the read returns 504 with time still showing. Three paths are covered: the first attempt, the folded retry after a chat template refuses the system message, and a refusal that uses up the call's budget before the retry. The test also checks that the socket gets what is left of the deadline, not the client's 30 s. Against `main`'s runtime code all three cases fail with 502.
+- **Client's own timeout stays 502:** pass. With a 1 s client timeout and a deadline 5 s ahead, the read returns 502 "Model server timed out.". The test passes on `main` and with the fix.
+- **Other 502s unchanged:** pass. HTTP 500 with time left stays 502 "Model server returned HTTP 500.". HTTP 500 that arrives after the deadline is still 504. Both tests pass on `main` and with the fix.
+- **Suites:** Windows (Python 3.13) runtime 198 run, 50 skipped, OK. WSL (Python 3.12) runtime OK. Node 191/192 (1 skipped). Graph check 9/9. The three deadline tests ran 25 times in a row on Windows with no failure. They never failed locally before the fix either, so the loop shows no regression. It does not prove the fix. The CI part of this row is recorded in the PR.
+- **Codex review** (`codex exec --sandbox read-only`, of c3b3b0f): no change from 502 to 504 or back beyond the intended one, and no other caller depends on the error's class or message. Four findings:
+  - (low) The tests did not check that the timeout reaches the socket, or the folded-retry path. Fixed: the tests above now record the timeout `urlopen` gets and cover both retry paths.
+  - (low) The 15.6 ms `time.monotonic()` diagnosis was wrong for Python 3.13. Fixed in the cause above and in the code comment.
+  - (medium, existed before this card) The timeout applies to each socket operation, so a model server that trickles its reply can hold a read and its slot past the deadline, and a reply that arrives late is accepted. Not fixed here: card H8.
+  - (low, existed before this card) A connect timeout capped by the deadline is wrapped in `URLError` and returns 503 "not ready". Not fixed here: card H8.
 
 ## Cycle 11 — Latent runtime performance baseline (defined 2026-11-12, before measuring)
 

@@ -378,8 +378,8 @@ class _Run:
             raise ApiError(504, DEADLINE)
         # Decided before the call: when what is left of the deadline is the shorter
         # limit, a timeout of this call is the deadline running out. Reading the clock
-        # after the call is not enough on Windows, where socket timeouts and
-        # time.monotonic() tick at about 15.6 ms and a little time can still show.
+        # after the call is not enough: the socket's wait is timed by the OS, not by
+        # time.monotonic(), and on Windows it can end with a little time still showing.
         capped = left <= getattr(self.client, "timeout", left)
         try:
             result = self.client.chat(self.system, user, max_tokens, schema=schema,
