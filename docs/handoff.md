@@ -238,7 +238,7 @@ Next steps:
 
 ## Current checkpoint — P1b projects (2026-11-17)
 
-Card P1b on `ruslan/p1b-projects`, from `main` 3a17536. The P1 split (PR #37) is not on `main` yet, so this branch adds its own P1b board row. The eval, its results and four rounds of Codex review are in the P1b section of [the eval log](evals.md).
+Card P1b on `ruslan/p1b-projects`, from `main` 3a17536. The P1 split (PR #37) is not on `main` yet, so this branch adds its own P1b board row. The eval, its results and five rounds of Codex review are in the P1b section of [the eval log](evals.md).
 
 - **Schema version 2** (`src/migrate.mjs`): a `projects` table (`id`, unique `slug`, `name`, `created_at`), `sessions.project_id` and a `default` project that existing sessions join. The `sessions_project` trigger puts a session inserted without a project, including by an older build, in `default`. The steps follow the version 1 style: each checks the schema, is safe to repeat, and runs in one transaction.
 - **Opening a file:** a current file opens with no lock and no DDL, and the version is read again before the store is returned. Otherwise the store takes `BEGIN IMMEDIATE`, reads the version again, refuses a newer one, creates the version 0 tables (`bootstrap`, which now includes `roomsSchema` from `src/rooms.mjs`), then migrates.

@@ -1416,7 +1416,7 @@ Card P1b on `ruslan/p1b-projects`, from `main` 3a17536. The design is `docs/arch
 | CLI | `npm run ledger -- search --project acme <query>` sends `project` and prints only that project's sessions; an invalid slug is refused before any request. |
 | Nothing else changes | No new dependency. No raw control or format characters in `src/` or `tests/`. All four suites pass. |
 
-**Results — P1b (2026-11-17):** every row passes on Windows. The tests are in `tests/projects.test.mjs` (12 tests); `tests/migrate.test.mjs` and `tests/list-api.test.mjs` were adjusted as described below.
+**Results — P1b (2026-11-17):** every row passes on Windows. The tests are in `tests/projects.test.mjs` (13 tests); `tests/migrate.test.mjs` and `tests/list-api.test.mjs` were adjusted as described below.
 
 - **Schema version 2 — passed.** `src/migrate.mjs` adds `projects (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, created_at TEXT NOT NULL) STRICT`, the `default` project (name `Default`, a random 32-hex ID), `sessions.project_id REFERENCES projects(id)`, the index `sessions_project_id` and the trigger `sessions_project`. `schemaVersion` is 2. In a STRICT table SQLite also marks the primary key `NOT NULL`, which the test records.
 - **Version 1 file — passed.** The test writes the version 1 DDL and rows itself (no projects), copying created_at and party before the version 1 triggers exist. After opening, every session, graph, room and choice row is unchanged, every session is in `default`, graphs and rooms read back as published, and a second open changes neither schema nor rows.
@@ -1433,7 +1433,7 @@ Card P1b on `ruslan/p1b-projects`, from `main` 3a17536. The design is `docs/arch
 - **Nothing else changes — passed.** No new dependency, and no raw control or format characters in `src/` or `tests/`. One existing test changed: `tests/list-api.test.mjs` checked that 120 short sessions fit one 40,000-character MCP result. With `"project": "default"` on every row, 120 no longer fit, so it now uses 110, which is still more than one 100-row ledger page.
 - **Not done here:** the browser always imports into `default` and shows no project; MCP `session_search` returns the project but cannot filter by it; sessions cannot be moved between projects; there is no project listing route.
 
-**Codex review (read-only), four rounds.**
+**Codex review (read-only), five rounds.**
 
 Round 1, on 21b0811:
 
@@ -1458,8 +1458,13 @@ Round 4, on 44df0b1:
 
 - **Medium — fixed (7349ba6).** With no lock on a current file, a newer build could upgrade it between the first version read and the end of `openStore`. If the upgrade kept the tables, the store opened on a newer schema. The version is now read again after the statements are prepared, and a newer file is refused. The upgrade-race test has a third case: a version bump that keeps every table, which is refused with the newer-schema message.
 - **Low:** none.
-- **Known limit, not fixed:** an upgrade by a newer build while this store stays open is not detected. Catching it would mean holding a lock for the store's whole life, which would block every other writer. The fix in round 4 was not reviewed again by Codex.
+- **Known limit, not fixed:** an upgrade by a newer build while this store stays open is not detected. Catching it would mean holding a lock for the store's whole life, which would block every other writer.
 
-Each regression test was checked by removing its fix (eleven mutations across the four rounds); each mutation fails at least its own test.
+Round 5, on 7349ba6:
 
-**Suites (Windows, 7349ba6):** `npm run -s test:graph` 9/9; node 203/204 (one skipped; the `main` baseline was 191/192); Playwright 13/13; Python runtime 192 run, OK (50 skipped).
+- **High and medium:** none. Codex found that the round 4 recheck catches an upgrade that keeps the tables, takes no write lock, keeps the existing message and closes the connection on refusal.
+- **Low — fixed (this commit).** The round 4 test case paused the child at its first version read, so it would still pass if the recheck moved ahead of statement preparation. A new test pauses the child right after `openStore` prepares its last statement (the graph list). It fails if any other statement is prepared after that point. The parent then commits version 3 with every table kept and releases the child. The child is refused with the newer-schema message and the store never opens. With the recheck moved ahead of preparation, this test fails.
+
+Each regression test was checked by removing its fix (twelve mutations across the five rounds); each mutation fails at least its own test.
+
+**Suites (Windows, after the round 5 fix):** `npm run -s test:graph` 9/9; node 204/205 (one skipped; the `main` baseline was 191/192); Playwright 13/13; Python runtime 192 run, OK (50 skipped).

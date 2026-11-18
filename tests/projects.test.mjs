@@ -448,6 +448,67 @@ test('a file that a newer build upgrades while this one opens it gets no DDL', a
   }
 });
 
+test('an upgrade that keeps every table, committed after the last statement is prepared, is refused', async t => {
+  // Review round 5. The child stops right after openStore prepares its last statement
+  // (the graph list), so the upgrade lands after preparation and before the final
+  // version read. A recheck moved ahead of preparation would let the store open.
+  const { directory, keep } = await scratchDirectory(t, 'ledger-p1b-late-upgrade-');
+  const path = join(directory, 'ledger.sqlite');
+  const release = join(directory, 'release');
+  openStore(path).close();
+  const storeUrl = pathToFileURL(join(process.cwd(), 'src/store.mjs')).href;
+  const script = `import { existsSync, writeSync } from 'node:fs';
+    import { DatabaseSync } from 'node:sqlite';
+    import { openStore } from ${JSON.stringify(storeUrl)};
+    const prepare = DatabaseSync.prototype.prepare;
+    let phase = 'before';
+    DatabaseSync.prototype.prepare = function (sql) {
+      // Nothing but the version read may follow the gate inside openStore.
+      if (phase === 'after' && sql !== 'PRAGMA user_version') throw new Error('a statement was prepared after the gate');
+      const statement = prepare.call(this, sql);
+      if (phase === 'before' && sql.includes('ORDER BY g.rowid DESC LIMIT $n')) {
+        phase = 'after';
+        writeSync(1, 'prepared\\n');
+        const deadline = Date.now() + 20000;
+        const pause = new Int32Array(new SharedArrayBuffer(4));
+        while (!existsSync(process.env.RELEASE)) {
+          if (Date.now() > deadline) throw new Error('never released');
+          Atomics.wait(pause, 0, 0, 10);
+        }
+      }
+      return statement;
+    };
+    const store = openStore(process.env.LEDGER_FILE);
+    phase = 'done';
+    writeSync(1, 'opened\\n');
+    store.close();`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script],
+    { env: { ...process.env, LEDGER_FILE: path, RELEASE: release }, stdio: ['ignore', 'pipe', 'pipe'] });
+  keep(() => child.exitCode === null && child.kill());
+  let stdout = '';
+  let stderr = '';
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  const exit = once(child, 'exit');
+  await Promise.race([
+    new Promise(resolve => child.stdout.on('data', chunk => {
+      stdout += chunk;
+      if (stdout.includes('\n')) resolve();
+    })),
+    exit.then(() => assert.fail(`the child exited before the gate: ${stderr}`)),
+  ]);
+  assert.equal(stdout, 'prepared\n');
+  const holder = new DatabaseSync(path);
+  keep(() => holder.close());
+  holder.exec('BEGIN IMMEDIATE; PRAGMA user_version = 3; COMMIT;');
+  await writeFile(release, '');
+  const [code] = await exit;
+  assert.equal(stdout, 'prepared\n', 'the store must not open');
+  assert.equal(code, 1, stderr);
+  assert.match(stderr, /written by a newer Context Ledger \(schema 3\)/u);
+  assert.equal(userVersion(holder), 3);
+  assert.deepEqual(rows(holder, "SELECT name FROM sqlite_master WHERE name = 'room_choices'"), [{ name: 'room_choices' }]);
+});
+
 test('an import names its project, a new slug creates it once, and the default is default', () => {
   const store = openStore(':memory:');
   const first = store.importTranscript({ provider: 'claude', source: 'a.jsonl', transcript: claude('Acme kickoff notes.'), project: 'acme' });
