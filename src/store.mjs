@@ -280,7 +280,8 @@ export function openStore(path) {
       if (prefixes.size !== graphs.length && new Set(ids).size === ids.length) {
         throw new InputError('Two of these graphs share the first 16 characters of their IDs; export them apart.');
       }
-      return nodeLinkBundle(graphs, graph => getDetail.get(graph.packet.sessionId));
+      // Only the transcript's file name is needed, so the summary row, not its messages.
+      return nodeLinkBundle(graphs, graph => getSummary.get(graph.packet.sessionId));
     },
 
     getGraphContext(id) {

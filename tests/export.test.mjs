@@ -59,8 +59,13 @@ test('a bundle of two parties is one undirected node-link file whose links reach
     ledger_from: id(leo, 'port'), ledger_to: id(leo, 'old-port'), confidence: 'EXTRACTED', confidence_score: 1,
     source_file: 'leo-orbit.jsonl', weight: 1, ledger_graph: leo.id,
   });
-  const answers = out.links.find(link => link.relation === 'answers');
-  assert.deepEqual([answers.ledger_from, answers.ledger_to, answers.ledger_link_graph], [id(leo, 'port'), id(ali, 'which-port'), ali.id]);
+  // Review round 2: both cross-graph links in full, so a dropped field fails.
+  const cross = (from, to, relation) => ({
+    source: id(leo, from), target: id(ali, to), relation, ledger_from: id(leo, from), ledger_to: id(ali, to),
+    confidence: 'EXTRACTED', confidence_score: 1, source_file: 'leo-orbit.jsonl', weight: 1, ledger_graph: leo.id, ledger_link_graph: ali.id,
+  });
+  assert.deepEqual(out.links.find(link => link.relation === 'answers'), cross('port', 'which-port', 'answers'));
+  assert.deepEqual(out.links.find(link => link.relation === 'matches'), cross('pairing', 'gpu-time', 'matches'));
   const known = new Set(out.nodes.map(node => node.id));
   for (const link of out.links) assert.ok(known.has(link.source) && known.has(link.target), 'every end is a node of the bundle');
   for (const node of out.nodes) assert.match(node.id, idPattern);
@@ -169,6 +174,20 @@ test('the export routes and the CLI: escaped JSON that parses back, fixed refusa
   for (const character of [rlo, c1]) assert.ok(!cli.stdout.includes(character));
   assert.ok(cli.stdout.includes(`odd${String.fromCodePoint(0x5c)}u202ename.jsonl`));
   assert.deepEqual(JSON.parse(cli.stdout), body);
+  // Review round 2: two graphs through the route and the CLI; the second is not dropped.
+  const other = await post('/api/import', { provider: 'codex', source: 'ali.jsonl', transcript: JSON.stringify({
+    type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Ali: use port 9999.' }] } }) });
+  const ali = (await post('/api/graphs', { version: 2, sessionId: other.session.id, party: 'ali', edges: [],
+    nodes: [{ id: 'other-port', kind: 'decision', label: 'Use port 9999', evidenceLines: [1] }],
+    links: [{ from: 'other-port', graph: graph.id, to: 'port', type: 'conflicts' }] })).graph;
+  const pair = await fetch(`${origin}/api/export?graph=${graph.id}&graph=${ali.id}`).then(response => response.json());
+  assert.equal(pair.nodes.length, 2);
+  assert.equal(pair.graph.links_left_out, 0);
+  assert.deepEqual(pair.links.map(link => [link.ledger_from, link.ledger_to, link.relation]),
+    [[exportNodeId(ali.id, 'other-port'), exportNodeId(graph.id, 'port'), 'conflicts']]);
+  const both = spawnSync(process.execPath, ['src/cli.mjs', 'graph', 'export', graph.id, ali.id], { env: { ...process.env, PORT: port }, encoding: 'utf8' });
+  assert.equal(both.status, 0, both.stderr);
+  assert.deepEqual(JSON.parse(both.stdout), pair);
   const bad = spawnSync(process.execPath, ['src/cli.mjs', 'graph', 'export', 'nope'], { env: { ...process.env, PORT: port }, encoding: 'utf8' });
   assert.equal(bad.status, 1);
   assert.match(bad.stderr, /Usage:/u);
