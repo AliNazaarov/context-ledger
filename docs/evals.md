@@ -1389,9 +1389,9 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
 
 ## G9 — Scoped context with a budget (defined 2026-11-17, before the code)
 
-`context_for` takes two new optional arguments. `question` is a short text of up to 500 characters. `budget` is a whole number of estimated tokens, from 50 to 100,000, and it needs a question. With a question, the briefing keeps only the nodes that match it, plus the nodes one edge away from those matches. Edges are kept only when both ends are shown, and links only when their local end is shown. The state lists are cut down to the nodes shown. With a budget, nodes are dropped until the briefing's estimate (ceil of characters / 4, the meter's own estimate) fits: neighbours go first, then matches with the fewest matched words. Without either argument, `context_for` is exactly what it was.
+`context_for` takes two new optional arguments. `question` is a short text of up to 500 characters. `budget` is a whole number of estimated tokens, from 50 to 100,000, and it needs a question. With a question, the briefing keeps only the nodes that match it, plus the nodes one edge away from those matches. Edges are kept only when both ends are shown, and links only when their local end is shown. The state lists are cut down to the nodes shown. With a budget, nodes are dropped until the briefing's estimate (ceil of characters / 4, the meter's own estimate) fits: neighbours go first, then matches with the fewest matched words. A budget smaller than the briefing with no nodes at all (its header and state lines) is refused with a message that gives that size, so a successful answer is never over budget. Without either argument, `context_for` is exactly what it was.
 
-A node matches when one of the question's words is in its label, its ID, its kind or the party it is addressed to. Words of three or more letters count, except common ones ("the", "what", "which"). Words of four or more letters compare by their first four letters, so "decided" finds a decision, and a three-letter word must start a word. Text in other scripts matches by any two letters in a row.
+A node matches when one of the question's words is in its label, its ID, its kind or the party it is addressed to. The question is split once into words, and each word counts once, with one rule. An ASCII word of three or more letters counts, except common ones ("the", "what", "which"). It compares by its first four letters, so "decided" finds a decision, and a three-letter word must start a word. A word in another script ("café", "北京") matches by two letters in a row, one of them outside ASCII, and a one-letter word must be a whole word of the node. The 500-character limit counts characters (code points), as the published schema does.
 
 The briefing's state section ends with a scope line: how many nodes matched, how many are shown as neighbours, how many were left out for the budget, and the budget itself. The question is not echoed back. When nothing matches, the briefing shows no nodes and says so, so the agent can ask again or call without a question.
 
@@ -1399,11 +1399,13 @@ The briefing's state section ends with a scope line: how many nodes matched, how
 
 - A question naming one decision returns that decision, the decision it supersedes (one edge away) and no unrelated node. The edge between them is shown, and the meter counts the scoped text.
 - A question that matches nothing returns the header, an empty node list and the "nothing matched" scope line.
-- A budget smaller than the full scoped briefing drops neighbours before matches, and the result's estimate is within the budget. A budget too small for even one node returns the header and the scope line, and nothing is cut mid-line.
-- The question and budget are checked at the API and in the MCP adapter: an empty or oversized question, a budget outside 50 to 100,000 or not a whole number, a budget without a question, and a repeated parameter are refused with fixed messages that echo nothing.
+- A budget smaller than the full scoped briefing drops neighbours before matches. For every budget from 50 up to the full briefing, the answer is either refused or within the budget, and once one budget is answered every larger one is too.
+- The question and budget are checked at the API and in the MCP adapter. An empty, blank or oversized question (also in characters outside the BMP), a budget outside 50 to 100,000 or not a whole number, and a budget without a question are refused with fixed messages that echo nothing. A repeated parameter is refused at the API; the MCP adapter gets JSON arguments, where a name cannot repeat.
+- A scoped briefing keeps only edges between shown nodes, links from shown nodes, the linked-graph lines of those links, and state lists of shown nodes. A fixture with two parties and links checks each.
 - The scope line never contains the question text, even one holding control or bidi characters.
 - Paging: a scoped briefing too long for one page pages by `fromLine`. Later pages come from the same scoped briefing, cached under the graph ID, question and budget, and the continuation note says to repeat the question and budget.
-- `context_for` without the new arguments is byte for byte what it was, so the existing paging and briefing tests pass unchanged.
+- `context_for` without the new arguments is byte for byte what it was: the text and meter are compared with what `origin/main` 3a17536 rendered for the same two-party fixture, and the existing paging and briefing tests pass unchanged.
+- A scoped briefing too long for one MCP page, through the real route and adapter, pages back to the whole scoped text. A different question, budget or no budget is a different cache entry.
 
 ### Acceptance
 

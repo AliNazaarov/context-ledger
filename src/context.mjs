@@ -81,9 +81,18 @@ export function contextText(graph, session, { lookupGraph, scope } = {}) {
  * question (and optionally a budget) the text is scoped to it (card G9, src/scope.mjs).
  */
 export function graphContext(graph, session, { question, budget, ...options } = {}) {
-  const text = question === undefined
-    ? contextText(graph, session, options)
-    : scopedText(graph, { question, budget }, (scoped, scope) => contextText(scoped, session, { ...options, scope }));
+  let text;
+  if (question === undefined) {
+    text = contextText(graph, session, options);
+  } else {
+    // A budget renders the briefing several times; each linked graph is read once.
+    const seen = new Map();
+    const lookupGraph = options.lookupGraph && (id => {
+      if (!seen.has(id)) seen.set(id, options.lookupGraph(id));
+      return seen.get(id);
+    });
+    text = scopedText(graph, { question, budget }, (scoped, scope) => contextText(scoped, session, { ...options, lookupGraph, scope }));
+  }
   const handoff = handoffMarkdown(session);
   const handoffTokens = estimateTokens(handoff);
   const graphTokens = estimateTokens(text);

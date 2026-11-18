@@ -1,6 +1,7 @@
 // Card G9: a briefing scoped to a question, cut to a token budget. The question picks
 // the nodes that match it and the nodes one edge away; the budget drops nodes,
 // neighbours first, until the briefing's estimate fits.
+import { InputError } from './errors.mjs';
 import { largest } from './paging.mjs';
 
 export const maxQuestionCharacters = 500;
@@ -14,37 +15,53 @@ const stopWords = new Set(['the', 'and', 'for', 'are', 'was', 'not', 'but', 'its
   'into', 'about', 'over', 'under', 'some', 'more', 'most', 'also', 'just', 'only', 'very', 'you', 'your', 'our', 'ours',
   'now', 'yet', 'still', 'tell', 'show', 'give', 'list', 'need', 'needs', 'know', 'want', 'wants', 'let', 'get', 'got']);
 
-/** The question's words: ASCII words of three or more characters, and runs of other scripts. */
+/** The length that the 500-character limit counts: code points, as JSON Schema does. */
+export const questionLength = question => Array.from(question).length;
+
+// Words in any script, a letter keeping its combining marks.
+const wordsOf = text => text.normalize('NFC').toLowerCase().match(/[\p{L}\p{N}\p{M}]+/gu) ?? [];
+const isAscii = word => !/\P{ASCII}/u.test(word);
+// Letters with their combining marks, so a Devanagari vowel sign stays with its letter.
+const lettersOf = word => word.match(/\P{M}\p{M}*|\p{M}+/gu) ?? [];
+
+/**
+ * The question's words, each once and each with one rule (review of 103051b): an ASCII
+ * word of three or more characters that is not a common word, or a word in another
+ * script. "café" is one word in another script, not "caf" plus "é".
+ */
 export function questionTerms(question) {
-  const lower = question.toLowerCase();
-  const ascii = [...new Set(lower.match(/[a-z0-9]{3,}/gu) ?? [])].filter(word => !stopWords.has(word));
-  const foreign = [...new Set((lower.match(/[\p{L}\p{N}]+/gu) ?? []).filter(run => /\P{ASCII}/u.test(run)))];
-  return { ascii, foreign };
+  const words = [...new Set(wordsOf(question))];
+  return {
+    ascii: words.filter(word => isAscii(word) && word.length >= 3 && !stopWords.has(word)),
+    foreign: words.filter(word => !isAscii(word)),
+  };
 }
 
 function nodeText(node) {
-  const text = [node.label, node.id.replace(/[-_.]/gu, ' '), node.kind, node.to].filter(Boolean).join(' ').toLowerCase();
-  return { text, words: text.match(/[\p{L}\p{N}]+/gu) ?? [] };
+  const text = [node.label, node.id.replace(/[-_.]/gu, ' '), node.kind, node.to].filter(Boolean).join(' ');
+  const words = wordsOf(text);
+  return { text: words.join(' '), words };
 }
 
 // Four letters or more compare by their first four, so "decided" finds a decision; a
 // three-letter word must start a word ("gpu" finds "GPU time", not "upgpu").
-const asciiMatch = (term, words) => words.some(word => word.startsWith(term.length >= 4 ? term.slice(0, 4) : term));
-// Another script matches by two letters in a row, one of them outside ASCII.
-const foreignMatch = (run, text) => {
-  const letters = Array.from(run);
-  if (letters.length === 1) return text.includes(run);
+const asciiMatch = (term, words) => words.some(word => isAscii(word) && word.startsWith(term.length >= 4 ? term.slice(0, 4) : term));
+// Another script: two letters in a row of the word, one of them outside ASCII, must be in
+// the node's text. A one-letter word must be a whole word of the node.
+const foreignMatch = (word, text, words) => {
+  const letters = lettersOf(word);
+  if (letters.length === 1) return words.includes(word);
   return letters.slice(1).some((letter, index) => {
     const pair = letters[index] + letter;
-    return /\P{ASCII}/u.test(pair) && text.includes(pair);
+    return !isAscii(pair) && text.includes(pair);
   });
 };
 
-/** How many of the question's words a node matches. */
+/** How many of the question's words a node matches, each word counted once. */
 export function nodeScore(node, terms) {
   const { text, words } = nodeText(node);
   return terms.ascii.filter(term => asciiMatch(term, words)).length
-    + terms.foreign.filter(run => foreignMatch(run, text)).length;
+    + terms.foreign.filter(word => foreignMatch(word, text, words)).length;
 }
 
 /**
@@ -103,14 +120,19 @@ export function scopedText(graph, { question, budget }, render) {
   const order = [...matched, ...neighbours];
   const total = graph.packet.nodes.length;
   const textFor = count => {
-    const kept = order.slice(0, count);
-    const shownMatched = kept.filter(id => matched.includes(id)).length;
-    return render(graphWith(graph, kept), scopeLine({
-      total, matched: matched.length, shownMatched, shownNeighbours: kept.length - shownMatched,
+    // Matches come first in the order, so the first min(count, matches) shown are matches.
+    const shownMatched = Math.min(count, matched.length);
+    return render(graphWith(graph, order.slice(0, count)), scopeLine({
+      total, matched: matched.length, shownMatched, shownNeighbours: count - shownMatched,
       left: order.length - count, budget,
     }));
   };
   if (budget === undefined) return textFor(order.length);
-  const count = largest(1, order.length, k => estimateTokens(textFor(k)) <= budget);
-  return textFor(Math.max(count, 0));
+  const fits = k => estimateTokens(textFor(k)) <= budget;
+  // Review of 103051b: even with no nodes the header and state lines cost tokens. A
+  // budget below that is refused rather than answered over budget.
+  if (!fits(0)) {
+    throw new InputError(`budget is below the smallest briefing of this graph, about ${estimateTokens(textFor(0))} tokens.`);
+  }
+  return textFor(largest(1, order.length, fits));
 }

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { GraphInputError } from './graph.mjs';
 import { LatentError, latentFiles, latentRead, latentTeam, latentTransfer } from './latent.mjs';
-import { maxBudget, maxQuestionCharacters, minBudget } from './scope.mjs';
+import { maxBudget, maxQuestionCharacters, minBudget, questionLength } from './scope.mjs';
 import { InputError, isProvider, openStore } from './store.mjs';
 
 const maxRequestBytes = 8 * 1024 * 1024;
@@ -101,7 +101,7 @@ function scopeParameters(url) {
   }
   const question = url.searchParams.get('question') ?? undefined;
   const budgetText = url.searchParams.get('budget') ?? undefined;
-  if (question !== undefined && (!question.trim() || question.length > maxQuestionCharacters)) {
+  if (question !== undefined && (!question.trim() || questionLength(question) > maxQuestionCharacters)) {
     throw new InputError(`question must be 1 to ${maxQuestionCharacters} characters.`);
   }
   let budget;

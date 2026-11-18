@@ -1,6 +1,6 @@
 // Graph tools: graph_schema, graph_publish, graph_read, context_for and graph_list.
 import { graphSchemas } from '../graph.mjs';
-import { maxBudget, maxQuestionCharacters, minBudget } from '../scope.mjs';
+import { maxBudget, maxQuestionCharacters, minBudget, questionLength } from '../scope.mjs';
 import { fitCount, maxResultCharacters, resultSize } from '../paging.mjs';
 import { terminalJson } from '../text.mjs';
 import { ToolError, briefingText, checkArguments, fromItemArgument, fromLineArgument, optionalInteger, hexSchema, isObject, jsonResult, listArguments, maxPacketBytes, optionalParty, partyFilter, requireHex, text, tooLarge } from './common.mjs';
@@ -85,7 +85,7 @@ export const graphRead = ['graph_read', {
 /** Card G9: the optional question and budget, with fixed messages that echo nothing. */
 function scopeArguments(args) {
   const { question } = args;
-  if (question !== undefined && (typeof question !== 'string' || !question.trim() || question.length > maxQuestionCharacters)) {
+  if (question !== undefined && (typeof question !== 'string' || !question.trim() || questionLength(question) > maxQuestionCharacters)) {
     throw new ToolError(`question must be 1 to ${maxQuestionCharacters} characters.`);
   }
   const budget = optionalInteger(args, 'budget', minBudget, maxBudget, `budget must be a whole number from ${minBudget} to ${maxBudget}.`);
