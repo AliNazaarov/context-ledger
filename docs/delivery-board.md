@@ -10,6 +10,8 @@ Claim a card before working on it (AGENTS.md section 2). States: Backlog, Ready,
 | P2 MCP server and graph v2 (wave 2) | Unassigned | — | Stdio MCP tools, project-scoped graph with message-ID citations and approvals | Backlog (after P1) |
 | P3 Reviewer UI (wave 3) | Unassigned | — | Node and evidence side by side; approve, edit or reject | Backlog (after P2) |
 | P4 Redaction and signed export (wave 4) | Unassigned | — | Secret scanner, redaction diff, Ed25519 signing, `ledger verify` | Backlog (after P2) |
+| P4a Signed hand-off and `ledger verify` | Claude Code (for Ruslan) | `ruslan/p4a-signed-export` | First slice of P4: `ledger keygen` (Ed25519 key in the data folder), `ledger handoff <id> --sign <dir>` (hand-off Markdown, an RFC 8785 JCS manifest of file names, sizes and SHA-256, and a raw Ed25519 signature), `ledger verify <dir> [--fingerprint]`, and an OpenSSL-only recipe for clients. Signing work: needs a human security review before merge | In progress |
+| P4b Secret scanner and redaction diff | Unassigned | — | Rest of P4: the secret scanner, the redaction diff, allowlist export from cleared excerpts (ADR-8), and the passphrase-encrypted signing key from the design (section 6) | Backlog (after P4a) |
 | P5 Packaging and launch (wave 5) | Unassigned | — | npx install, cross-OS CI, license key, docs | Backlog |
 | I1 Large-file streaming import | Unassigned | — | Real data: 16% of Claude Code sessions exceed the 8 MiB HTTP limit; import from a file path with streaming | Ready (after P1) |
 | I2 Tolerant JSONL parsing | Unassigned | — | Real data: one corrupt line rejects a whole session; skip and count bad lines instead | Ready (after P1) |
