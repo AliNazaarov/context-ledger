@@ -1409,3 +1409,40 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## P4b — Secret scanner and redaction diff (defined 2026-11-17, before implementation)
+
+Transcripts often hold credentials: keys pasted into a prompt, tokens in tool output an agent repeated, a private key it printed. Before a hand-off or export leaves the machine, the person should see what in it looks like a secret. P4b adds the scanner and a report. It does not change `ledger handoff` or the signed export (P4a), which can use the scanner later.
+
+All fixtures are synthetic. The fake credentials are put together at test time from fragments, so no committed file holds a string in a real credential format that secret-scanning push protection would flag.
+
+### What is tested and the expected result
+
+- **Formats found:** `findSecrets(text)` finds and labels:
+  - an AWS access key ID, and an AWS secret key next to its name;
+  - GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`);
+  - Anthropic (`sk-ant-`) and OpenAI (`sk-`, `sk-proj-`) keys;
+  - Slack tokens (`xox?-`);
+  - Stripe live and test secret keys;
+  - JSON Web Tokens;
+  - PEM private key blocks;
+  - bearer tokens in an `Authorization` header;
+  - a secret-looking value assigned to a name such as `password`, `api_key`, `secret` or `token`.
+
+  Each finding has its kind and its start and end in the text.
+- **Not over-eager:**
+  - Ordinary prose, hex commit hashes, UUIDs, the word "password" without a value, placeholders (`<your-key>`, `xxxx`, `${TOKEN}`, `changeme`) and short values are not flagged.
+  - Overlapping matches are reported once, by the most specific kind.
+- **Redaction:** `redactText(text)` replaces each finding with `[REDACTED <kind>]` and leaves everything else byte for byte. `redactSession(session)` does that for every message, keeps line numbers, and lists findings by line and kind.
+- **The report never shows a secret:** `npm run ledger -- redact <session-id>` prints, for each finding:
+  - its line number and kind;
+  - its length;
+  - a masked preview that keeps at most the known prefix, such as `ghp_…`, and never any other character of the value.
+
+  It ends with the count and exits 0. With `--json` it prints the same as escaped JSON. With `--text` it prints the redacted hand-off. All output goes through the terminal escaping in `src/text.mjs`, and errors are fixed sentences.
+- **No surprises in the other tools:** `ledger handoff`, the browser, MCP and the store are unchanged.
+
+### Acceptance for the code
+
+- `node --test tests/*.test.mjs` passes, with the cases above in `tests/secrets.test.mjs`, including a CLI run against a server on a temporary database.
+- No new dependency. Scanning a 1 MiB synthetic transcript takes under a second.
