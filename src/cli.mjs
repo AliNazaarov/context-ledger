@@ -72,7 +72,7 @@ function setup(mode, args) {
     options: { agent: { type: 'string' }, 'dry-run': { type: 'boolean', default: false } },
     allowPositionals: true,
   });
-  if (positionals.length || (values.agent && !['claude', 'codex'].includes(values.agent))) throw new Error(usage);
+  if (positionals.length || (values.agent !== undefined && !['claude', 'codex'].includes(values.agent))) throw new Error(usage);
   const agents = values.agent ? [values.agent] : ['claude', 'codex'];
   const { ok, lines } = setupAgents({ mode, agents, dryRun: values['dry-run'] });
   console.log(lines.join('\n'));
