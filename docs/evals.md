@@ -1482,7 +1482,7 @@ Card P1c on `ruslan/p1c-message-rows`, stacked on P1b (PR #42, `ruslan/p1b-proje
 - **Keys of migrated sessions.** The stored JSON has neither raw lines nor UUIDs, so no hash key can be computed for a session that already exists. Its messages get `l:<line>`, as section 4 says for legacy sessions. Keys never change once written: importing the same bytes again returns the stored session with its `l:` keys.
 - **Readers.** `get`, the line check in `publishGraph` and `getGraphContext` read messages from rows in `seq` order. So do the routes built on them and the MCP `session_read` and `context_for` tools, which read the HTTP API. Each message in an API response gains `key`, after `role`, `text` and `line`.
 - **The JSON column stays, as a write-only copy.** New imports still write `sessions.messages`, and nothing in this build reads it. Builds from before schema versions (19f6522 and earlier) never check `user_version`, so they can still open a version 3 file. With the column kept they keep working instead of failing, and the `sessions_messages` trigger gives any session they insert its rows (with `l:` keys) from that JSON. Dropping the column means a table rebuild in a forward-only migration with no backup yet (section 4's `VACUUM INTO` is not built). That belongs with the `provider:uuid` card, which rebuilds `sessions` anyway.
-- **Search stays on `search_text`.** That column already holds the title and every message text, lowercased by JavaScript. Moving `instr` onto message rows would either use SQLite's ASCII-only `lower()`, which changes results for non-ASCII text, or store a second lowered copy of every message, and each term would become a subquery over rows. P1a decides what replaces search (FTS5 over `messages.text`, or a degraded `LIKE`), so this card leaves it as it is.
+- **Search stays on `search_text`.** That column already holds the title and every message text, lowercased by JavaScript. Moving `instr` onto message rows would either use SQLite's ASCII-only `lower()`, which changes results for non-ASCII text, or store a second lowered copy of every message, and each term would become a subquery over rows. P1a decides what replaces search (FTS5 over the decoded `messages.text_json`, or a degraded `LIKE`), so this card leaves it as it is.
 - **Migration checks.** The version 3 step copies each session's JSON array into rows in array order, taking each text as stored (`->`, not `->>`). It then checks that every session's rows are exactly its stored messages: the same count, and the same position, line, role and text for each (review round 1; the first draft compared only counts). Since review round 4 every row is new, so this checks the step's own copy. A file that already has a `messages` table or a `sessions_messages` trigger is refused before anything is written. A session whose stored JSON is not an array of messages makes the step fail and roll back, leaving the file at its version, with fixed text that quotes no transcript content.
 
 | Eval | Expected |
@@ -1498,3 +1498,56 @@ Card P1c on `ruslan/p1c-message-rows`, stacked on P1b (PR #42, `ruslan/p1b-proje
 | Readers use rows | With the JSON column overwritten in the test, `get`, graph publishing (the line check), graph context and search are unchanged. |
 | HTTP and MCP | `GET /api/sessions/:id` returns `key` on every message; MCP `session_read` output is unchanged. |
 | Nothing else changes | No new dependency and no FTS5. No raw control or format characters in `src/` or `tests/`. All four suites pass. |
+
+**Results — P1c (2026-11-17):** every row passes on Windows. The tests are in `tests/message-rows.test.mjs` (12 tests). `tests/projects.test.mjs` now states its versions relative to `schemaVersion` (the current version, and `schemaVersion + 1` for a newer file) instead of the literals 2 and 3. Nothing else in it changed.
+
+- **Schema version 3 — passed.** `src/migrate.mjs` adds `messages (id, session_id, seq, line, role, text_json, key)` as STRICT, with `UNIQUE (session_id, key)`, `UNIQUE (session_id, seq)`, a deferred, cascading foreign key to `sessions`, and the `sessions_messages` trigger. `schemaVersion` is 3. There is no virtual table and no new dependency. The column is `text_json`, not `text`, after review round 1 (below).
+- **Version 2 file — passed.** The test builds a version 2 file from the P1b DDL, with sessions in `default` and `acme`. After opening, each session's rows are its JSON messages in order with `l:<line>` keys. Every session, project, graph, room and choice row is unchanged, and graphs, rooms and graph context read back exactly as before. A graph citing line 4 publishes; lines 2 (a record that is not a turn) and 5 are refused. A second open changes neither schema nor rows.
+- **Version 1 and unversioned files — passed.** Both reach version 3 with every earlier step's changes and the same rows.
+- **Leftovers — passed.** Thirteen kinds of leftover in a version 2 file are refused with fixed text, leaving the file byte for byte unchanged at version 2. They include a `messages` table of exactly this shape (empty, with matching rows, or with too few), rows for a missing session, a table with no foreign key, the deferred clause only in a comment, partial unique indexes, a trigger on `messages`, a view named `messages`, a table named `Messages`, and `sessions_messages` triggers on `sessions` and on `projects` (in either case). Version 0 and version 1 files with a leftover are refused in the same way, with their earlier steps rolled back, and they migrate once it is removed (review round 5). This row replaced "Safe to repeat" in review round 4.
+- **Atomic — passed.** Eleven kinds of bad stored JSON fail the open with the fixed message and leave the file byte for byte unchanged at version 2: malformed JSON, an object, a number in the array, a `system` role, a missing text, a numeric text, line 0, a string line, a fractional line, line 2^53 and line 2^63. The last two come from review round 1. Two stored messages on one line fail on the unique key and roll back.
+- **Newer files — passed.** Version 4 is refused with the existing message and its bytes are unchanged. The P1b newer-file and upgrade-race tests pass at `schemaVersion + 1`.
+- **Older build writes — passed.** The 19f6522 insert into a version 3 file gets one row per JSON message with `l:` keys, joins `default`, reads back through `get` and can be cited. Repeating the insert adds nothing.
+- **Keys on import — passed.** First-use Claude UUIDs get `u:` keys. These get `h:` keys equal to the test's own recomputation: a repeated UUID (including one in another letter case, from review round 1), a missing `uuid`, a non-UUID string, a UUID with a control character, and a number. Two identical `ok` turns get different keys, and a CRLF Codex file hashes the carriage return. The same bytes in a second, empty store give the same ID and keys, and importing the same bytes again writes nothing. A session that fails to insert leaves no rows, and a row without its session fails at commit.
+- **Readers use rows — passed.** With `sessions.messages` overwritten with text that is not JSON, `get`, graph context, search, paging and the line check in `publishGraph` are unchanged. A NUL and lone surrogates survive a fresh import, a migration and an older build's insert exactly (review round 1).
+- **HTTP and MCP — passed.** `GET /api/sessions/:id` returns `key` on every message. The MCP `session_read` page for a four-turn session shows no key and equals a literal copy of the page as it was rendered before keys existed. One of the turns contains a `~~~` run and a right-to-left override.
+- **Nothing else changes — passed.** No new dependency and no FTS5. No raw control or format characters in `src/` or `tests/`.
+- **Decided, not built:** session IDs stay content-addressed; `sessions.messages` is still written; search stays on `search_text`; migrated sessions keep their `l:` keys for good. The reasons are in the rules above.
+
+**Codex review (read-only), five rounds.** Round 1 was run twice on the same diff (c9d5712, and 8d69c17, which added only a test): once by this session and once by an earlier copy of it working in the same worktree. Both runs found the same five issues, so they are listed once.
+
+Round 1, on c9d5712:
+
+- **High (Medium in one run) — fixed (f8b9b8f).** `node:sqlite` cuts a string at a NUL when it reads one and replaces lone surrogates when it binds one. A turn with either came back changed from rows, while the JSON column had kept it. Rows now hold the text as a JSON string literal (`text_json`). The store writes it with `JSON.stringify` and decodes it on read; the migration and the trigger copy the stored literal with `->`. A new test covers all three write paths.
+- **Medium — fixed (f8b9b8f).** A version 2 file with pre-existing rows passed the step if only the count matched, so a wrong line could be cited afterwards. Every row had to match its stored message in full. Round 4 later replaced reuse with refusal.
+- **Low — fixed (f8b9b8f).** Repeated UUIDs were compared case-sensitively, so a repeat in upper case got a second `u:` key. They now compare in lower case, and the key keeps the first spelling.
+- **Low — fixed (f8b9b8f).** Lines above `Number.MAX_SAFE_INTEGER` passed the check and then could not be read, and 2^63 surfaced a SQLite error. Lines must now be from 1 to 2^53 - 1.
+- **Low — fixed (f8b9b8f).** The MCP test checked only the headings. It now compares the whole page.
+
+Round 2, on f8b9b8f:
+
+- **High:** none. Codex confirmed the round 1 fixes.
+- **Medium — fixed (8e2f5f3, superseded by ce08237).** A `sessions_messages` trigger already in the file was kept (`IF NOT EXISTS`) even if it wrote nothing. The fix dropped and recreated it.
+- **Medium — fixed (8e2f5f3, superseded by ce08237).** Rows naming no session passed, because a deferred key checks only rows written in the transaction. The fix added `PRAGMA foreign_key_check(messages)`.
+- **Low — fixed (8e2f5f3).** The backfill sorted every message under the write lock. The sort is gone, since `seq` carries the order, and the query plan has no temporary B-tree.
+- **Low — fixed (8e2f5f3).** The MCP comparison used the same renderer as the code. It now compares against literal text.
+
+Round 3, on 8e2f5f3:
+
+- **High:** none.
+- **Medium — fixed (26a3961, superseded by ce08237).** A pre-existing `messages` table without its foreign key was reused, so deleting a session would have left its messages. The fix checked the table's shape.
+- **Low — fixed (26a3961, superseded by ce08237).** The step would drop a `sessions_messages` trigger defined on another table. The fix refused one.
+
+Round 4, on 26a3961:
+
+- **High:** none.
+- **Medium (four) — fixed (ce08237).** Four leftovers passed the round 3 shape check: partial unique indexes, a deferred clause inside a comment, `SESSIONS_MESSAGES` on another table, and a trigger on `messages` that deletes rows. The step is one transaction and never leaves part of itself behind, so these objects can only come from elsewhere. The step now refuses any `messages` table, anything on a table of that name, and any `sessions_messages` object, in any case. It always creates the table and the trigger itself. The shape check, the orphan check and the trigger replacement are gone.
+
+Round 5, on ce08237:
+
+- **High and medium:** none. Codex found that this repository's version 0, 1 and 2 DDL creates no matching object, and that a failed attempt rolls back.
+- **Low — fixed (this commit).** The leftover test used only version 2 files. Version 0 and 1 files with a leftover now show that their earlier steps roll back and that they migrate once it is removed.
+
+Each regression test that still applies was checked by undoing its fix. That makes seven mutations: raw text in rows, a reader that accepts raw text, a migration that decodes text, case-sensitive UUIDs, no line bound, no leftover refusal, and a heading change in the shared renderer. Each one fails at least its own test. Two checks are not tested by inputs. The full-row comparison after the backfill checks the step's own copy; since round 4 no input reaches it, so undoing it fails no test. The `typeof` check on lines from round 1 turned out to be covered by the bound and was removed.
+
+**Suites (Windows, after the round 5 fix):** `npm run -s test:graph` 9/9; node 216/217 (one skipped; P1b had 204/205, and this card adds 12 tests); Playwright 13/13; Python runtime 192 run, OK (50 skipped).

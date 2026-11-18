@@ -249,3 +249,18 @@ Next steps:
 1. A human reviews the migration to version 2 (AGENTS.md section 4, step 4); the review of PR #8's migration to version 1 is also still owed.
 2. When PR #37 lands, keep one P1b row on the board (this branch's or #37's) and set it from the PR state.
 3. Not in this card: a project picker in the browser (it imports into `default`), a `project` filter on MCP `session_search`, a project list route, and moving sessions between projects. P1c (message rows) and P1d (delete and retention) build on `projects` and `sessions.project_id`.
+
+## Current checkpoint — P1c message rows (2026-11-17)
+
+Card P1c on `ruslan/p1c-message-rows`, stacked on P1b (PR #42, `ruslan/p1b-projects`). The eval, its results and the Codex review rounds are in the P1c section of [the eval log](evals.md). The storage engine decision (P1a) is still open, so this card stays on `node:sqlite` with no new dependency and no FTS5.
+
+- **Schema version 3** (`src/migrate.mjs`): a `messages` table (`id`, `session_id` as a deferred foreign key with cascade, `seq`, `line`, `role`, `text_json`, `key`; unique per session on `key` and on `seq`). `text_json` is the turn's text as a JSON string literal, because `node:sqlite` loses a NUL and lone surrogates in plain text. The step copies each session's JSON messages in order with `l:<line>` keys. It fails and rolls back, with the file unchanged, in three cases: a stored JSON value is not an array of messages, a session's rows do not equal its stored messages, or the file already has a `messages` table or a `sessions_messages` trigger from elsewhere. The `sessions_messages` trigger gives a session inserted by a build from before schema versions its rows from its JSON.
+- **Keys on import** (`src/store.mjs`): `u:<uuid>` for the first Claude record with a given UUID-shaped `uuid` (compared without case), otherwise `h:` plus 32 hex of `sha256(sessionId \0 line \0 raw line)`. The rows are written before the session in the same transaction.
+- **Readers:** `get`, the line check in `publishGraph` and `getGraphContext` read rows. Each message in `GET /api/sessions/:id` carries `key`. MCP `session_read` output is unchanged.
+- **Kept on purpose:** `sessions.messages` is still written and never read, so builds from before versions keep working on the file. `search_text` still serves search. Session IDs and line citations are unchanged.
+
+Next steps:
+
+1. A human reviews the migration to version 3 (AGENTS.md section 4, step 4), together with the owed reviews of versions 1 and 2. Five rounds of Codex review are recorded in the eval log; the last found nothing above low.
+2. Merge after PR #42; then retarget this PR to `main`.
+3. Next card (add it to the board when PR #37 lands): `provider:uuid` session IDs. It rebuilds `sessions` (so it can drop `sessions.messages`, after a `VACUUM INTO` backup), links legacy sessions to their UUID sessions, and applies the design's rule for repeated UUIDs (skip identical bytes, refuse different ones). P1a then decides what replaces `search_text` (FTS5 over the decoded `messages.text_json`, using `messages.id` as its rowid, or a degraded `LIKE`). P2 can cite messages by `<sessionId>/<key>` from now on.

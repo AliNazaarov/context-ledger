@@ -339,6 +339,30 @@ test('a file that already has a messages table or a sessions_messages trigger is
     assert.deepEqual(schema(after), shape, name);
     after.close();
   }
+
+  // Review round 5: version 0 and 1 files reach the refusal after their earlier steps ran in
+  // the same transaction; those roll back too, and the file migrates once the leftover is gone.
+  for (const version of [0, 1]) {
+    const old = await oldLedger(directory, version);
+    const setup = new DatabaseSync(old.path);
+    setup.exec('CREATE TABLE Messages (x TEXT);');
+    const shape = schema(setup);
+    setup.close();
+    const bytes = await readFile(old.path);
+    assert.throws(() => openStore(old.path), { message: leftoverFailed }, `version ${version}`);
+    assert.ok((await readFile(old.path)).equals(bytes), `version ${version}: the file is unchanged`);
+    const cleanup = new DatabaseSync(old.path);
+    assert.equal(userVersion(cleanup), version);
+    assert.deepEqual(schema(cleanup), shape);
+    cleanup.exec('DROP TABLE Messages;');
+    cleanup.close();
+    const store = openStore(old.path);
+    assert.deepEqual(store.get(old.ali.id).messages.map(message => message.key), ['l:1', 'l:2']);
+    store.close();
+    const check = new DatabaseSync(old.path);
+    assert.equal(userVersion(check), 3);
+    check.close();
+  }
 });
 
 test('a session whose stored messages cannot be copied fails the step and leaves the file at version 2', async t => {
