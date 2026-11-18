@@ -277,6 +277,25 @@ test('the version 2 step is safe to repeat, atomic, and newer files are refused 
   reopened.close();
 });
 
+test('a current file opens without the write lock while another connection holds it', async t => {
+  // Review round 3: the lock is taken only when a migration may run, so a writer holding
+  // it does not stall or fail a store opening a version 2 file.
+  const { directory, keep } = await scratchDirectory(t, 'ledger-p1b-lockfree-');
+  const path = join(directory, 'ledger.sqlite');
+  const first = openStore(path);
+  first.importTranscript({ provider: 'claude', source: 'held.jsonl', transcript: claude('Held lock.'), project: 'acme' });
+  first.close();
+  const holder = new DatabaseSync(path);
+  keep(() => holder.close());
+  holder.exec('BEGIN IMMEDIATE');
+  keep(() => holder.exec('ROLLBACK'));
+  const started = Date.now();
+  const store = openStore(path);
+  keep(() => store.close());
+  assert.ok(Date.now() - started < 2000, `opening took ${Date.now() - started} ms`);
+  assert.deepEqual(plain(store.list('', '', 'acme')).map(session => session.source), ['held.jsonl']);
+});
+
 test('a failed session insert leaves no new project behind and the store keeps working', async t => {
   // Review round 1, finding 3: the project and the session commit together or not at all.
   const { directory, keep } = await scratchDirectory(t, 'ledger-p1b-rollback-');
@@ -361,34 +380,68 @@ test('two processes racing to import the same bytes into two projects create onl
   assert.equal(check.prepare('SELECT count(*) AS n FROM sessions').get().n, 1);
 });
 
-test('a file that a newer build upgrades while this one opens it is refused and gets no DDL', async t => {
-  // Review round 2: the version is read again under the write lock before any DDL. The
-  // holder stands in for a newer build: it takes the lock first, drops a version 0 table
-  // and moves to version 3 while the child waits, then commits.
+test('a file that a newer build upgrades while this one opens it gets no DDL', async t => {
+  // Review rounds 2 and 3. The child stops right after its first read of user_version;
+  // a newer build (the holder) then drops a version 0 table, moves the file to version 3
+  // and commits before the child goes on. Any DDL from the child would recreate the table.
   const { directory, keep } = await scratchDirectory(t, 'ledger-p1b-upgrade-race-');
-  const path = join(directory, 'ledger.sqlite');
-  openStore(path).close();
   const storeUrl = pathToFileURL(join(process.cwd(), 'src/store.mjs')).href;
-  const holder = new DatabaseSync(path);
-  keep(() => holder.close());
-  holder.exec('BEGIN IMMEDIATE');
-  const child = spawn(process.execPath, ['--input-type=module', '-e',
-    `import { openStore } from ${JSON.stringify(storeUrl)}; process.stdout.write('ready\\n'); openStore(process.env.LEDGER_FILE).close();`],
-  { env: { ...process.env, LEDGER_FILE: path }, stdio: ['ignore', 'pipe', 'pipe'] });
-  keep(() => child.exitCode === null && child.kill());
-  let stderr = '';
-  child.stderr.on('data', chunk => { stderr += chunk; });
-  const exit = once(child, 'exit');
-  await Promise.race([once(child.stdout, 'data'), exit.then(() => assert.fail(`the child exited before it was ready: ${stderr}`))]);
-  // The child now reads version 2 and waits for the lock (busy_timeout is 5 s).
-  await new Promise(resolve => setTimeout(resolve, 750));
-  holder.exec('DROP TABLE room_choices; PRAGMA user_version = 3;');
-  holder.exec('COMMIT');
-  const [code] = await exit;
-  assert.equal(code, 1, stderr);
-  assert.match(stderr, /written by a newer Context Ledger \(schema 3\)/u);
-  assert.deepEqual(rows(holder, "SELECT name FROM sqlite_master WHERE name = 'room_choices'"), []);
-  assert.equal(userVersion(holder), 3);
+  const script = `import { existsSync, writeSync } from 'node:fs';
+    import { DatabaseSync } from 'node:sqlite';
+    import { openStore } from ${JSON.stringify(storeUrl)};
+    const prepare = DatabaseSync.prototype.prepare;
+    let armed = true;
+    DatabaseSync.prototype.prepare = function (sql) {
+      const statement = prepare.call(this, sql);
+      if (!armed || sql !== 'PRAGMA user_version') return statement;
+      armed = false;
+      return { get: () => {
+        const row = statement.get();
+        writeSync(1, 'read ' + row.user_version + '\\n');
+        const deadline = Date.now() + 20000;
+        const pause = new Int32Array(new SharedArrayBuffer(4));
+        while (!existsSync(process.env.RELEASE)) {
+          if (Date.now() > deadline) throw new Error('never released');
+          Atomics.wait(pause, 0, 0, 10);
+        }
+        return row;
+      } };
+    };
+    openStore(process.env.LEDGER_FILE).close();`;
+  const cases = [
+    // A version 1 file needs the migration: the child rereads the version under the lock and refuses.
+    { version: 1, make: async () => (await oldLedger(directory, 1)).path, stderr: /written by a newer Context Ledger \(schema 3\)/u },
+    // A current file needs no lock and gets no DDL; the child then fails on the missing table.
+    { version: 2, make: async () => { const path = join(directory, 'current.sqlite'); openStore(path).close(); return path; }, stderr: /room_choices/u },
+  ];
+  for (const { version, make, stderr: expected } of cases) {
+    const path = await make();
+    const release = join(directory, `release-${version}`);
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script],
+      { env: { ...process.env, LEDGER_FILE: path, RELEASE: release }, stdio: ['ignore', 'pipe', 'pipe'] });
+    keep(() => child.exitCode === null && child.kill());
+    let stdout = '';
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    const exit = once(child, 'exit');
+    await Promise.race([
+      new Promise(resolve => child.stdout.on('data', chunk => {
+        stdout += chunk;
+        if (stdout.includes('\n')) resolve();
+      })),
+      exit.then(() => assert.fail(`the child exited before its first read: ${stderr}`)),
+    ]);
+    assert.equal(stdout, `read ${version}\n`);
+    const holder = new DatabaseSync(path);
+    holder.exec('BEGIN IMMEDIATE; DROP TABLE room_choices; PRAGMA user_version = 3; COMMIT;');
+    await writeFile(release, '');
+    const [code] = await exit;
+    assert.equal(code, 1, `version ${version}: ${stderr}`);
+    assert.match(stderr, expected, `version ${version}`);
+    assert.deepEqual(rows(holder, "SELECT name FROM sqlite_master WHERE name = 'room_choices'"), [], `version ${version}`);
+    assert.equal(userVersion(holder), 3);
+    holder.close();
+  }
 });
 
 test('an import names its project, a new slug creates it once, and the default is default', () => {

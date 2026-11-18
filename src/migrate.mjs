@@ -34,20 +34,21 @@ const refuseNewer = version => {
  * Recreate the triggers if graphs, rooms or sessions is ever rebuilt.
  *
  * bootstrap creates the tables of the oldest schema (CREATE TABLE IF NOT EXISTS). It
- * runs under the same write lock, after the version is read again, so a file that a
+ * runs only under the write lock, after the version is read again, so a file that a
  * newer build upgrades while this one opens it is refused before any DDL touches it.
- * The lock is taken on every open; a file already at this version only rereads it.
+ * A file already at this version is opened with no lock and no DDL.
  */
 export function migrate(database, bootstrap = () => {}) {
-  // Refuse a newer file without waiting for the lock; checked again under it.
-  refuseNewer(userVersion(database));
+  const current = userVersion(database);
+  refuseNewer(current);
+  if (current === schemaVersion) return;
 
   database.exec('BEGIN IMMEDIATE');
   try {
     // Another process may have migrated while this one waited for the lock.
     const version = userVersion(database);
     refuseNewer(version);
-    bootstrap();
+    if (version < schemaVersion) bootstrap();
     if (version < 1) {
       const graphColumns = columns(database, 'graphs');
       if (!graphColumns.has('created_at')) database.exec('ALTER TABLE graphs ADD COLUMN created_at TEXT');
