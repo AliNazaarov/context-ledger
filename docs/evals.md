@@ -1409,3 +1409,9 @@ ADR-003 picked better-sqlite3 because `node:sqlite` had no FTS5. P1a checks whet
   - (medium) A forced-fallback switch cannot prove downgrade compatibility. The implementing card must also reopen the same database on a genuinely module-free build (Node 22.14.0), then on an FTS5 build.
   - (low) The fallback contract now includes the session title and the descending session `rowid` order.
   - (low) The landing note now says what happens to the better-sqlite3 passages when P1a is accepted or rejected.
+- **Codex, round 3** (of 8351c3a): no high findings. Three medium and two low, all fixed in the document:
+  - (medium) §4 still created the FTS5 index in the first migration and lacked `fts_pending`. The migration now has `fts_pending`, and the index is shown as a separate block the store creates where FTS5 exists.
+  - (medium) Draining only at open missed a module-free process appending while an FTS5 process had the file open. A process with FTS5 now drains before each indexed search and inside each delete or purge, before its FTS5 `delete` commands.
+  - (medium) §6's scheduled retention and evidence-only cleanup could be blocked without saying so. A blocked run records why and what it would have removed, and an evidence-only export reports that its cleanup did not run.
+  - (low) The fallback contract now includes the provider filter and empty queries.
+  - (low) Rejection now restores the original ADR-003 entry and the lifecycle text, not only removes §5.1.
