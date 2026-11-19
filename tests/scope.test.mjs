@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import test from 'node:test';
 import { questionTerms, rankNodes } from '../src/scope.mjs';
 import { InputError, openStore } from '../src/store.mjs';
+import { bearer, ledgerToken } from './ledger-auth.mjs';
 import { startMcp } from './mcp-client.mjs';
 
 // Card G9: a briefing scoped to a question, cut to a token budget. Synthetic data only.
@@ -219,8 +220,8 @@ async function fakeLedger(t, respond) {
   return { port: server.address().port, requests };
 }
 
-function mcp(t, port) {
-  const client = startMcp(port);
+function mcp(t, port, env = {}) {
+  const client = startMcp(port, env);
   t.after(async () => {
     if (client.child.exitCode === null) await client.close();
   });
@@ -301,19 +302,23 @@ async function startServer(t) {
   for await (const chunk of child.stdout) {
     output += chunk;
     const match = output.match(/listening at http:\/\/127\.0\.0\.1:(\d+)/u);
-    if (match) return `http://127.0.0.1:${match[1]}`;
+    if (match) {
+      // P1e: the API needs the token the server wrote next to its database.
+      const database = join(dir, 'ledger.sqlite');
+      return { origin: `http://127.0.0.1:${match[1]}`, database, auth: bearer(await ledgerToken(database, Number(match[1]))) };
+    }
   }
   throw new Error('server did not start');
 }
 
 test('the context route checks question and budget with fixed messages', async t => {
-  const origin = await startServer(t);
-  const post = (path, body) => fetch(origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify(body) })
+  const { origin, database, auth } = await startServer(t);
+  const post = (path, body) => fetch(origin + path, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify(body) })
     .then(response => response.json());
   const { session } = await post('/api/import', { provider: 'claude', source: 'orbit.jsonl', transcript: say('The ledger stays on port 4317.') });
   const { graph } = await post('/api/graphs', { version: 2, sessionId: session.id, party: 'leo', edges: [],
     nodes: [{ id: 'port', kind: 'decision', label: 'The ledger stays on port 4317', evidenceLines: [1] }] });
-  const get = query => fetch(`${origin}/api/graphs/${graph.id}/context${query}`).then(async response => ({ status: response.status, body: await response.json() }));
+  const get = query => fetch(`${origin}/api/graphs/${graph.id}/context${query}`, { headers: auth }).then(async response => ({ status: response.status, body: await response.json() }));
 
   const scoped = await get('?question=port&budget=500');
   assert.equal(scoped.status, 200);
@@ -347,7 +352,7 @@ test('the context route checks question and budget with fixed messages', async t
   const big = await post('/api/import', { provider: 'claude', source: 'big.jsonl', transcript: say('Port '.repeat(20) + 'notes.') });
   const nodes = Array.from({ length: 100 }, (_, index) => ({ id: `port-${index}`, kind: 'decision', label: `Port note ${index} ${'with many words '.repeat(28)}`, evidenceLines: [1] }));
   const bigGraph = (await post('/api/graphs', { version: 2, sessionId: big.session.id, party: 'leo', nodes, edges: [] })).graph;
-  const client = mcp(t, Number(new URL(origin).port));
+  const client = mcp(t, Number(new URL(origin).port), { CONTEXT_LEDGER_DB: database });
   const pages = [];
   for (let id = 1, fromLine; ; id += 1) {
     const result = await client.call(id, 'context_for', { graphId: bigGraph.id, question: 'port note', budget: 100000, ...(fromLine ? { fromLine } : {}) });
@@ -360,7 +365,7 @@ test('the context route checks question and budget with fixed messages', async t
     assert.ok(id < 10);
   }
   assert.ok(pages.length > 1, 'the scoped briefing needed more than one page');
-  const whole = await fetch(`${origin}/api/graphs/${bigGraph.id}/context?question=port+note&budget=100000`).then(response => ({ body: response.json() })).then(async r => ({ body: await r.body }));
+  const whole = await fetch(`${origin}/api/graphs/${bigGraph.id}/context?question=port+note&budget=100000`, { headers: auth }).then(response => ({ body: response.json() })).then(async r => ({ body: await r.body }));
   assert.equal(pages.join('\n'), whole.body.context.text);
 });
 
