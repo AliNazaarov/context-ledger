@@ -291,3 +291,8 @@ Next steps:
 
 1. The console (U1, PR #22) reads a `grounding` field on nodes. Once both are merged, point its `nodeMark` at the graph's `quotedNodeIds` and `inferredNodeIds`.
 2. The mark is a floor, like the latent check: a label that only shares one content word with its line is quoted. A stricter check (all content words, or an exact quote field on the node) would be a new card with its own eval.
+## Current checkpoint — I3 Codex agent-to-agent messages (2026-11-17)
+
+Branch `ruslan/i3-codex-agent-messages`. Codex messages between agents are now imported as turns with role `agent`, `author` and `recipient`, from both the `response_item` `agent_message` form and the rollout's `inter_agent_communication` form. Encrypted content is never stored. The browser, the CLI hand-off and `session_read` show "agent <author> to <recipient>", with the paths escaped. A Codex file imported before I3 gains its agent turns when it is imported again.
+
+Next owner: this branch and I2 (#33) both change `importTranscript` in `src/store.mjs`; whichever merges second must keep I2's skip report and I3's refresh.
