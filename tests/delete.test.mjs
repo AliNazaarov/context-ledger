@@ -430,11 +430,13 @@ test('ledger delete sends one DELETE with the local Origin, and prints only fixe
 
 test('the MCP adapter has no way to delete', async () => {
   const { toolList } = await import('../src/mcp/tools.mjs');
-  // The same thirteen tools as before this card.
+  // The thirteen tools from before P1d, and G11's read-only graph_diff.
   assert.deepEqual(toolList.map(tool => tool.name), ['session_search', 'session_read', 'graph_schema', 'graph_publish', 'graph_read',
-    'context_for', 'room_open', 'room_read', 'latent_read', 'latent_transfer', 'latent_team', 'graph_list', 'room_list']);
+    'context_for', 'room_open', 'room_read', 'latent_read', 'latent_transfer', 'latent_team', 'graph_list', 'room_list', 'graph_diff']);
   for (const tool of toolList) {
-    assert.doesNotMatch(JSON.stringify(tool), /delet|remov|purg|eras/iu, tool.name);
+    // graph_diff is read-only: it reports the nodes a newer graph no longer has.
+    const text = JSON.stringify(tool).replace('nodes added, removed and changed', 'nodes added, dropped and changed');
+    assert.doesNotMatch(text, /delet|remov|purg|eras/iu, tool.name);
   }
   const directory = new URL('../src/mcp/', import.meta.url);
   for (const name of await readdir(directory)) {
