@@ -330,3 +330,9 @@ Next steps:
 Branch `ruslan/i2-tolerant-jsonl`. A transcript line that is not JSON no longer rejects the whole import. The parser skips it, and `POST /api/import` returns `skipped: { count, lines }` (the first ten line numbers) beside the session. The browser shows "Partially imported", with the counts. Messages keep their line numbers in the file, so citations stay true. A file with no readable line is still refused with `Invalid JSONL at line N.`
 
 Next owner: the skip count is not stored, so a reopened session does not show it. Add it with P1's storage work. No schema change was made here.
+
+## Current checkpoint — I1 large-file import (2026-11-17)
+
+Branch `ruslan/i1-file-import`, stacked on I2 (#33). `npm run --silent ledger -- import --provider claude|codex <file.jsonl>` reads the file as a stream and writes the session into `CONTEXT_LEDGER_DB` (or the server's default) with the same ID and messages as a browser import of the same file. It works with or without the server running. Lines over 64 MiB are skipped and counted. More than 64 MiB of message text is refused, because a session is still one row. The browser names the command when a file is too large for it.
+
+Next owner: when P1 stores one row per message, lift the 64 MiB message-text limit.

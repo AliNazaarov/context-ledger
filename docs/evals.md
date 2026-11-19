@@ -1830,3 +1830,43 @@ All tests use synthetic transcripts.
   - (low) Citations were not tested. A graph citing a kept line by its file number is accepted, and one citing a skipped line is refused.
 - **Codex, round 2** (of af581a9): the four fixes are complete. One low finding: comparing whole session lists can fail when other browser workers import at the same time. The test now checks that neither rejected file is stored under its own session ID.
 - **Left for P1:** after reopening a partially imported session, nothing says lines were skipped. Keeping that needs a stored count, which is a schema change; P1 owns the storage redesign, so I2 adds none.
+
+## I1 — Large-file import from a file path (defined 2026-11-17, before implementation)
+
+Real data: 16% of Claude Code sessions are larger than the 8 MiB limit on an HTTP request, mostly because of long tool output that the importer drops anyway. I1 adds an explicit command, `npm run ledger -- import --provider claude|codex <file.jsonl>`. It reads the file as a stream, line by line, and writes the session straight into the ledger database (`CONTEXT_LEDGER_DB`, or the same default as the server), whether or not the server is running. The raw file is never held in memory whole. Nothing is collected in the background: the user names the file.
+
+All tests use synthetic transcripts.
+
+### What is tested and the expected result
+
+- **Same session as the browser.** For the same file, the command stores exactly what the browser import stores: the same session ID (SHA-256 of the provider, a NUL and the decoded text), title, messages, line numbers and skip report. Checked on files with CRLF line ends, a byte-order mark, blank lines, no final line break, unreadable lines (I2), and multi-byte characters split across read chunks. Importing a file both ways gives one session.
+- **Larger than 8 MiB.** A synthetic Claude Code file of more than 20 MiB, mostly tool output, imports and keeps its user and assistant messages with their line numbers.
+- **Long lines.** A single line of several MiB, read in many chunks, is parsed as one line. A line longer than 64 MiB (in UTF-8 bytes) is skipped and counted like an unreadable line, without being joined in memory.
+- **Bounded sessions.** More than 64 MiB of messages in one file, counted as stored in UTF-8 bytes, is refused with a clear message, since one session is still one database row until P1.
+- **Refusals.** A missing file, a folder, a file with nothing readable, or a provider other than claude or codex is refused with a short message and exit code 1, and nothing is stored. Errors never echo the path or the file's text.
+- **Output.** The command prints the session summary (and the skip report, if any) as escaped JSON, like `search`.
+- **The browser points to it.** A file of 8 MiB or more, or one whose request would pass 8 MiB once quoted as JSON, is refused in the browser with a message that names the command.
+- **Shared database.** The CLI and a running server importing the same file at the same moment give one session.
+
+### Acceptance for the code
+
+- `node --test tests/*.test.mjs` and `npx playwright test` pass, with the cases above in `tests/import-file.test.mjs`.
+- No new dependency and no schema change.
+
+### I1 results (2026-11-17)
+
+- `tests/import-file.test.mjs` 14 (plus a FIFO case that runs only off Windows) and the library browser spec 7/7.
+- **Codex, round 1:** no high findings; four medium and three low:
+  - (medium) It reported that the Codex parity fixture lacked `payload.type: 'message'`. It does have it, and the case passed; a test now checks its kept and skipped lines explicitly.
+  - (medium) A file with no line break could build one string until V8's limit. Lines are now kept as fragments, joined once, and a line over 64 MiB is skipped and counted without being joined.
+  - (medium) Every skipped line number was kept, and a huge first message was spread into an array for its title. Only the count and the first ten line numbers are kept now. The title is read only as far as it needs, and a test checks it matches the old rule. More than 64 MiB of message text is refused.
+  - (medium) `parseArgs` errors could print a raw option, and a database that failed to open could print its path. Both now give fixed messages, and every CLI error line is escaped.
+  - (low) A FIFO was opened before the check. The path is now checked first, the descriptor again after opening, and closing never hides the first error.
+  - (low) There was no test of the CLI and a running server on one database. One now imports the same file both ways at once and finds one session.
+  - (low) A file under 8 MiB could still be too large once quoted. The browser now measures the request and shows the same hint, since the server refuses it before reading and the browser would only see a failed fetch.
+- **Codex, round 2** (of b7baa96): the round 1 fixes hold, with two medium and three low findings:
+  - (medium) Both 64 MiB limits counted UTF-16 code units, so CJK text could pass them at about 72 MiB. Both now count UTF-8 bytes, with tests on wide characters.
+  - (medium) Many tiny messages were bounded only by their text. The budget now counts each message as stored, with its role, line and JSON syntax.
+  - (low) The browser hint said the file itself was 8 MiB or more, and read the provider after an await. It now says the import is over the browser's 8 MiB limit, with the provider taken at submit time.
+  - (low) CLI error lines kept line breaks and joiners. Every message other than the usage text is now escaped onto one line by `terminalLine` in `src/text.mjs`.
+  - (low) The shared-database test cannot force both writers past the duplicate check at once. Not changed: the store is synchronous within a process, SQLite serialises writers across processes, and the insert is `ON CONFLICT (id) DO NOTHING`, so the race ends in one row by construction.

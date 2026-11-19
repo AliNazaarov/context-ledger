@@ -1,10 +1,11 @@
 import { constants, open } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { handoffMarkdown } from './handoff.mjs';
-import { terminalJson } from './text.mjs';
+import { terminalJson, terminalLine } from './text.mjs';
 import { clientToken } from './token.mjs';
 
 const usage = 'Usage: npm run ledger -- search [--provider claude|codex] [--project <slug>] [query]\n' +
+  '       npm run ledger -- import --provider claude|codex <file.jsonl>\n' +
   '       npm run ledger -- handoff <session-id>\n' +
   '       npm run ledger -- delete <session-id>\n' +
   '       npm run ledger -- graph publish <packet.json>\n' +
@@ -33,6 +34,19 @@ function command(argv) {
     if (values.provider) query.set('provider', values.provider);
     if (project) query.set('project', project);
     return { action, path: '/api/sessions?' + query };
+  }
+  if (action === 'import') {
+    let parsed;
+    try {
+      parsed = parseArgs({ args, options: { provider: { type: 'string' } }, allowPositionals: true });
+    } catch {
+      // parseArgs quotes the bad option in its message, so print the usage instead.
+      throw new Error(usage);
+    }
+    const { values, positionals } = parsed;
+    if (!['claude', 'codex'].includes(values.provider)) throw new Error('Provider must be claude or codex.');
+    if (positionals.length !== 1) throw new Error(usage);
+    return { action, provider: values.provider, filePath: positionals[0] };
   }
   if (action === 'login' && args.length === 0) return { action, path: '/api/login', login: true };
   if (action === 'handoff' && args.length === 1 && /^[a-f0-9]{64}$/.test(args[0])) {
@@ -83,8 +97,34 @@ const exposedToken = 'The Context Ledger access token file can be read by other 
 const refusedToken = 'Context Ledger refused the access token. Check that PORT and CONTEXT_LEDGER_DB match the running ledger.';
 const tokenForOtherPort = other => `The Context Ledger access token is for the ledger on port ${other}, so it was not sent. Set PORT to ${other}, or use the CONTEXT_LEDGER_DB of the ledger on this port.`;
 
+/**
+ * Card I1: import a transcript file straight into the ledger database, read as a stream,
+ * so files over the 8 MiB HTTP limit can be imported. The server need not be running.
+ */
+async function importFile(provider, filePath) {
+  const { openStore, InputError } = await import('./store.mjs');
+  let store;
+  try {
+    store = openStore(process.env.CONTEXT_LEDGER_DB ?? '.context-ledger/ledger.sqlite');
+  } catch {
+    // The underlying error names the database path, so it is not shown.
+    throw new Error('Cannot open the ledger database.');
+  }
+  try {
+    const { skipped, ...session } = await store.importTranscriptFile({ provider, path: filePath });
+    console.log(terminalJson(skipped ? { session, skipped } : { session }));
+  } catch (error) {
+    // Store messages are fixed sentences; anything else may carry a path, so it is not shown.
+    throw error instanceof InputError ? error : new Error('Import failed.');
+  } finally {
+    try { store.close(); } catch { /* the import result or error above is what matters */ }
+  }
+}
+
 async function main() {
-  const { action, path, packetPath, login, sessionId } = command(process.argv.slice(2));
+  const { action, path, packetPath, login, sessionId, provider, filePath } = command(process.argv.slice(2));
+  // Card I1: a file import opens the database itself, so it needs no running server or token.
+  if (action === 'import') return importFile(provider, filePath);
   const port = Number(process.env.PORT ?? 4317);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT.');
   const origin = `http://127.0.0.1:${port}`;
@@ -169,6 +209,8 @@ async function main() {
 }
 
 main().catch(error => {
-  console.error(error.message);
+  // The usage text is ours and spans lines; any other message is escaped onto one line, in
+  // case it ever carries text from the command line or a file.
+  console.error(error.message === usage ? usage : terminalLine(error.message));
   process.exitCode = 1;
 });

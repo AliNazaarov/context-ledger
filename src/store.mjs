@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { constants, mkdirSync } from 'node:fs';
+import { open, stat } from 'node:fs/promises';
 import { basename, dirname, win32 } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { graphContext } from './context.mjs';
@@ -86,8 +87,15 @@ function lineKey(sessionId, line, rawLine) {
   return 'h:' + createHash('sha256').update(`${sessionId}\0${line}\0`).update(rawLine).digest('hex').slice(0, 32);
 }
 
+// Card I1: what one session may hold, in UTF-8 bytes. The message budget counts each
+// message as stored (text, role, line and JSON syntax), so it bounds many small messages
+// as well as a few large ones. A line longer than the line limit is skipped like an
+// unreadable one, before it is ever joined.
+export const maxMessageBytes = 64 * 1024 * 1024;
+export const maxLineBytes = 64 * 1024 * 1024;
+
 /**
- * The supported messages of a transcript, each with its stable key: u:<uuid> for the
+ * The supported messages of a transcript, each with its stable key (P1c): u:<uuid> for the
  * first Claude record with a given UUID, otherwise a line-hash key, so a turn without a
  * UUID, or one that repeats a UUID, keeps its line and gets a key of its own.
  *
@@ -95,42 +103,155 @@ function lineKey(sessionId, line, rawLine) {
  * writing) is skipped and counted instead of rejecting the whole file. Messages keep their
  * line numbers in the file, so citations stay true. A file with no readable line at all is
  * still refused, since it is not JSONL.
+ *
+ * Card I1: the parser takes one line at a time, so a file can be read as a stream. A file's
+ * session ID is its hash, known only at the end, so until then a message that needs a
+ * line-hash key keeps its raw line, and finish() computes the keys.
  */
-function parseTranscript(transcript, provider, sessionId) {
+function transcriptParser(provider) {
   const messages = [];
-  const skipped = [];
+  // The count covers every skipped line; only the first few line numbers are kept.
+  const skipped = { count: 0, lines: [] };
+  const skip = line => {
+    skipped.count += 1;
+    if (skipped.lines.length < skippedLinesShown) skipped.lines.push(line);
+  };
   const uuids = new Set();
   let readable = 0;
-  for (const [index, rawLine] of transcript.split('\n').entries()) {
-    const line = index + 1;
-    const value = rawLine.trim();
-    if (!value) continue;
+  let line = 0;
+  let bytes = 0;
+  return {
+    /** One line of the file, in order, without its line break. */
+    add(rawLine) {
+      line += 1;
+      const value = rawLine.trim();
+      if (!value) return;
 
-    let record;
-    try {
-      record = JSON.parse(value);
-    } catch {
-      skipped.push(line);
-      continue;
-    }
-    readable += 1;
-    const message = messageAt(record, provider, line);
-    if (!message) continue;
-    const uuid = provider === 'claude' ? record.uuid : undefined;
-    // UUIDs compare without case, so a repeat in another spelling is still a repeat.
-    const fresh = typeof uuid === 'string' && uuidPattern.test(uuid) && !uuids.has(uuid.toLowerCase());
-    if (fresh) uuids.add(uuid.toLowerCase());
-    messages.push({ ...message, key: fresh ? 'u:' + uuid : lineKey(sessionId, line, rawLine) });
+      let record;
+      try {
+        record = JSON.parse(value);
+      } catch {
+        skip(line);
+        return;
+      }
+      readable += 1;
+      const message = messageAt(record, provider, line);
+      if (!message) return;
+      bytes += Buffer.byteLength(JSON.stringify(message), 'utf8') + 1;
+      if (bytes > maxMessageBytes) {
+        throw new InputError('This transcript has more than 64 MiB of messages, more than one session can hold.');
+      }
+      const uuid = provider === 'claude' ? record.uuid : undefined;
+      // UUIDs compare without case, so a repeat in another spelling is still a repeat.
+      const fresh = typeof uuid === 'string' && uuidPattern.test(uuid) && !uuids.has(uuid.toLowerCase());
+      if (fresh) uuids.add(uuid.toLowerCase());
+      messages.push(fresh ? { ...message, key: 'u:' + uuid } : { ...message, rawLine });
+    },
+    /** A line too long to read; it counts as unreadable. */
+    skipLine() {
+      line += 1;
+      skip(line);
+    },
+    /** The messages with their keys, once the session ID is known. */
+    finish(sessionId) {
+      if (readable === 0 && skipped.count) throw new InputError(`Invalid JSONL at line ${skipped.lines[0]}.`);
+      if (messages.length === 0) throw new InputError('No supported conversation messages found.');
+      const keyed = messages.map(({ rawLine, ...message }) => (
+        rawLine === undefined ? message : { ...message, key: lineKey(sessionId, message.line, rawLine) }
+      ));
+      return { messages: keyed, skipped };
+    },
+  };
+}
+
+function parseTranscript(transcript, provider, sessionId) {
+  const parser = transcriptParser(provider);
+  for (const rawLine of transcript.split('\n')) parser.add(rawLine);
+  return parser.finish(sessionId);
+}
+
+/**
+ * Card I1: parse a transcript file as a stream, so a file far larger than the 8 MiB HTTP
+ * limit never sits in memory whole. The text is decoded the way a browser File.text()
+ * decodes it (UTF-8, a leading byte-order mark dropped, bad bytes replaced), so the
+ * session ID matches a browser import of the same file.
+ */
+async function parseTranscriptFile(path, provider, { lineLimit = maxLineBytes } = {}) {
+  const unreadable = () => new InputError('Cannot read the transcript file.');
+  const notAFile = () => new InputError('The transcript must be a regular file.');
+  // The path is checked before it is opened, so a FIFO or device is never opened; the
+  // descriptor is checked again in case the path was swapped in between.
+  let info;
+  try {
+    info = await stat(path);
+  } catch {
+    throw unreadable();
   }
+  if (!info.isFile()) throw notAFile();
 
-  if (readable === 0 && skipped.length) throw new InputError(`Invalid JSONL at line ${skipped[0]}.`);
-  if (messages.length === 0) throw new InputError('No supported conversation messages found.');
-  return { messages, skipped };
+  let file;
+  try {
+    file = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  } catch {
+    throw unreadable();
+  }
+  const closeQuietly = () => file.close().catch(() => {});
+
+  const hash = createHash('sha256').update(`${provider}\0`);
+  const parser = transcriptParser(provider);
+  const decoder = new TextDecoder('utf-8');
+  // The current line, as fragments joined once it ends; dropped if it passes the limit.
+  let fragments = [];
+  let length = 0;
+  let tooLong = false;
+  const append = piece => {
+    if (tooLong || !piece) return;
+    length += Buffer.byteLength(piece, 'utf8');
+    if (length > lineLimit) {
+      tooLong = true;
+      fragments = [];
+    } else {
+      fragments.push(piece);
+    }
+  };
+  const endLine = () => {
+    if (tooLong) parser.skipLine();
+    else parser.add(fragments.join(''));
+    fragments = [];
+    length = 0;
+    tooLong = false;
+  };
+  const take = text => {
+    hash.update(text);
+    let start = 0;
+    for (let end = text.indexOf('\n'); end !== -1; end = text.indexOf('\n', start)) {
+      append(text.slice(start, end));
+      endLine();
+      start = end + 1;
+    }
+    append(text.slice(start));
+  };
+  try {
+    if (!(await file.stat()).isFile()) throw notAFile();
+    try {
+      for await (const chunk of file.createReadStream({ autoClose: false })) take(decoder.decode(chunk, { stream: true }));
+    } catch (error) {
+      throw error instanceof InputError ? error : unreadable();
+    }
+  } catch (error) {
+    throw error instanceof InputError ? error : unreadable();
+  } finally {
+    await closeQuietly();
+  }
+  take(decoder.decode());
+  endLine();
+  const id = hash.digest('hex');
+  return { id, ...parser.finish(id) };
 }
 
 function withSkipped(summary, skipped) {
-  if (!skipped.length) return summary;
-  return { ...summary, skipped: { count: skipped.length, lines: skipped.slice(0, skippedLinesShown) } };
+  if (!skipped.count) return summary;
+  return { ...summary, skipped: { count: skipped.count, lines: skipped.lines } };
 }
 
 function sourceName(source) {
@@ -161,8 +282,22 @@ const whereClause = conditions => (conditions.length ? `WHERE ${conditions.join(
 
 function titleFor(messages) {
   const first = messages.find(message => message.role === 'user') ?? messages[0];
-  // Cut by code point so a title never ends in half of a surrogate pair.
-  return Array.from(first.text.trim().replace(/\s+/gu, ' ')).slice(0, 120).join('');
+  // The first 120 code points with runs of white space as one space, read only as far as
+  // needed, so a title never ends in half of a surrogate pair and a huge message is not copied.
+  const title = [];
+  let space = false;
+  for (const character of first.text.trim()) {
+    if (/\s/u.test(character)) {
+      space = true;
+      continue;
+    }
+    if (space) title.push(' ');
+    space = false;
+    if (title.length >= 120) break;
+    title.push(character);
+    if (title.length >= 120) break;
+  }
+  return title.join('');
 }
 
 function serializeGraphPacket(packet) {
@@ -285,6 +420,35 @@ export function openStore(path) {
     throw error;
   }
 
+  function save(id, provider, name, project, { messages, skipped }) {
+    const existing = getSummary.get(id);
+    if (existing) return withSkipped(existing, skipped);
+
+    const title = titleFor(messages);
+    const searchText = [title, ...messages.map(message => message.text)].join('\n').toLowerCase();
+    database.exec('BEGIN IMMEDIATE');
+    let pending = true;
+    try {
+      // Another process may have stored the same bytes since the check above.
+      const stored = getSummary.get(id);
+      if (stored) return withSkipped(stored, skipped);
+      insertProject.run(randomBytes(16).toString('hex'), project, project);
+      // Rows first: the foreign key is deferred, and a session inserted with rows
+      // already in place is left alone by the trigger for older builds.
+      for (const [seq, message] of messages.entries()) {
+        insertMessage.run(id, seq, message.line, message.role, JSON.stringify(message.text), message.key);
+      }
+      const copy = messages.map(({ role, text, line }) => ({ role, text, line }));
+      insert.run(id, provider, name, title, messages.length, JSON.stringify(copy), searchText, projectId.get(project).id);
+      database.exec('COMMIT');
+      pending = false;
+    } finally {
+      if (pending) database.exec('ROLLBACK');
+    }
+    return withSkipped(getSummary.get(id), skipped);
+  }
+
+
   return {
     /**
      * Stores a transcript in a project (the default one when none is named), creating
@@ -301,32 +465,21 @@ export function openStore(path) {
       if (!isProjectSlug(project)) throw new InputError('P' + projectSlugRule.slice(1));
       const id = createHash('sha256').update(`${provider}\0`).update(transcript).digest('hex');
       // Parsed before the duplicate check, so a repeated import reports the same skipped lines.
-      const { messages, skipped } = parseTranscript(transcript, provider, id);
-      const existing = getSummary.get(id);
-      if (existing) return withSkipped(existing, skipped);
+      return save(id, provider, name, project, parseTranscript(transcript, provider, id));
+    },
 
-      const title = titleFor(messages);
-      const searchText = [title, ...messages.map(message => message.text)].join('\n').toLowerCase();
-      database.exec('BEGIN IMMEDIATE');
-      let open = true;
-      try {
-        // Another process may have stored the same bytes since the check above.
-        const stored = getSummary.get(id);
-        if (stored) return withSkipped(stored, skipped);
-        insertProject.run(randomBytes(16).toString('hex'), project, project);
-        // Rows first: the foreign key is deferred, and a session inserted with rows
-        // already in place is left alone by the trigger for older builds.
-        for (const [seq, message] of messages.entries()) {
-          insertMessage.run(id, seq, message.line, message.role, JSON.stringify(message.text), message.key);
-        }
-        const copy = messages.map(({ role, text, line }) => ({ role, text, line }));
-        insert.run(id, provider, name, title, messages.length, JSON.stringify(copy), searchText, projectId.get(project).id);
-        database.exec('COMMIT');
-        open = false;
-      } finally {
-        if (open) database.exec('ROLLBACK');
-      }
-      return withSkipped(getSummary.get(id), skipped);
+    /**
+     * Card I1: import a transcript file by path, read as a stream; see parseTranscriptFile.
+     * Like importTranscript, it stores into the named project or the default one.
+     */
+    async importTranscriptFile(input, options) {
+      const { provider, path } = input ?? {};
+      const project = input?.project ?? defaultProject;
+      if (!isProvider(provider)) throw new InputError('Choose Claude Code or Codex as the provider.');
+      const name = sourceName(path);
+      if (!isProjectSlug(project)) throw new InputError('P' + projectSlugRule.slice(1));
+      const { id, ...parsed } = await parseTranscriptFile(path, provider, options);
+      return save(id, provider, name, project, parsed);
     },
 
     list(query, provider, project) {

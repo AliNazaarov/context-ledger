@@ -36,7 +36,7 @@ function renderRows(container, entries, createRow) {
 async function request(path, options) {
   const response = await fetch(path, options);
   const body = await response.json();
-  if (!response.ok) throw new Error(body.error || `Request failed (${response.status}).`);
+  if (!response.ok) throw Object.assign(new Error(body.error || `Request failed (${response.status}).`), { status: response.status });
   return body;
 }
 
@@ -167,20 +167,29 @@ importForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const file = transcriptFile.files[0];
   if (!file || importButton.disabled) return;
+  const provider = sourceAgent.value;
+  const tooLarge = () => "Import failed. This import is over the browser's 8 MiB limit; import it with: npm run ledger -- import --provider "
+    + `${provider} <file>`;
   if (file.size >= maxImportBytes) {
-    importStatus.textContent = 'Import failed. Choose a transcript smaller than 8 MiB.';
+    importStatus.textContent = tooLarge();
     return;
   }
-  const provider = sourceAgent.value;
   const readerAtImport = readerRequest;
   importButton.disabled = true;
   importStatus.textContent = 'Importing transcript…';
 
   try {
+    const body = JSON.stringify({ provider, source: file.name, transcript: await file.text() });
+    // A file under 8 MiB can still make a larger request once it is quoted as JSON. The
+    // server refuses that before reading it, which the browser sees as a failed fetch.
+    if (new Blob([body]).size > maxImportBytes) {
+      importStatus.textContent = tooLarge();
+      return;
+    }
     const { session, skipped } = await request('/api/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider, source: file.name, transcript: await file.text() }),
+      body,
     });
     if (transcriptFile.files[0] === file) transcriptFile.value = '';
     importStatus.textContent = importNote(session, skipped);
@@ -188,7 +197,7 @@ importForm.addEventListener('submit', async (event) => {
     if (readerRequest === readerAtImport) await openTranscript(session.id);
     await refresh;
   } catch (error) {
-    importStatus.textContent = `Import failed. ${error.message}`;
+    importStatus.textContent = error.status === 413 ? tooLarge() : `Import failed. ${error.message}`;
   } finally {
     importButton.disabled = false;
   }

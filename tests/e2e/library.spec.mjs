@@ -127,3 +127,20 @@ test('I2: an import with unreadable lines keeps the readable messages and says w
   await expect(page.getByText('Partially imported cygnus.jsonl: kept 2 messages, skipped 2 unreadable lines (2, 4). Messages on those lines are missing.', { exact: true })).toBeVisible();
   await expect(page.getByText('Line 3', { exact: true })).toBeVisible();
 });
+
+test('I1: a transcript of 8 MiB or more is refused in the browser with the command that imports it', async ({ page }) => {
+  await page.goto('/');
+  await page.getByLabel('Source agent').selectOption('codex');
+  await page.getByLabel('Transcript file').setInputFiles({ name: 'huge.jsonl', mimeType: 'application/x-ndjson', buffer: Buffer.alloc(8 * 1024 * 1024, 0x20) });
+  await page.getByRole('button', { name: 'Import transcript' }).click();
+  await expect(page.getByText("Import failed. This import is over the browser's 8 MiB limit; import it with: npm run ledger -- import --provider codex <file>", { exact: true })).toBeVisible();
+});
+
+test('I1 review: a file under 8 MiB that is too large once quoted gets the same command hint', async ({ page }) => {
+  await page.goto('/');
+  await page.getByLabel('Source agent').selectOption('claude');
+  // Every quote doubles when the file is sent as JSON, so 5 MiB of quotes is a 10 MiB request.
+  await page.getByLabel('Transcript file').setInputFiles({ name: 'quotes.jsonl', mimeType: 'application/x-ndjson', buffer: Buffer.alloc(5 * 1024 * 1024, 0x22) });
+  await page.getByRole('button', { name: 'Import transcript' }).click();
+  await expect(page.getByText("Import failed. This import is over the browser's 8 MiB limit; import it with: npm run ledger -- import --provider claude <file>", { exact: true })).toBeVisible();
+});
