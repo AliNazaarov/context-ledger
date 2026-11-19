@@ -1598,3 +1598,19 @@ Source: issue #48 and Ali's choices (2026-11-18): the vendor pixel sprites inste
   - (low) The laptop hid the sprite's face. It sits lower now.
   - (low) A JSDoc comment was in the wrong place after the move. It is fixed.
 - **Suites (macOS, Node 26):** node 248/249. The one failure is `malformed transport input…` in `tests/mcp.test.mjs`, which fails the same way on `ruslan/console-v0`. Playwright 21/21. `npm run -s test:graph` passes.
+
+## P3 — Reviewer UI prototype (defined 2026-11-18, before implementation)
+
+Source: issue #48. A person can approve, edit or reject a node beside its evidence. It is a prototype: Ruslan decides what each action means (who may approve, whether an edit makes a new version, what a reject keeps), so nothing here writes to the ledger. It is shown only in the console's demo mode (`/console/?demo`), on the synthetic recording.
+
+Terms: a **review** is one person's decision on one node of one graph snapshot, keyed by graph ID and node ID. A new publish of the party is a new graph ID and so starts unreviewed. That is the simplest reading, and it is Ruslan's to change.
+
+| Eval | Expected |
+| --- | --- |
+| Demo only | In demo mode the evidence panel shows a Review block once a node is open: **Approve**, **Edit**, **Reject**, and a line saying the decision stays in this browser and is a prototype. In live mode there is no Review block and no review code runs. |
+| Approve and reject | Approve or Reject marks the node: the word "approved" or "rejected" in the node's meta and its `aria-label`, plus a class for the colour. The panel says what was decided, with an **Undo** button that clears it. A rejected node keeps its label, struck through. |
+| Edit | Edit opens a text box holding the current label. Save keeps the new text (trimmed, 1 to 300 characters, no control or format characters) as the node's shown label, with "edited" in its meta. The evidence panel shows the original label too. Cancel or an empty save changes nothing. The new label is set with `textContent`. |
+| Browser only | Reviews are kept in `localStorage` under one key, and the page still sends only GET requests. A stored value that is not valid JSON, has the wrong shape, or names an unknown decision is ignored, not thrown. If `localStorage` throws (private mode), reviewing still works for the session. |
+| Survives a replay and a reload | Reviews stay after **Replay demo** and after a page reload, because the recording's graph IDs do not change. |
+| Keyboard | Every review control is a button reachable by Tab. After a decision, focus stays in the Review block. |
+| Tests | Node tests for the store (save, undo, edit rules, bad stored data, a throwing storage). A Playwright test approves, edits and rejects three demo nodes, reloads, sees all three, undoes one, checks that live mode has no Review block, and saves a screenshot. |
