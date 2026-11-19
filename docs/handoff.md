@@ -259,6 +259,15 @@ Next steps:
 1. **The 60-second recording (raw material for U3) is for a person to make.** Run `npm start`, open `http://127.0.0.1:4317/console/?demo&autoplay=0` in a 1440×900 window, start a screen recorder, click **Play demo**, wait for "Demo finished" (34 s), then click "The ledger stays on port 4317" to open its proof, and stop at about 60 s.
 2. A human review of the PR. It touches no security, export or signing code, but it does add static routes to the server.
 3. When G7 lands, give the quoted and inferred marks a field name and check the colours in the console.
+## Current checkpoint — U2 brand and mascot (2026-11-17)
+
+Branch `ruslan/u2-brand-mascot`. [docs/brand/brand.md](brand/brand.md) is the brand guide: the CTM site's colours (Deep Charcoal, Electric Violet, Acid Lime, Paper), with light (console) and dark (site, video) sets in [tokens.css](brand/tokens.css), each pair checked for WCAG AA contrast. It also sets the quoted and inferred mark colours, the type stacks, and Pip, an original mascot in three poses for the console's idle, working and waiting agents. `tests/brand.test.mjs` checks the colours, the contrast and the SVG rules.
+
+Next steps:
+
+1. Someone on the team signs off on Pip's look.
+2. Once U1 (PR #22) is merged, swap the office module's placeholder figure for the three Pip SVGs by state, and use the tokens in the console's CSS.
+3. U3 (the demo video) can use Pip and the dark set.
 
 ## Current checkpoint — H7 Windows deadline flake (2026-11-17)
 
