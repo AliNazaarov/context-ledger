@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { constants, open } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { handoffMarkdown } from './handoff.mjs';
@@ -10,7 +11,8 @@ const usage = 'Usage: npm run ledger -- search [--provider claude|codex] [--proj
   '       npm run ledger -- delete <session-id>\n' +
   '       npm run ledger -- graph publish <packet.json>\n' +
   '       npm run ledger -- graph read <graph-id>\n' +
-  '       npm run ledger -- login';
+  '       npm run ledger -- login\n' +
+  '       npm run ledger -- import-t3 <copy-of-statev2.sqlite> [--thread <id>] [--list]';
 const maxGraphPacketBytes = 8 * 1024 * 1024;
 
 function command(argv) {
@@ -121,12 +123,143 @@ async function importFile(provider, filePath) {
   }
 }
 
-async function main() {
-  const { action, path, packetPath, login, sessionId, provider, filePath } = command(process.argv.slice(2));
-  // Card I1: a file import opens the database itself, so it needs no running server or token.
-  if (action === 'import') return importFile(provider, filePath);
+function ledgerPort() {
   const port = Number(process.env.PORT ?? 4317);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT.');
+  return port;
+}
+
+// A server message is shown only when it is short, fixed-looking text.
+function serverProblem(problem) {
+  if (typeof problem?.error === 'string' && problem.error.length <= 160 && !/\p{C}/u.test(problem.error)) return problem.error;
+}
+
+// Messages the store can give for an import (src/store.mjs). Any other text from the
+// server is replaced by a fixed sentence, so the CLI never prints what it did not write.
+const knownImportProblems = new Set([
+  'No supported conversation messages found.',
+  'Invalid transcript file name.',
+  'Transcript must be JSONL text.',
+]);
+
+/** One import request. Returns { session }, { refused }, or { lost, reached } when the outcome is unknown. */
+async function postImport(port, request, maxBytes, auth) {
+  const origin = `http://127.0.0.1:${port}`;
+  const body = JSON.stringify(request);
+  if (Buffer.byteLength(body) > maxBytes) return { refused: 'This T3 thread is larger than the 8 MiB import limit.' };
+  let response;
+  let text;
+  try {
+    response = await fetch(origin + '/api/import', {
+      method: 'POST',
+      headers: { ...auth, 'Content-Type': 'application/json', Origin: origin },
+      body,
+      redirect: 'error',
+      signal: AbortSignal.timeout(30000),
+    });
+    // Reading the body is part of the exchange: a drop here leaves the outcome unknown.
+    text = await response.text();
+  } catch {
+    return { lost: true, reached: response !== undefined };
+  }
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    // Handled below as an unexpected response.
+  }
+  if (response.status === 401) return { refused: refusedToken };
+  if (response.status === 413) return { refused: 'This T3 thread is larger than the 8 MiB import limit.' };
+  if (response.status === 400) {
+    const problem = data?.error;
+    return { refused: knownImportProblems.has(problem) ? problem : 'Context Ledger refused this T3 thread.' };
+  }
+  if (!response.ok) return { refused: `Context Ledger returned HTTP ${response.status}.` };
+  // The store names a session by this hash (src/store.mjs). It keeps the source of the first
+  // import of the same transcript, so the source is not compared.
+  const expectedId = createHash('sha256').update(`${request.provider}\0`).update(request.transcript).digest('hex');
+  const session = data?.session;
+  if (session?.id !== expectedId || session.provider !== request.provider || typeof session.source !== 'string') {
+    return { refused: 'Context Ledger returned an unexpected response.' };
+  }
+  return { session };
+}
+
+// Imports T3 Code threads from a copy of T3's database that the person names. Read-only;
+// the copy is never looked for (src/t3code.mjs, docs/evals.md D3).
+async function importT3(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: { thread: { type: 'string' }, list: { type: 'boolean' } },
+      allowPositionals: true,
+    });
+  } catch {
+    throw new Error(usage);
+  }
+  const { values, positionals } = parsed;
+  if (positionals.length !== 1) throw new Error(usage);
+  // Loaded here so the other commands do not load node:sqlite and print its warning.
+  const { maxImportBytes, openT3Copy, threadIdPattern } = await import('./t3code.mjs');
+  if (values.thread !== undefined && !threadIdPattern.test(values.thread)) {
+    throw new Error('A T3 thread ID is 1 to 128 letters, digits, hyphens or underscores.');
+  }
+  const port = values.list ? undefined : ledgerPort();
+  const unreachable = `Cannot reach Context Ledger on port ${port}. Start it with npm start.`;
+  // P1e: transcripts go only to the port the token file names, so they never reach a
+  // listener that is not known to be the ledger. The token is read before the first send.
+  let auth;
+  const tokenAuth = async () => {
+    const { token, otherPort, exposed } = await clientToken(port);
+    if (exposed) throw new Error(exposedToken);
+    if (token === undefined) throw new Error(otherPort !== undefined ? tokenForOtherPort(otherPort) : noToken);
+    return { Authorization: `Bearer ${token}` };
+  };
+
+  const copy = openT3Copy(positionals[0]);
+  try {
+    const threads = copy.threads(values.thread);
+    if (values.list) {
+      console.log(terminalJson(threads.map(thread => copy.summary(thread))));
+      return;
+    }
+    const imported = [];
+    const refused = [];
+    const unknown = [];
+    let answered = false;
+    for (const [index, thread] of threads.entries()) {
+      const request = copy.importRequest(thread);
+      if (!request.refusal) auth ??= await tokenAuth();
+      const result = request.refusal ? { refused: request.refusal } : await postImport(port, request, maxImportBytes, auth);
+      if (result.lost) {
+        if (!answered && !result.reached) throw new Error(unreachable);
+        // The server may have stored it before the connection dropped. Importing again is
+        // safe: the same thread gives the same session.
+        unknown.push({ thread: thread.id, unknown: 'The connection to Context Ledger was lost; this thread may not be imported.' });
+        for (const rest of threads.slice(index + 1)) unknown.push({ thread: rest.id, unknown: 'Not tried after the connection was lost.' });
+        break;
+      }
+      if (!request.refusal) answered = true;
+      if (result.session) imported.push({ thread: thread.id, agent: request.provider, session: result.session });
+      else refused.push({ thread: thread.id, refused: result.refused });
+    }
+    if (values.thread !== undefined && refused.length > 0) throw new Error(refused[0].refused);
+    console.log(terminalJson({ imported, refused, ...(unknown.length ? { unknown } : {}) }));
+    if (unknown.length > 0) console.error(unreachable + ' Run the same import again to finish; it does not import a thread twice.');
+    if (refused.length > 0 || unknown.length > 0) process.exitCode = 1;
+  } finally {
+    copy.close();
+  }
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  if (argv[0] === 'import-t3') return importT3(argv.slice(1));
+  const { action, path, packetPath, login, sessionId, provider, filePath } = command(argv);
+  // Card I1: a file import opens the database itself, so it needs no running server or token.
+  if (action === 'import') return importFile(provider, filePath);
+  const port = ledgerPort();
   const origin = `http://127.0.0.1:${port}`;
   // The token goes only to the port its file names. Without it the request still goes
   // out, so a ledger that is not running gives the "Cannot reach" message.
@@ -171,10 +304,8 @@ async function main() {
   if (response.status === 404) throw new Error(action === 'graph' ? 'Graph not found.' : 'Session not found.');
   if (!response.ok) {
     if (action === 'graph' && (response.status === 400 || response.status === 413)) {
-      const problem = await response.json().catch(() => null);
-      if (typeof problem?.error === 'string' && problem.error.length <= 160 && !/\p{C}/u.test(problem.error)) {
-        throw new Error(problem.error);
-      }
+      const message = serverProblem(await response.json().catch(() => null));
+      if (message) throw new Error(message);
     }
     if (action === 'delete' && response.status === 409) {
       // Built from the count alone, so no text from the server reaches the terminal.

@@ -336,3 +336,18 @@ Next owner: the skip count is not stored, so a reopened session does not show it
 Branch `ruslan/i1-file-import`, stacked on I2 (#33). `npm run --silent ledger -- import --provider claude|codex <file.jsonl>` reads the file as a stream and writes the session into `CONTEXT_LEDGER_DB` (or the server's default) with the same ID and messages as a browser import of the same file. It works with or without the server running. Lines over 64 MiB are skipped and counted. More than 64 MiB of message text is refused, because a session is still one row. The browser names the command when a file is too large for it.
 
 Next owner: when P1 stores one row per message, lift the 64 MiB message-text limit.
+
+## Current checkpoint — D3 T3 Code thread importer (2026-11-17)
+
+Branch `ruslan/d3-t3code-importer`, cut from `main`. `npm run ledger -- import-t3 <copy> [--thread <id>] [--list]` imports T3 Code threads from a copy of T3's `statev2.sqlite` that the person makes. It opens the copy read-only, never looks for T3's files, and posts each thread to the running ledger's `/api/import`, so the existing parser and store do the work.
+
+- **Pinned layout.** T3 Code v0.1.10, commit `7d32075e3757ded707914e2450c3e392a9665765`, schema head 96, read from T3's public source only (no T3 install was used or run). The files read, the tables and the rules are in the D3 section of [the eval log](evals.md); the user guide is [docs/integrations/t3code-import.md](integrations/t3code-import.md). Any other migration history, table kind, column type or key is refused.
+- **Mapping.** A thread maps to `claude` or `codex` by the `driver` of the provider threads its runs and attempts used (`claudeAgent`, `codex`). Other agents, mixed agents, unattributed answers, subagent threads and threads without runs (V1 copies) are refused, so the sessions table keeps its two providers. Message n in T3's order is line n.
+- **Tests.** `tests/import-t3.test.mjs` builds the database at test time with `node:sqlite`; nothing `.sqlite` is committed. Codex reviewed twice; both rounds are recorded in the eval log.
+
+Next steps:
+
+1. Someone with T3 Code v0.1.10 checks the importer on a real copy with synthetic threads (eval "Still owed"). If T3 writes a column type or a migration history differently from its source, the importer refuses the copy; fix the pinned values from that copy's schema, not by loosening the check.
+2. For a newer T3 release: read its migrations from 097 on for changes to the six tables, then add its manifest and head as a second pinned layout with its own test database. Do not accept a range of heads.
+3. When PR #28 (D1 guide) merges, change its "Not built yet: an importer" bullet in `docs/integrations/t3code.md` to link to the import guide. The board row for D3 is on both branches; keep this branch's.
+4. A third provider (for Cursor and other T3 agents) needs P1's schema change; until then they are refused.

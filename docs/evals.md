@@ -1870,3 +1870,87 @@ All tests use synthetic transcripts.
   - (low) The browser hint said the file itself was 8 MiB or more, and read the provider after an await. It now says the import is over the browser's 8 MiB limit, with the provider taken at submit time.
   - (low) CLI error lines kept line breaks and joiners. Every message other than the usage text is now escaped onto one line by `terminalLine` in `src/text.mjs`.
   - (low) The shared-database test cannot force both writers past the duplicate check at once. Not changed: the store is synchronous within a process, SQLite serialises writers across processes, and the insert is `ON CONFLICT (id) DO NOTHING`, so the race ends in one row by construction.
+
+## D3 — T3 Code thread importer (defined 2026-11-17, before code)
+
+D3 imports T3 Code threads into the ledger from a copy of T3's database that the person makes. It reads the copy read-only and never looks for T3's own files. No T3 Code install was used: the layout below comes from T3's public source only, and the test database is built from that source's table definitions with synthetic threads.
+
+### Pinned release and source read
+
+- **Release:** T3 Code `v0.1.10`, commit `7d32075e3757ded707914e2450c3e392a9665765` (2026-11-16), repository `pingdotgg/t3code`. Its database schema head is migration 96, `RepairStaleTitleRegeneration`. For comparison, `v0.1.9` ends at migration 81 and `main` at `c48825322df347d266ab7465332ad490b3bf2aaf` (2026-11-18) at 98; the importer refuses both.
+- **Files read at that commit:**
+  - `apps/server/src/config.ts` (`deriveServerPaths`: the database is `<base-dir>/userdata/statev2.sqlite`)
+  - `apps/server/src/persistence/Migrations.ts` (the migration manifest, 1 to 96) and `apps/server/src/persistence/databaseMigrationHead.ts` (the schema version is the highest `migration_id` in `effect_sql_migrations`)
+  - `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts`, `Migrations/OrchestrationV2/Foundation.ts` and `Migrations/081_ProjectionMessageSearchText.ts` (the tables read and every column added later); migrations 056 to 096 were searched for other changes to those tables, and there are none
+  - `apps/server/src/orchestration-v2/ProjectionStore.ts` (how events write the thread, run, provider-thread and message rows, and that a thread's messages are read `ORDER BY created_at ASC, message_id ASC`)
+  - `apps/server/src/orchestration-v2/messageSearchIndex.ts` and `Migrations/069_ThreadMessageSearch.test.ts` (which messages T3 itself counts as conversation)
+  - `packages/contracts/src/orchestrationV2.ts` (`OrchestrationV2AppThread`, `OrchestrationV2Run`, `OrchestrationV2ProviderThread`, `OrchestrationV2ConversationMessage`), `packages/contracts/src/providerInstance.ts`, `packages/contracts/src/model.ts` (driver names) and `packages/contracts/src/baseSchemas.ts` (IDs)
+  - `docs/user/thread-migration.md` and `.agents/skills/test-t3-app/references/sqlite-fixtures.md`
+  - `.repos/effect/packages/effect/src/sql/Migrator.ts` (the Effect copy T3 vendors: the SQLite form of `effect_sql_migrations`, `migration_id integer PRIMARY KEY NOT NULL`, `name VARCHAR(255) NOT NULL`)
+
+### The layout at schema 96 (what the importer reads)
+
+- `effect_sql_migrations(migration_id, name, …)`: the schema version.
+- `orchestration_v2_projection_threads`: one row per thread; `thread_id`, `title`, `created_at`, `deleted_at`. `provider_instance_id` names a provider *instance* (a slug the person can choose), not the agent, so it is not used to pick the agent.
+- `orchestration_v2_projection_runs`: one row per run (a user turn and the agent's reply); `thread_id`, `provider_thread_id`, and in `payload_json` the `modelSelection.model` that ran it. `orchestration_v2_projection_run_attempts` also names a `provider_thread_id` per attempt.
+- `orchestration_v2_projection_provider_threads`: the agent's own conversation; `driver` is the agent kind. `claudeAgent` is Claude Code and `codex` is Codex; T3 also has `cursor`, `grok`, `kiro`, `opencode`, `pi`, `acpRegistry` and others.
+- `orchestration_v2_projection_messages`: `message_id`, `thread_id`, `run_id`, `role` (`user`, `assistant` or `system`), `streaming` (0 or 1), `created_at`, and `payload_json` with `text` and `createdBy` (`user`, `agent` or `system`; absent on older rows, which were the user's).
+
+### What the importer does
+
+- `npm run ledger -- import-t3 <copy> [--thread <id>] [--list]`. The path is always given; there is no default and no search for T3's files. A path named `statev2.sqlite` inside a folder named `userdata` is refused as T3's live database; this is a name check only, and a link to that file under another name is not caught. A copy with a non-empty `-wal` file beside it is refused, since it is not one snapshot. The file is opened with SQLite's read-only flag and `query_only`.
+- **Fail closed on the layout.** The copy must record exactly the 96 migrations of the pinned manifest, by ID and name, and each table above must be a table (not a view) with every column read, its declared type and its primary key. Anything else is refused with one fixed sentence that names the supported release.
+- **One agent per thread, checked per run.** Each run's agent is the `driver` of the provider threads named by that run and by each of its attempts. One `claudeAgent` driver across the thread maps to provider `claude`, one `codex` to `codex`. A thread is refused when another agent ran it, when more than one agent did (also when only an attempt switched), when a provider thread or driver is missing, when an assistant message has no run or its run names no provider thread, or when it has no run at all (for example a thread copied from T3 V1 without run records). A queued run that holds only the person's message needs no agent. Subagent threads (`lineage.relationshipToParent = subagent`) are refused; T3 shows them inside their parent. A fork holds only its own messages in this table (T3 adds the inherited history when it reads the thread), so only those are imported. The ledger's provider list stays Claude Code and Codex, so no schema change.
+- **Messages and line numbers.** A thread's messages are taken in T3's own order (`created_at`, then `message_id`). Message *n* in that order is line *n*, counting every message, so a cited line stays the same message even though system messages, user-role notices T3 or the agent wrote (`createdBy` other than `user`), unfinished (`streaming = 1`) and empty messages are not imported. This is T3's own rule for conversation messages: every finished assistant message counts. Line numbers belong to one snapshot: a later copy of a grown thread is a new session, in which the earlier messages keep their lines unless T3 inserted an earlier-sorting message. A final line carries the T3 thread ID, so two threads with the same text stay two sessions. The lines are written in the mapped provider's JSONL form and sent to the running ledger's `POST /api/import`, so the existing parser and store do the import. The source name is `t3-<thread-id>.jsonl`.
+- **Deleted threads** (`deleted_at` set) are not imported. Thread IDs must be 1 to 128 letters, digits, hyphens or underscores; another form is refused without being shown.
+- **Size.** The 8 MiB request limit is counted on the encoded request while the messages are read, so a larger thread is refused, in `--list` too, without being built in full or sent.
+- **Errors are fixed sentences.** No error echoes a path, an ID from the file, or message text. Server errors are replaced by the CLI's own sentences, except three fixed store messages. If the connection drops in the middle, the imports already confirmed are printed, the thread in flight and the rest are listed as unknown, and importing again finishes the job without duplicates. `--list` prints each thread's ID, agent, model names, importable message count and title through `terminalJson`, which escapes control, format and bidi characters.
+
+### Acceptance
+
+`tests/import-t3.test.mjs` builds a schema-96 database at test time in a temporary folder with `node:sqlite` (no `.sqlite` file is committed), from the `CREATE TABLE` statements of the pinned migrations, filled with synthetic threads:
+
+1. A Claude Code thread imports as provider `claude`, with the user and assistant messages in T3's order, each at the line of its position among all the thread's messages, and source `t3-<id>.jsonl`.
+2. A Codex thread imports as provider `codex` the same way.
+3. System messages, generated notices, streaming and empty messages are left out, and the lines of the messages after them do not move.
+4. Messages inserted out of `created_at` order come back in T3's order, and ties break on `message_id`.
+5. A thread run by Cursor, one run by both Claude Code and Codex, one whose run points at a missing provider thread, and one with no run are each refused with their fixed sentence.
+6. A copy at schema 81 or 98, one with the wrong name at 96, one missing a required column, an empty SQLite file and a file that is not SQLite are each refused, and the message does not contain the path.
+7. A path `…/userdata/statev2.sqlite` is refused before it is opened. The copy's bytes are unchanged after an import, and only empty SQLite side files appear beside it.
+8. Two threads with the same messages give two sessions. Importing the same copy twice gives the same session IDs.
+9. A deleted thread is not imported; `--thread` with an unknown or malformed ID is refused with a fixed sentence.
+10. The CLI posts each thread to `/api/import` on its loopback origin, prints escaped JSON, never prints text from a refused thread, and exits 1 when a thread is refused. `--list` needs no server.
+11. Message text with bidi and control characters is stored as written and printed escaped.
+
+The four suites pass. Codex reviews the change read-only against the pinned source; each finding gets a fix with a regression test, and a second round checks the fixes.
+
+### Not checked
+
+- The test database is made from T3's table definitions, not written by T3. A person with T3 Code v0.1.10 installed should make a few synthetic threads with Claude Code and Codex, quit T3, copy `statev2.sqlite`, and run the importer on the copy.
+- Opening a copy in WAL mode read-only can leave empty `-shm` and `-wal` files beside it (Node 22.14's `node:sqlite` takes no `immutable` URI). The copy itself is not changed; a test checks both.
+- A copy made while T3 runs may miss what is still in T3's `-wal` file. Quit T3 Code before copying.
+
+### D3 review (2026-11-17)
+
+- **Codex, round 1** (read-only, of 6384054): two high, five medium and one low finding, all addressed in the next commit, each with a regression test in `tests/import-t3.test.mjs`. Codex could not fetch the pinned T3 source from its sandbox, so it reviewed against the layout written here; the source-dependent claims are checked by the author only.
+  - (high) Agent attribution dropped run identity, so a thread with one Claude run and a second run with an answer but no provider thread passed as Claude. Attribution is now per run and per attempt; an answer whose run names no provider thread, or that has no run, refuses the thread; a switch recorded only in an attempt counts as two agents.
+  - (high) The layout gate checked only the head, two migration names and column names. It now checks all 96 migrations by ID and name, that each table is a table, and each column's declared type and primary key. Tests cover a gap at 50, a renamed 50, a view in place of the messages table, a messages table without its key, and a retyped `driver`.
+  - (medium) A 400 or 413 from the server could put server text on stderr. Server errors now map to the CLI's own sentences, except three fixed store messages; a test sends a path, a thread ID and U+2028 in the error.
+  - (medium) WAL side files. Node 22.14's `node:sqlite` takes no `immutable` URI (checked), so a read can still create empty `-shm` and `-wal` files. A test now checks the directory: only those two, the `-wal` empty, the copy's bytes unchanged. A copy with a non-empty `-wal` is refused. The live-path check is documented as a name check.
+  - (medium) A dropped connection lost the summary, and any string `session.id` counted as success. Confirmed imports are now printed, the thread in flight and the rest are listed as unknown, and the session ID, provider and source are checked.
+  - (medium) The size check ran after the whole thread was built. The reader now iterates rows and counts the encoded request as it goes; a test hits exactly 8 MiB and one byte over with multibyte text, quotes, a backslash and a control character, and `--list` reports the same refusal.
+  - (medium) Subagent and fork rules were not explicit, and this eval said generated notices are excluded while assistant rows bypass `createdBy`. Subagent threads are now refused; a fork imports only its own rows (T3 adds inherited history when it reads, in `ProjectionStore.ts`, `inheritedPrefix`); the eval now states T3's own rule, under which every finished assistant message counts.
+  - (low) Session identity and lines belong to one snapshot. Documented, and a test checks that a grown thread is a new session whose earlier lines are unchanged.
+- **Codex, round 2** (read-only, of b039917): the server-error and size findings are fixed; the subagent, fork and notice rules are fixed as documented; the snapshot finding is documented (its test passes on the old code too, as Codex noted). Five new findings, fixed in the next commit with a regression test each except the last:
+  - (medium) A connection that dropped inside a success body was reported as a refusal and the batch went on. The body is now read inside the transport step, so that thread and the rest are listed as unknown.
+  - (medium) A transcript already stored under another source name came back with that name and was reported as refused. The CLI now checks the session ID against the store's own hash of provider and transcript, and the provider, instead of the source.
+  - (medium) A streaming or empty assistant row without a run refused a thread whose imported answers were all attributed. Only answers that are imported need an agent now.
+  - (medium) A primary key over `message_id` and another column passed the key check. The whole key must now be the one pinned column.
+  - (low) An error other than "not found" when checking for the `-wal` file counted as no file. It now refuses the copy as unreadable. No test: a permission error on that file cannot be made portably in a test.
+- **Not reviewed again:** the round 2 fixes (commit after b039917) have no third Codex round.
+
+### D3 results (2026-11-17)
+
+- Acceptance items 1 to 11 pass in `tests/import-t3.test.mjs` (25 tests, with the review regressions), on a schema-96 database built from the pinned table definitions with synthetic threads. No `.sqlite` file is committed.
+- Suites on Windows, Node 22.14: `npm run -s test:graph` 9/9; `node --test tests/*.test.mjs` 216 passed, 1 skipped, 0 failed (217); Playwright 13/13; `runtime/` Python 192 run, 50 skipped, OK.
+- **Still owed:** a person with T3 Code v0.1.10 installed makes synthetic Claude Code and Codex threads, quits T3, copies `statev2.sqlite`, and runs `--list` and an import on the copy, recording the result here. A human review of the read-only handling and the error text.
