@@ -1,4 +1,5 @@
-import { test, expect } from '@playwright/test';
+// P1e: the fixtures send the access token and sign the page in.
+import { test, expect } from './fixtures.mjs';
 
 // P1d: the reader's Delete button. Synthetic transcripts; the e2e server has its own database.
 const transcript = text => JSON.stringify({ type: 'user', message: { role: 'user', content: text } });
