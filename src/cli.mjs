@@ -4,8 +4,9 @@ import { handoffMarkdown } from './handoff.mjs';
 import { terminalJson } from './text.mjs';
 import { clientToken } from './token.mjs';
 
-const usage = 'Usage: npm run ledger -- search [--provider claude|codex] [query]\n' +
+const usage = 'Usage: npm run ledger -- search [--provider claude|codex] [--project <slug>] [query]\n' +
   '       npm run ledger -- handoff <session-id>\n' +
+  '       npm run ledger -- delete <session-id>\n' +
   '       npm run ledger -- graph publish <packet.json>\n' +
   '       npm run ledger -- graph read <graph-id>\n' +
   '       npm run ledger -- login';
@@ -16,19 +17,29 @@ function command(argv) {
   if (action === 'search') {
     const { values, positionals } = parseArgs({
       args,
-      options: { provider: { type: 'string' } },
+      options: { provider: { type: 'string' }, project: { type: 'string', multiple: true } },
       allowPositionals: true,
     });
     if (values.provider && !['claude', 'codex'].includes(values.provider)) {
       throw new Error('Provider must be claude or codex.');
     }
+    // The same rule as the server's, checked here so a bad slug sends no request.
+    if (values.project?.length > 1) throw new Error('Give --project once.');
+    const [project] = values.project ?? [];
+    if (project !== undefined && (project.length > 64 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(project))) {
+      throw new Error('Project must be a slug of at most 64 lowercase letters, digits and single hyphens.');
+    }
     const query = new URLSearchParams({ q: positionals.join(' ') });
     if (values.provider) query.set('provider', values.provider);
+    if (project) query.set('project', project);
     return { action, path: '/api/sessions?' + query };
   }
   if (action === 'login' && args.length === 0) return { action, path: '/api/login', login: true };
   if (action === 'handoff' && args.length === 1 && /^[a-f0-9]{64}$/.test(args[0])) {
     return { action, path: '/api/sessions/' + args[0] };
+  }
+  if (action === 'delete' && args.length === 1 && /^[a-f0-9]{64}$/.test(args[0])) {
+    return { action, path: '/api/sessions/' + args[0], sessionId: args[0] };
   }
   if (action === 'graph' && args.length === 2) {
     const [operation, value] = args;
@@ -73,7 +84,7 @@ const refusedToken = 'Context Ledger refused the access token. Check that PORT a
 const tokenForOtherPort = other => `The Context Ledger access token is for the ledger on port ${other}, so it was not sent. Set PORT to ${other}, or use the CONTEXT_LEDGER_DB of the ledger on this port.`;
 
 async function main() {
-  const { action, path, packetPath, login } = command(process.argv.slice(2));
+  const { action, path, packetPath, login, sessionId } = command(process.argv.slice(2));
   const port = Number(process.env.PORT ?? 4317);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT.');
   const origin = `http://127.0.0.1:${port}`;
@@ -84,14 +95,15 @@ async function main() {
   // A token file others can read is not used, and nothing is sent.
   if (exposed) throw new Error(exposedToken);
   const withoutToken = otherPort !== undefined ? tokenForOtherPort(otherPort) : noToken;
-  // A graph packet is not sent where the token does not go: the listener on this port
-  // is not known to be the ledger.
-  if (packetPath !== undefined && token === undefined) throw new Error(withoutToken);
-  const write = packetPath === undefined ? (login ? { method: 'POST' } : {}) : {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Origin: origin },
-    body: await readGraphPacket(packetPath),
-  };
+  // A graph packet or a delete is not sent where the token does not go: the listener on
+  // this port is not known to be the ledger.
+  if ((packetPath !== undefined || action === 'delete') && token === undefined) throw new Error(withoutToken);
+  let write = login ? { method: 'POST' } : {};
+  if (packetPath !== undefined) {
+    write = { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: await readGraphPacket(packetPath) };
+  } else if (action === 'delete') {
+    write = { method: 'DELETE', headers: { Origin: origin } };
+  }
   let response;
   try {
     response = await fetch(origin + path, {
@@ -100,7 +112,10 @@ async function main() {
       redirect: 'error',
       signal: AbortSignal.timeout(5000),
     });
-  } catch {
+  } catch (error) {
+    if (action === 'delete' && error?.name === 'TimeoutError') {
+      throw new Error('Context Ledger did not answer within 5 seconds. The session may or may not be deleted; search to check.');
+    }
     throw new Error(`Cannot reach Context Ledger on port ${port}. Start it with npm start.`);
   }
   if (response.status === 401) throw new Error(token !== undefined ? refusedToken : withoutToken);
@@ -121,9 +136,31 @@ async function main() {
         throw new Error(problem.error);
       }
     }
+    if (action === 'delete' && response.status === 409) {
+      // Built from the count alone, so no text from the server reaches the terminal.
+      const problem = await response.json().catch(() => null);
+      const graphs = problem?.graphs;
+      if (Number.isSafeInteger(graphs) && graphs > 0) {
+        throw new Error(`Session is cited by ${graphs} ${graphs === 1 ? 'graph' : 'graphs'}, so it was not deleted.`);
+      }
+      if (problem?.journalMode === 'wal' || problem?.journalMode === 'persist') {
+        throw new Error('The ledger database does not use the default rollback journal, so the session was not deleted.');
+      }
+    }
     throw new Error(`Context Ledger returned HTTP ${response.status}.`);
   }
-  const data = await response.json();
+  // A JSON parse error quotes the body, which is the server's text: never print it.
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error('Context Ledger returned an unexpected response.');
+  }
+  if (action === 'delete') {
+    if (data?.deleted !== sessionId) throw new Error('Context Ledger returned an unexpected response.');
+    console.log(`Deleted session ${sessionId}.`);
+    return;
+  }
   if (action === 'graph') {
     console.log(terminalJson(data));
     return;

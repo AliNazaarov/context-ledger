@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
+import { schemaVersion } from '../src/migrate.mjs';
 import { openStore } from '../src/store.mjs';
 import { bearer, ledgerToken } from './ledger-auth.mjs';
 import { startMcp } from './mcp-client.mjs';
@@ -114,13 +115,14 @@ test('a version 0 ledger upgrades in place, keeps every row and lists old and ne
   handles.push(() => closed || store.close());
   const check = new DatabaseSync(fixture.path);
   handles.push(() => check.close());
-  assert.equal(userVersion(check), 1);
+  assert.equal(userVersion(check), schemaVersion);
   assert.deepEqual(columns(check, 'graphs'), ['id', 'session_id', 'payload', 'created_at', 'party']);
   assert.deepEqual(columns(check, 'rooms'), ['id', 'graph_a', 'graph_b', 'created_at']);
   const names = schema(check).map(row => `${row.type}:${row.name}`);
   for (const name of ['index:graphs_session_id', 'index:graphs_party', 'index:rooms_graph_a', 'index:rooms_graph_b',
     'trigger:graphs_stamp', 'trigger:rooms_stamp']) assert.ok(names.includes(name), name);
-  assert.deepEqual(plain(check.prepare('SELECT * FROM sessions ORDER BY rowid').all()), before.sessions);
+  assert.deepEqual(plain(check.prepare(`SELECT ${Object.keys(before.sessions[0]).join(', ')} FROM sessions ORDER BY rowid`).all()),
+    before.sessions);
   assert.deepEqual(plain(check.prepare('SELECT id, session_id, payload FROM graphs ORDER BY rowid').all()), before.graphs);
   assert.deepEqual(plain(check.prepare('SELECT id, graph_a, graph_b FROM rooms ORDER BY rowid').all()), before.rooms);
   assert.deepEqual(plain(check.prepare('SELECT * FROM room_choices ORDER BY rowid').all()), before.choices);
@@ -167,7 +169,7 @@ test('a version 0 ledger upgrades in place, keeps every row and lists old and ne
     { party: 'leo', graphId: fixture.leoGraph.id, sessionId: fixture.leo.id },
   ]);
 
-  // Reopening a version 1 file changes nothing.
+  // Reopening a migrated file changes nothing.
   const shape = schema(check);
   const contents = plain(check.prepare('SELECT * FROM graphs ORDER BY rowid').all());
   store.close();
@@ -175,7 +177,7 @@ test('a version 0 ledger upgrades in place, keeps every row and lists old and ne
   openStore(fixture.path).close();
   assert.deepEqual(schema(check), shape);
   assert.deepEqual(plain(check.prepare('SELECT * FROM graphs ORDER BY rowid').all()), contents);
-  assert.equal(userVersion(check), 1);
+  assert.equal(userVersion(check), schemaVersion);
 
   // Downgrade: the 19f6522 store's DDL and writes on the migrated file. Triggers stamp its rows.
   const older = new DatabaseSync(fixture.path);
@@ -224,7 +226,7 @@ test('migration is atomic, runs once under concurrency and refuses newer files u
   const results = await Promise.all(children.map(child => child.exit));
   for (const result of results) assert.equal(result.code, 0, result.stderr);
   const migrated = new DatabaseSync(concurrent);
-  assert.equal(userVersion(migrated), 1);
+  assert.equal(userVersion(migrated), schemaVersion);
   assert.deepEqual(columns(migrated, 'graphs'), ['id', 'session_id', 'payload', 'created_at', 'party']);
   migrated.close();
 
@@ -246,11 +248,11 @@ test('migration is atomic, runs once under concurrency and refuses newer files u
   const newer = join(directory, 'newer.sqlite');
   await copyFile(path, newer);
   const bump = new DatabaseSync(newer);
-  bump.exec('PRAGMA user_version = 2');
+  bump.exec(`PRAGMA user_version = ${schemaVersion + 1}`);
   bump.close();
   const bytes = await readFile(newer);
   assert.throws(() => openStore(newer),
-    { message: 'This ledger database was written by a newer Context Ledger (schema 2). Use that version or another CONTEXT_LEDGER_DB.' });
+    { message: `This ledger database was written by a newer Context Ledger (schema ${schemaVersion + 1}). Use that version or another CONTEXT_LEDGER_DB.` });
   assert.deepEqual(await readFile(newer), bytes);
 });
 
