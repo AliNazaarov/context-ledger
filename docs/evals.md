@@ -1469,3 +1469,16 @@ Each regression test was checked by removing its fix (twelve mutations across th
 
 **Suites (Windows, after the round 5 fix):** `npm run -s test:graph` 9/9; node 204/205 (one skipped; the `main` baseline was 191/192); Playwright 13/13; Python runtime 192 run, OK (50 skipped).
 - **Codex, round 6** (of c442c22, the round 5 test): no high or medium findings. Two low, fixed in the next commit: the test now waits for close rather than exit, so the child's output has drained before it is checked; and its cleanup waits for the child to end before the folder is removed.
+
+## U5 — Library project picker (defined 2026-11-18, before implementation)
+
+Source: issue #48 ("a project picker and filter in the library, after #42"). P1b gives every session a project, and the API can import into a project and filter by one, but the library page shows neither. Synthetic transcripts only.
+
+| Eval | Expected |
+| --- | --- |
+| List projects | `GET /api/projects` returns `{ projects: [{ slug, sessions }] }`: every project, including `default` and projects with no sessions, ordered by slug, with its session count. It is read-only and takes no parameters; a query string is ignored. The same Host and Origin checks and security headers apply as on every route. |
+| Import into a project | The import form has a **Project** field, empty by default (empty means `default`), suggesting existing projects. A slug that breaks the rule is refused in the browser with the rule as the message, before any request. A new slug creates the project; the project list and the filter update after the import. |
+| Filter | "Filter by project" (All projects, then each project with its count) sends `project=<slug>` with the search and combines with the agent filter and the query. "All projects" sends no `project`. |
+| See the project | Each result row names its project beside the agent and message count. The reader shows it under the source. Project slugs are set with `textContent`. |
+| Unchanged | Every response pinned by `tests/routes.test.mjs` is unchanged apart from the new route. The library's existing Playwright journeys pass. |
+| Tests | Node tests for `GET /api/projects` (empty ledger, counts, ordering, a project with no sessions, the origin check). A Playwright journey imports into two projects, filters by each, combines with the agent filter, and checks a bad slug is refused before any POST. |
