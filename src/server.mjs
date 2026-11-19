@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { GraphInputError } from './graph.mjs';
 import { LatentError, latentFiles, latentRead, latentTeam, latentTransfer } from './latent.mjs';
-import { InputError, isProjectSlug, isProvider, openStore, projectSlugRule } from './store.mjs';
+import { ConflictError, InputError, isProjectSlug, isProvider, openStore, projectSlugRule } from './store.mjs';
 
 const maxRequestBytes = 8 * 1024 * 1024;
 const staticFiles = new Map([
@@ -23,8 +23,13 @@ function json(response, status, data) {
   response.end(JSON.stringify(data));
 }
 
-async function readJson(request, origin, operation) {
+// Every write, with or without a body, must come from this server's own origin.
+function requireSameOrigin(request, origin, operation) {
   if (request.headers.origin !== origin) throw new HttpError(403, `${operation} requires the same origin.`);
+}
+
+async function readJson(request, origin, operation) {
+  requireSameOrigin(request, origin, operation);
   if (request.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json') {
     throw new HttpError(415, `${operation} requires application/json.`);
   }
@@ -91,7 +96,8 @@ const idPattern = (prefix, suffix = '') => new RegExp(`^${prefix}/${hexId}${suff
 
 // Entries match on the method and the exact path or the anchored pattern, in order.
 // A request that matches none is a 404 whatever its method (there is no 405). The
-// Host and URL checks run before this table; each write checks its Origin in readJson.
+// Host and URL checks run before this table; each write checks its Origin, in readJson
+// or, for the bodiless DELETE, in requireSameOrigin.
 const routes = [
   ...[...staticFiles].map(([path, [file, contentType]]) => ({
     method: 'GET', path, handler: async ({ response }) => {
@@ -135,6 +141,13 @@ const routes = [
   { method: 'GET', pattern: idPattern('/api/sessions'), handler: ({ params: [id] }) => {
     const session = store.get(id);
     return session ? { session } : undefined;
+  } },
+  { method: 'DELETE', pattern: idPattern('/api/sessions'), handler: ({ request, origin, params: [id] }) => {
+    // Origin first, so a foreign page cannot even learn whether the ID exists. The
+    // request has no body to read. There is no MCP tool for this: agents do not
+    // delete people's data.
+    requireSameOrigin(request, origin, 'Deleting a session');
+    return store.deleteSession(id) ? { deleted: id } : undefined;
   } },
   { method: 'GET', pattern: idPattern('/api/graphs'), handler: ({ params: [id] }) => {
     const graph = store.getGraph(id);
@@ -224,6 +237,7 @@ const server = createServer(async (request, response) => {
       request.resume();
     }
     if (error instanceof HttpError || error instanceof LatentError) return json(response, error.status, { error: error.message });
+    if (error instanceof ConflictError) return json(response, 409, { error: error.message, ...error.details });
     if (error instanceof InputError || error instanceof GraphInputError) {
       return json(response, 400, { error: error.message });
     }

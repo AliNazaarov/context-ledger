@@ -3,12 +3,18 @@ import { mkdirSync } from 'node:fs';
 import { basename, dirname, win32 } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { graphContext } from './context.mjs';
-import { InputError } from './errors.mjs';
+import { ConflictError, InputError } from './errors.mjs';
 import { canonicalPacket, validateGraph } from './graph.mjs';
 import { defaultProject, migrate, refuseNewerSchema } from './migrate.mjs';
 import { mountRooms, roomsSchema } from './rooms.mjs';
 
-export { InputError };
+export { ConflictError, InputError };
+
+const secureDeleteModes = ['OFF', 'ON', 'FAST'];
+// Journal modes in which a committed delete leaves no copy of the old pages behind.
+// WAL keeps them in the main file until a checkpoint and in older frames, and PERSIST
+// keeps the journal file, so a delete is refused there. The ledger never sets either.
+const deleteJournalModes = new Set(['delete', 'truncate', 'memory', 'off']);
 
 // A summary names its project by slug; project IDs stay inside the database.
 const summaryColumns = 's.id, s.provider, s.source, s.title, s.message_count AS messageCount, p.slug AS project';
@@ -187,6 +193,8 @@ export function openStore(path) {
     ON CONFLICT (id) DO NOTHING
   `);
   const getGraph = database.prepare('SELECT payload FROM graphs WHERE id = ?');
+  const countCitingGraphs = database.prepare('SELECT count(*) AS graphs FROM graphs WHERE session_id = ?');
+  const deleteSessionRow = database.prepare('DELETE FROM sessions WHERE id = ?');
   const readGraph = id => {
     const row = getGraph.get(id);
     if (row) return { id, ...JSON.parse(row.payload) };
@@ -333,6 +341,45 @@ export function openStore(path) {
       return readDetail(id);
     },
 
+    /**
+     * Delete one imported session: true when it was deleted, false when there is no
+     * such session. Refused with a ConflictError while any graph cites it; rooms refer
+     * to graphs, so a session in a room is refused through its graph. The whole
+     * transcript, its title and its search text are in this one row.
+     */
+    deleteSession(id) {
+      // SQLite leaves deleted rows' bytes in free space unless secure_delete is on.
+      // Turn it on for this delete only, so the transcript text is overwritten.
+      const previous = database.prepare('PRAGMA secure_delete').get().secure_delete;
+      database.exec('PRAGMA secure_delete = ON');
+      try {
+        // IMMEDIATE takes the write lock first, so no graph can cite the session
+        // between the check and the delete.
+        database.exec('BEGIN IMMEDIATE');
+        let deleted = false;
+        try {
+          if (getSummary.get(id)) {
+            const { graphs } = countCitingGraphs.get(id);
+            if (graphs > 0) {
+              throw new ConflictError(`This session is cited by ${graphs} ${graphs === 1 ? 'graph' : 'graphs'}, so it cannot be deleted.`, { graphs });
+            }
+            const { journal_mode: journalMode } = database.prepare('PRAGMA journal_mode').get();
+            if (!deleteJournalModes.has(journalMode)) {
+              throw new ConflictError(`This ledger database uses journal mode ${journalMode}, so a delete could leave copies of the transcript in the file. Deleting needs the default rollback journal.`, { journalMode });
+            }
+            deleted = deleteSessionRow.run(id).changes === 1;
+          }
+          database.exec('COMMIT');
+        } catch (error) {
+          database.exec('ROLLBACK');
+          throw error;
+        }
+        return deleted;
+      } finally {
+        database.exec(`PRAGMA secure_delete = ${secureDeleteModes[previous] ?? 'OFF'}`);
+      }
+    },
+
     publishGraph(packet) {
       const sessionId = packet?.sessionId;
       if (typeof sessionId !== 'string' || !/^[a-f0-9]{64}$/u.test(sessionId)) {
@@ -349,7 +396,13 @@ export function openStore(path) {
       const canonical = serializeGraphPacket(ordered);
       const id = createHash('sha256').update(canonical).digest('hex');
       const payload = { packet: JSON.parse(canonical), ...derived };
-      insertGraph.run(id, sessionId, JSON.stringify(payload));
+      try {
+        insertGraph.run(id, sessionId, JSON.stringify(payload));
+      } catch (error) {
+        // Another connection deleted the session after it was read above.
+        if (/FOREIGN KEY constraint failed/u.test(error?.message)) throw new InputError('Graph transcript session not found.');
+        throw error;
+      }
       return { id, ...JSON.parse(getGraph.get(id).payload) };
     },
 

@@ -293,3 +293,23 @@ Next steps:
 1. A human reviews the migration to version 3 (AGENTS.md section 4, step 4), together with the owed reviews of versions 1 and 2. Five rounds of Codex review are recorded in the eval log; the last found nothing above low.
 2. Merge after PR #42; then retarget this PR to `main`.
 3. Next card (add it to the board when PR #37 lands): `provider:uuid` session IDs. It rebuilds `sessions` (so it can drop `sessions.messages`, after a `VACUUM INTO` backup), links legacy sessions to their UUID sessions, and applies the design's rule for repeated UUIDs (skip identical bytes, refuse different ones). P1a then decides what replaces `search_text` (FTS5 over the decoded `messages.text_json`, using `messages.id` as its rowid, or a degraded `LIKE`). P2 can cite messages by `<sessionId>/<key>` from now on.
+
+## Current checkpoint — P1d delete a session (2026-11-17)
+
+Branch `ruslan/p1d-session-delete`, from `main` 3a17536. This is the first part of card P1d (Delete and retention, defined in PR #37's board). Results and both Codex review rounds are under "P1d — Delete a session" in [the eval log](evals.md).
+
+What changed:
+
+- `src/store.mjs`: `deleteSession(id)` deletes one session row (the whole transcript, title and search text). It is refused with a `ConflictError` (HTTP 409, with the graph count) while any graph cites the session, and refused when the database is in WAL mode. It runs in one `BEGIN IMMEDIATE` transaction with `secure_delete` on for that transaction only. No schema change. `publishGraph` now gives its usual 400 if another connection deleted the session mid-publish.
+- `src/server.mjs`: `DELETE /api/sessions/:id`, exact same Origin required before the lookup (`requireSameOrigin`, also used by `readJson`).
+- `src/cli.mjs`: `npm run ledger -- delete <session-id>`, fixed output only. A response body that is not JSON now gives a fixed message for every command.
+- Browser: a Delete button on the open transcript, behind `window.confirm`.
+- No MCP tool deletes anything, on purpose.
+
+Next steps:
+
+1. **A human review is needed before merge**: this card deletes user data (AGENTS.md section 4.4).
+2. When PR #37 lands, its board rows and this branch's `P1d Delete a session` row sit next to each other: keep both, or fold this row into its P1d row.
+3. The rest of P1d, after P1b's projects: delete a project, and purge by `retention_days`. The design's purge (section 6 of the architecture) also runs FTS `optimize`, `wal_checkpoint(TRUNCATE)`, `VACUUM` and backup deletion; this card runs none of them, so a deleted session's freed pages stay in the file (zeroed) until a `VACUUM`.
+4. P1c (one row per message) must keep `deleteSession` complete: delete the message rows and their FTS rows too, with FTS `secure-delete` as the design sets it, and keep the bytes test in `tests/delete.test.mjs` passing.
+5. Agents with a shell can run `ledger delete`. Only the MCP adapter is closed to them; P1e's token, or a later card, can decide whether the CLI should need a person.
