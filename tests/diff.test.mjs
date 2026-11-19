@@ -4,6 +4,7 @@ import test from 'node:test';
 import { diffCounts, diffGraphs, diffSections } from '../src/diff.mjs';
 import { toolList } from '../src/mcp/tools.mjs';
 import { InputError, openStore } from '../src/store.mjs';
+import { bearer, ledgerToken } from './ledger-auth.mjs';
 import { startMcp } from './mcp-client.mjs';
 
 // Card G11: what changed between two snapshots of one party's graph. Synthetic data only.
@@ -251,20 +252,24 @@ async function startServer(t) {
   for await (const chunk of child.stdout) {
     output += chunk;
     const match = output.match(/listening at http:\/\/127\.0\.0\.1:(\d+)/u);
-    if (match) return `http://127.0.0.1:${match[1]}`;
+    if (match) {
+      // P1e: the API needs the token the server wrote next to its database.
+      const auth = bearer(await ledgerToken(join(dir, 'ledger.sqlite'), Number(match[1])));
+      return { origin: `http://127.0.0.1:${match[1]}`, auth };
+    }
   }
   throw new Error('server did not start');
 }
 
 test('the diff route checks its parameters with fixed messages', async t => {
-  const origin = await startServer(t);
-  const post = (path, body) => fetch(origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify(body) })
+  const { origin, auth } = await startServer(t);
+  const post = (path, body) => fetch(origin + path, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify(body) })
     .then(response => response.json());
   const { session } = await post('/api/import', { provider: 'claude', source: 'o.jsonl', transcript: say('Port 4317. Port 4400.') });
   const packet = label => ({ version: 2, sessionId: session.id, party: 'leo', edges: [], nodes: [{ id: 'p', kind: 'decision', label, evidenceLines: [1] }] });
   const { graph: a } = await post('/api/graphs', packet('Port 4400'));
   const { graph: b } = await post('/api/graphs', packet('Port 4317'));
-  const get = query => fetch(`${origin}/api/graphs/${b.id}/diff${query}`).then(async response => ({ status: response.status, body: await response.json() }));
+  const get = query => fetch(`${origin}/api/graphs/${b.id}/diff${query}`, { headers: auth }).then(async response => ({ status: response.status, body: await response.json() }));
   const ok = await get(`?from=${a.id}`);
   assert.equal(ok.status, 200);
   assert.deepEqual(ok.body.diff.nodes.changed[0].changes, { label: { from: 'Port 4400', to: 'Port 4317' } });
