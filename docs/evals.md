@@ -1584,3 +1584,17 @@ Source: issue #48 and Ali's choices (2026-11-18): the vendor pixel sprites inste
 | Unchanged | Read-only (every request a GET), the U1 screenshots, the 375 px phone layout with no sideways scroll, and the 300 KB page budget all still hold. |
 | Screenshots | The console spec saves the finished demo and the evidence pane with the new look into `docs/console/`. |
 | Trademark note | The sprites are vendor trademarks drawn for a local build; the PR says so and says to swap them for the neutral bot before anything public. |
+
+### U4 results (2026-11-18, macOS)
+
+- **Brand tokens: pass.** `/console/tokens.css` serves `docs/brand/tokens.css` byte for byte; nearby paths are 404. A node test checks that every `--ctm-*` variable the console uses is in `tokens.css`, that every `var()` in the console CSS is defined somewhere, and that the only colour literals left are the Claude room's two sprite colours.
+- **Vendor sprites and poses: pass.** Unit test: each sprite stays on the 16 × 20 grid, and unknown sources (including `constructor` and `__proto__`) get the bot. E2E: one Claude and one Codex sprite in the finished demo, made of `rect`s, with no style attribute.
+- **Quoted and inferred: pass.** The demo's 11 nodes are all quoted. The live e2e test publishes "Use port 4317" (quoted) and "Retry 5 times" (inferred) and checks the mark, the word and the `aria-label`. A unit test checks that a graph without the lists stays unmarked.
+- **Codex agent turns: pass.** The live e2e test cites an I3 `agent_message` and sees "Agent /root/worker to /root". A unit test checks that a bidi override and a newline in a path are escaped.
+- **Unchanged: pass.** The page is read-only, renders at 375 px, and stays under 300 KB. Screenshots 01 to 06 and `perf.json` are in [docs/console/](console/).
+- **Independent review** (Claude Sonnet as `ecc:code-reviewer`, read-only; Codex CLI was not installed on this machine). One medium, one eval gap and two low findings, all fixed:
+  - (medium) The desk legs used `--office-dark`, which the token change had removed, so they drew nothing. They are fixed, and a new test fails on any undefined `var()`; it fails on the old CSS.
+  - (eval gap) The first wording promised both marks in the demo. The eval now says the live test covers inferred, which is the honest case: the demo transcripts cite their own words.
+  - (low) The laptop hid the sprite's face. It sits lower now.
+  - (low) A JSDoc comment was in the wrong place after the move. It is fixed.
+- **Suites (macOS, Node 26):** node 248/249. The one failure is `malformed transport input…` in `tests/mcp.test.mjs`, which fails the same way on `ruslan/console-v0`. Playwright 21/21. `npm run -s test:graph` passes.

@@ -158,6 +158,11 @@ test('card U4: every brand variable the console uses is defined in docs/brand/to
     assert.ok(used.length > 10, name);
     for (const variable of used) assert.ok(defined.has(variable), `${name} uses ${variable}, which tokens.css does not define`);
   }
+  // Every custom property the console CSS reads is defined in the console CSS or the tokens:
+  // an undefined one silently draws nothing (the desk legs lost their stroke this way).
+  const allCss = tokens + (await Promise.all(['console.css', 'office.css'].map(name => readFile(new URL(name, consoleDir), 'utf8')))).join('');
+  const declared = new Set([...allCss.matchAll(/(--[\w-]+)\s*:/gu)].map(match => match[1]));
+  for (const [, variable] of allCss.matchAll(/var\((--[\w-]+)\)/gu)) assert.ok(declared.has(variable), `${variable} is used but never defined`);
   // Colours come from the tokens; the only literals left are the two sprite colours of the office rooms.
   const console = await readFile(new URL('console.css', consoleDir), 'utf8');
   assert.deepEqual(console.match(/#[0-9a-f]{3,8}\b/giu), null);
