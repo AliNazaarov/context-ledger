@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures.mjs';
 import { aliPacket, importParty, leoPacket, publish } from './party-fixtures.mjs';
 
 const htmlLabel = '<img src=x onerror="window.__pwned=1"> GPU time';
