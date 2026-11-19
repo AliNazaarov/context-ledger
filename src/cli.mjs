@@ -12,6 +12,7 @@ const usage = 'Usage: npm run ledger -- search [--provider claude|codex] [--proj
   '       npm run ledger -- delete <session-id>\n' +
   '       npm run ledger -- graph publish <packet.json>\n' +
   '       npm run ledger -- graph read <graph-id>\n' +
+  '       npm run ledger -- graph export <graph-id> [<graph-id>...]\n' +
   '       npm run ledger -- login\n' +
   '       npm run ledger -- import-t3 <copy-of-statev2.sqlite> [--thread <id>] [--list]\n' +
   '       npm run ledger -- install|uninstall [--agent claude|codex] [--dry-run]';
@@ -55,6 +56,10 @@ function command(argv) {
   if (action === 'login' && args.length === 0) return { action, path: '/api/login', login: true };
   if (action === 'handoff' && args.length === 1 && /^[a-f0-9]{64}$/.test(args[0])) {
     return { action, path: '/api/sessions/' + args[0] };
+  }
+  // Card G12: one node-link file for one or more graphs, on stdout.
+  if (action === 'graph' && args[0] === 'export' && args.length >= 2 && args.slice(1).every(id => /^[a-f0-9]{64}$/.test(id))) {
+    return { action, path: '/api/export?' + new URLSearchParams(args.slice(1).map(id => ['graph', id])), raw: true };
   }
   if (action === 'delete' && args.length === 1 && /^[a-f0-9]{64}$/.test(args[0])) {
     return { action, path: '/api/sessions/' + args[0], sessionId: args[0] };
@@ -274,7 +279,7 @@ async function main() {
   if (argv[0] === 'import-t3') return importT3(argv.slice(1));
   // Card G8: setup edits the agents' own config files and needs no server.
   if (argv[0] === 'install' || argv[0] === 'uninstall') return setup(argv[0], argv.slice(1));
-  const { action, path, packetPath, login, sessionId, provider, filePath } = command(argv);
+  const { action, path, packetPath, login, sessionId, provider, filePath, raw } = command(argv);
   // Card I1: a file import opens the database itself, so it needs no running server or token.
   if (action === 'import') return importFile(provider, filePath);
   const port = ledgerPort();
@@ -348,6 +353,11 @@ async function main() {
   if (action === 'delete') {
     if (data?.deleted !== sessionId) throw new Error('Context Ledger returned an unexpected response.');
     console.log(`Deleted session ${sessionId}.`);
+    return;
+  }
+  // The export is the node-link JSON itself, escaped here as well as by the ledger.
+  if (raw) {
+    console.log(terminalJson(data));
     return;
   }
   if (action === 'graph') {

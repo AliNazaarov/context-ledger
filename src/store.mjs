@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { graphContext } from './context.mjs';
 import { ConflictError, InputError } from './errors.mjs';
 import { diffGraphs } from './diff.mjs';
+import { graphPrefixLength, nodeLinkBundle } from './export.mjs';
 import { canonicalPacket, validateGraph } from './graph.mjs';
 import { groundNodes } from './grounding.mjs';
 import { defaultProject, migrate, refuseNewerSchema } from './migrate.mjs';
@@ -602,6 +603,18 @@ export function openStore(path) {
 
     close() {
       database.close();
+    },
+
+    /** Card G12: one or more graphs as one node-link file for code-graph tools; undefined if one is unknown. */
+    exportGraphs(ids) {
+      const graphs = ids.map(readGraph);
+      if (graphs.some(graph => !graph)) return;
+      const prefixes = new Set(graphs.map(graph => graph.id.slice(0, graphPrefixLength)));
+      if (prefixes.size !== graphs.length && new Set(ids).size === ids.length) {
+        throw new InputError('Two of these graphs share the first 16 characters of their IDs; export them apart.');
+      }
+      // Only the transcript's file name is needed, so the summary row, not its messages.
+      return nodeLinkBundle(graphs, graph => getSummary.get(graph.packet.sessionId));
     },
 
     getGraphContext(id, { question, budget } = {}) {

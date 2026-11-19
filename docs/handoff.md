@@ -247,6 +247,19 @@ Branch `codex/g6-product-review`. Codex, the card's owner, reviewed the product 
 
 The board changes it recommends are left to the card owners; this PR only adds the review.
 
+## Current checkpoint — G12 export for code-graph tools (2026-11-17)
+
+Branch `ruslan/g12-graph-export`. `GET /api/export?graph=…`, `GET /api/graphs/:id/export` and `npm run ledger -- graph export <id>…` write graphs as one node-link file for Graphify (`src/export.mjs`). The eval and results are in the G12 section of [the eval log](evals.md).
+
+- Several graphs go in one file because `graphify merge-graphs` prefixes each input file's IDs, and links between graphs survive only inside one file.
+- Node IDs are `ctm_<16 hex of the graph ID>__<node id>`, so two snapshots never share a node. Links to graphs outside the export are left out and counted.
+- The export is undirected (`merge-graphs` refuses directed graphs), and `ledger_from` and `ledger_to` keep the direction. The HTTP body is the node-link JSON itself, escaped.
+
+Next steps:
+
+1. Merge with a real code graph from `graphify extract` and check that `graphify query` and `graphify explain` find the decisions. This card merged with a small synthetic code graph.
+2. Decisions that name files or functions could link to the matching code nodes. That needs Graphify's code node IDs and would be a new card.
+
 ## Current checkpoint — H7 Windows deadline flake (2026-11-17)
 
 The runtime job on the Windows runner failed at random on PRs that do not touch `runtime/` (#29–#32). Three deadline tests got 502 "Model server timed out." instead of 504. `_Run.call` (`runtime/latent_pool/pool.py`) now decides before each model call whether the read deadline is the shorter limit. If that call then times out, the read returns 504, whatever the clock reads afterwards. The client raises `ModelTimeout` (`runtime/latent_pool/__init__.py`), which is still a 502 with the same message, so the client's own timeout and every other 502 behave as before. Regression tests are in `runtime/tests/test_deadline_clock.py`. Eval and results: H7 in `docs/evals.md`.
