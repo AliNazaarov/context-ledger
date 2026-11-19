@@ -255,3 +255,11 @@ Next steps:
 
 1. After this merges, rerun the failed `runtime (windows-latest, Python 3.13)` job on any open PR still red from this flake.
 2. H8 (Backlog): keep each model call inside the read deadline as a whole, not per socket read, and map a deadline-capped connect timeout to 504 instead of 503.
+
+## Current checkpoint — P1 design landed, implementation split (2026-11-17)
+
+Branch `ruslan/p1-design`. `docs/architecture.md` comes from `product/v1` unchanged except for its links, a status note, and a new section 11 on where `main` has moved. It stays a proposal until P1's owner approves the PR. The board splits P1's implementation into P1a (storage engine decision, which needs the owner), P1b (projects), P1c (message rows and stable keys), P1d (delete and retention) and P1e (loopback token). P1 was "In progress" for "Claude Code workflows" with no commit since 2026-11-07. This session took it over with the user's approval on 2026-11-17, and the G6 review recommended this split.
+
+## Current checkpoint — P1a storage engine decision (2026-11-17)
+
+Branch `ruslan/p1a-storage-decision`, stacked on P1's design PR (#37). It proposes revising ADR-003: stay on `node:sqlite`, use FTS5 when the running Node has it (Node 22.23.4 in CI does; 22.14 locally does not), and fall back to `instr` search with a named warning otherwise. No dependency is added. P1c builds message rows on `node:sqlite` either way; the FTS5 index is a follow-up once this is accepted.
