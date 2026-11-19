@@ -1988,3 +1988,43 @@ When an agent publishes a graph, each node is marked **quoted** or **inferred**.
 - **Round 3** (of 6137a8c): those fixes hold, and Codex found nothing looser than `main` for ASCII labels, in either G7 or the latent check. Two more Unicode cases were fixed in the next commit: a Unicode suffix on the label's own token (`4317٥`, `retryCounté`), and combining marks (a name followed by U+0301, and Devanagari vowel signs). A new test also caught a regression from round 2, which the same commit fixes: a cited `$retry_limit` had stopped matching `retry_limit`.
   - Accepted, not changed: the header line "Labels are quoted data from the source" stays, even when some nodes are inferred. Changing it when the first inferred node appears would move the cached prefix (round 1, third finding). Changing it for every briefing would break the byte-for-byte promise for all-quoted graphs. The state section's legend says what inferred means.
 - **Suites (Windows):** `npm run -s test:graph` 9/9; node 204/205 (one skipped), was 191/192 on `main`; Playwright 14/14 (one new); Python runtime 192 run, 50 skipped, OK.
+
+## G9 — Scoped context with a budget (defined 2026-11-17, before the code)
+
+`context_for` takes two new optional arguments. `question` is a short text of up to 500 characters. `budget` is a whole number of estimated tokens, from 50 to 100,000, and it needs a question. With a question, the briefing keeps only the nodes that match it, plus the nodes one edge away from those matches. Edges are kept only when both ends are shown, and links only when their local end is shown. The state lists are cut down to the nodes shown. With a budget, nodes are dropped until the briefing's estimate (ceil of characters / 4, the meter's own estimate) fits: neighbours go first, then matches with the fewest matched words. A budget smaller than the briefing with no nodes at all (its header and state lines) is refused with a message that gives that size, so a successful answer is never over budget. Without either argument, `context_for` is exactly what it was.
+
+A node matches when one of the question's words is in its label, its ID, its kind or the party it is addressed to. The question is split once into words, and each word counts once, with one rule. An ASCII word of three or more letters counts, except common ones ("the", "what", "which"). It compares by its first four letters, so "decided" finds a decision, and a three-letter word must start a word. A word in another script ("café", "北京") matches by two whole letters in a row (each with its combining marks), one of them outside ASCII, and a one-letter word must be a whole word of the node. The 500-character limit counts characters (code points), as the published schema does.
+
+The briefing's state section ends with a scope line: how many nodes matched, how many are shown as neighbours, how many were left out for the budget, and the budget itself. The question is not echoed back. When nothing matches, the briefing shows no nodes and says so, so the agent can ask again or call without a question.
+
+### What is tested (synthetic transcripts only)
+
+- A question naming one decision returns that decision, the decision it supersedes (one edge away) and no unrelated node. The edge between them is shown, and the meter counts the scoped text.
+- A question that matches nothing returns the header, an empty node list and the "nothing matched" scope line.
+- A budget smaller than the full scoped briefing drops neighbours before matches. For every budget from 50 up to the full briefing, the answer is either refused or within the budget, and once one budget is answered every larger one is too.
+- The question and budget are checked at the API and in the MCP adapter. An empty, blank or oversized question (also in characters outside the BMP), a budget outside 50 to 100,000 or not a whole number, and a budget without a question are refused with fixed messages that echo nothing. A repeated parameter is refused at the API. The MCP adapter reads arguments with JSON.parse, which keeps the last value of a repeated name, so a repeat there is not detected; the value used is still checked.
+- A scoped briefing keeps only edges between shown nodes, links from shown nodes, the linked-graph lines of those links, and state lists of shown nodes. A fixture with two parties and links checks each.
+- The scope line never contains the question text, even one holding control or bidi characters.
+- Paging: a scoped briefing too long for one page pages by `fromLine`. Later pages come from the same scoped briefing, cached under the graph ID, question and budget, and the continuation note says to repeat the question and budget.
+- `context_for` without the new arguments is byte for byte what it was: the text and meter are compared with what `origin/main` 3a17536 rendered for the same two-party fixture, and the existing paging and briefing tests pass unchanged.
+- A scoped briefing too long for one MCP page, through the real route and adapter, pages back to the whole scoped text. A different question, budget or no budget is a different cache entry.
+
+### Acceptance
+
+- The four suites pass, with no new runtime dependency.
+- Codex reviews the change read-only; findings are fixed with tests or recorded here.
+
+### G9 results (2026-11-17)
+
+- **Built:** `src/scope.mjs` ranks the nodes for a question and cuts the result to a budget. `graphContext` in `src/context.mjs` renders the scoped graph with the same `contextText`, plus a last scope line, and reads each linked graph once per request. `GET /api/graphs/:id/context` takes `question` and `budget`, and `context_for` takes them too, caching paged scoped briefings under graph ID, question and budget. Without either argument, nothing changes.
+- **Tests:** `tests/scope.test.mjs` (13): ranking and matching rules, the budget, the golden unscoped output, the links fixture, the MCP cache and argument checks, and the real route with paging.
+- **Codex review, round 1** (of 103051b), six findings, fixed in c991f6a:
+  - (high) A budget smaller than the briefing with no nodes was answered over budget. It is refused now, with the size, and every budget path checks the meter.
+  - (medium) Words were double-counted, `café` became `caf` (finding `cafeteria`), and one letter of another script matched anywhere. The question is now split once into Unicode words, each with one rule.
+  - (medium) The cache-key test changed two things at once. Question and budget are now varied one at a time, each with its own text.
+  - (low) The 500 limit counted UTF-16 units, not characters. It counts code points now.
+  - (low) Each budget probe repeated work. It now counts shown matches directly and reads linked graphs once.
+  - (low) The eval claimed more than the tests checked. A golden output from main, a links fixture and real-route paging are added.
+- **Round 2** (of c991f6a): all six fixes hold. Three more findings, fixed in bef4378: an ASCII word missed a mixed-script node word (`gpu` and a label `GPU` followed by a Han letter); letter pairs could end inside a marked letter; and two coverage notes (blank question over HTTP, MCP's handling of a repeated JSON name).
+- **Round 3** (of bef4378): those fixes hold. One low finding is fixed in the next commit: an ASCII prefix is now compared in whole letters, so `qax` no longer stops inside an `x` with an accent.
+- **Suites (Windows):** `npm run -s test:graph` 9/9; node 203/204 (one skipped), was 191/192 on `main`; Playwright 13/13; Python runtime 192 run, 50 skipped, OK.

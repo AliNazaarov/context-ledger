@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { GraphInputError } from './graph.mjs';
 import { LatentError, latentFiles, latentRead, latentTeam, latentTransfer } from './latent.mjs';
+import { maxBudget, maxQuestionCharacters, minBudget, questionLength } from './scope.mjs';
 import { ConflictError, InputError, isProjectSlug, isProvider, openStore, projectSlugRule } from './store.mjs';
 import { codeLifetimeMs, createAuth, newToken, removeTokenFile, tokenFileFor, writeTokenFile } from './token.mjs';
 
@@ -115,6 +116,26 @@ const idPattern = (prefix, suffix = '') => new RegExp(`^${prefix}/${hexId}${suff
 
 // Entries match on the method and the exact path or the anchored pattern, in order.
 // A request that matches none is a 404 whatever its method (there is no 405). The
+// Card G9: an optional question and token budget for a scoped briefing. The messages
+// are fixed and echo nothing back.
+function scopeParameters(url) {
+  for (const name of ['question', 'budget']) {
+    if (url.searchParams.getAll(name).length > 1) throw new InputError('Each context parameter may appear once.');
+  }
+  const question = url.searchParams.get('question') ?? undefined;
+  const budgetText = url.searchParams.get('budget') ?? undefined;
+  if (question !== undefined && (!question.trim() || questionLength(question) > maxQuestionCharacters)) {
+    throw new InputError(`question must be 1 to ${maxQuestionCharacters} characters.`);
+  }
+  let budget;
+  if (budgetText !== undefined) {
+    budget = /^[1-9]\d{0,5}$/u.test(budgetText) ? Number(budgetText) : NaN;
+    if (!(budget >= minBudget && budget <= maxBudget)) throw new InputError(`budget must be a whole number from ${minBudget} to ${maxBudget}.`);
+    if (question === undefined) throw new InputError('budget needs a question.');
+  }
+  return { question, budget };
+}
+
 // Host, URL and token checks run before this table; each write checks its Origin, in
 // readJson or, for the bodiless DELETE, in requireSameOrigin. Only the static files and
 // /login are open without the token or a cookie.
@@ -189,8 +210,8 @@ const routes = [
     const graph = store.getGraph(id);
     return graph ? { graph } : undefined;
   } },
-  { method: 'GET', pattern: idPattern('/api/graphs', '/context'), handler: ({ params: [id] }) => {
-    const context = store.getGraphContext(id);
+  { method: 'GET', pattern: idPattern('/api/graphs', '/context'), handler: ({ params: [id], url }) => {
+    const context = store.getGraphContext(id, scopeParameters(url));
     return context ? { context } : undefined;
   } },
   { method: 'POST', path: '/api/latent/read', handler: async ({ request, origin }) => {

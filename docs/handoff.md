@@ -366,3 +366,17 @@ Next steps:
 
 1. The console (U1, PR #22) reads a `grounding` field on nodes. Once both are merged, point its `nodeMark` at the graph's `quotedNodeIds` and `inferredNodeIds`.
 2. The mark is a floor, like the latent check: a label that only shares one content word with its line is quoted. A stricter check (all content words, or an exact quote field on the node) would be a new card with its own eval.
+
+## Current checkpoint — G9 scoped context with a budget (2026-11-17)
+
+Branch `ruslan/g9-scoped-context`. `context_for` takes an optional `question` (up to 500 characters) and `budget` (50 to 100,000 estimated tokens, only with a question), and `GET /api/graphs/:id/context` takes the same two query parameters. The eval and results are in the G9 section of [the eval log](evals.md).
+
+- `src/scope.mjs` ranks the nodes. Matches come first, by how many of the question's words they hold (label, ID, kind or addressee; four-letter prefixes, as in the latent check), then their one-edge neighbours. The budget keeps the largest prefix of that order whose briefing fits the estimate, so neighbours go first.
+- The scoped graph keeps only edges between shown nodes, links from shown nodes and state lists of shown nodes, and is rendered by the same `contextText`. Its last line says what was matched, shown and left out, without repeating the question.
+- With no question, the briefing is byte for byte what it was.
+- The MCP adapter caches a paged scoped briefing under the graph ID, question and budget, and its continuation note says to repeat both.
+
+Next steps:
+
+1. Measure the benefit on the G10 handoff benchmark: the same graded facts with a scoped briefing and a budget, against the whole briefing.
+2. Matching is by words, so a question that uses other words than the labels finds nothing and says so. Embeddings would be a new card with an ADR, because they need a dependency.

@@ -591,10 +591,10 @@ export function openStore(path) {
       database.close();
     },
 
-    getGraphContext(id) {
+    getGraphContext(id, { question, budget } = {}) {
       const graph = readGraph(id);
       if (!graph) return;
-      return graphContext(graph, readDetail(graph.packet.sessionId), { lookupGraph: readGraph });
+      return graphContext(graph, readDetail(graph.packet.sessionId), { lookupGraph: readGraph, question, budget });
     },
   };
 }
