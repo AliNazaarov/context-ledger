@@ -263,9 +263,17 @@ function anchorSpan(span, lines, getIndex) {
   return { span: { path: span.path, startLine: nearest[0], endLine: nearest[1], quote: stored }, verified: true, relocated: true };
 }
 
-const numberPattern =/(?<![\w.])\d+(?:\.\d+)?(?![\w])/gu;
-const identifierPattern = /\b(?:[A-Za-z]+_[A-Za-z0-9_]*|[a-z]+[A-Z][A-Za-z0-9]*)\b/gu;
-const hasToken = (text, token) => new RegExp(`(?<![\\w.])${token.replace(/\./gu, '\\.')}(?![\\w])`, 'u').test(text);
+// Numbers and code names are whole tokens in any script, on both sides: a letter, digit
+// or combining mark next to one makes it a different token (G7 review rounds 2 and 3).
+// For ASCII text these match what \d, \w and \b matched before.
+const numberPattern = /(?<![\p{L}\p{N}\p{M}_.])\p{Nd}+(?:\.\p{Nd}+)?(?![\p{L}\p{N}\p{M}_])/gu;
+const identifierPattern = /(?<![\p{L}\p{N}\p{M}_])(?:[A-Za-z]+_[\p{L}\p{N}\p{M}_]*|[a-z]+[A-Z][\p{L}\p{N}\p{M}]*)(?![\p{L}\p{N}\p{M}_])/gu;
+// 4317 is not in 4317.5 or in 4317 followed by an Arabic-Indic digit, but it is in "port 4317.".
+const hasToken = (text, token) =>
+  new RegExp(`(?<![\\p{L}\\p{N}\\p{M}_.])${token.replace(/\./gu, '\\.')}(?![\\p{L}\\p{N}\\p{M}_]|\\.\\p{N})`, 'u').test(text);
+// retryCount is not in retryCounter, or in retryCount followed by an accent.
+const hasIdentifier = (text, identifier) =>
+  new RegExp(`(?<![\\p{L}\\p{N}\\p{M}_])${identifier}(?![\\p{L}\\p{N}\\p{M}_])`, 'u').test(text);
 // A quoted string literal in a label: 'orbit-mail', "EUR", `shipped`. The quote must not
 // touch a letter or digit, so apostrophes inside words ("user's", "isn't") open nothing.
 const literalPattern = /(?<![\p{L}\p{N}])(['"`])([^'"`\n]{1,120})\1(?![\p{L}\p{N}])/gu;
@@ -296,7 +304,7 @@ export function isGrounded(label, citedText) {
     .map(match => match[2].trim()).filter(Boolean);
   if (!literals.every(literal => hasLiteral(citedText, literal))) return false;
   const identifiers = label.match(identifierPattern) ?? [];
-  if (identifiers.length) return identifiers.some(identifier => citedText.includes(identifier));
+  if (identifiers.length) return identifiers.some(identifier => hasIdentifier(citedText, identifier));
   if (numbers.length) return true;
   // No numbers or code names to compare. Live probe on Ali's preamble v2: a steered
   // finding said "The session timeout is set in src/util.js" while citing an
@@ -306,11 +314,29 @@ export function isGrounded(label, citedText) {
   // three-letter words count too. A short word must start a word in the cited lines
   // ("low" does not match "below"); longer words compare their first four letters.
   const words = (label.toLowerCase().match(/[a-z]{3,}/gu) ?? []).filter(word => !stopWords.has(word));
-  if (!words.length) return true;
+  // G7 review: a label in another script (Han, Cyrillic) has no [a-z] words. Each run of
+  // its letters counts as a word, matched by any two letters in a row (one for a
+  // one-letter run), so an all-Han label cannot pass on unrelated English. A pair must
+  // hold a non-ASCII letter: "café" must not pass on the "ca" of "cache" (review round 2).
+  // A letter keeps its combining marks (a Devanagari vowel sign, an accent), so की is
+  // not found in का (review round 3); both sides are compared in NFC.
+  const foreign = (label.normalize('NFC').toLowerCase().match(/[\p{L}\p{N}\p{M}]+/gu) ?? [])
+    .filter(run => /\P{ASCII}/u.test(run));
+  // Nothing to compare (only short or common words): no evidence either way, kept.
+  if (!words.length && !foreign.length) return true;
   const cited = citedText.toLowerCase();
+  const citedNfc = citedText.normalize('NFC').toLowerCase();
   return words.some(word => (word.length === 3
     ? new RegExp(`(?<![a-z])${word}`, 'u').test(cited)
-    : cited.includes(word.slice(0, 4))));
+    : cited.includes(word.slice(0, 4))))
+    || foreign.some(run => {
+      const letters = run.match(/\P{M}\p{M}*|\p{M}+/gu);
+      if (letters.length === 1) return citedNfc.includes(run);
+      return letters.slice(1).some((letter, index) => {
+        const pair = letters[index] + letter;
+        return /\P{ASCII}/u.test(pair) && citedNfc.includes(pair);
+      });
+    });
 }
 
 const stopWords = new Set(['the', 'and', 'for', 'are', 'was', 'not', 'but', 'its', 'set', 'get', 'has', 'had', 'can',

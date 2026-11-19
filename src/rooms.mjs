@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { InputError } from './errors.mjs';
+import { nodeGrounding } from './grounding.mjs';
 
 const hashPattern = /^[a-f0-9]{64}$/u;
 const choices = new Set(['confirm', 'reject']);
@@ -83,7 +84,7 @@ export function mountRooms(database, readGraph) {
         party: graph.packet.party,
         graphId: graph.id,
         sessionId: graph.packet.sessionId,
-        nodes: graph.packet.nodes,
+        nodes: graph.packet.nodes.map(node => ({ ...node, grounding: nodeGrounding(graph, node.id) })),
         readyActionIds: graph.readyActionIds,
         currentDecisionIds: graph.currentDecisionIds,
         openQuestionIds: graph.openQuestionIds,

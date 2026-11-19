@@ -24,6 +24,11 @@ test('two people open a room, confirm a match, reject a conflict and see it afte
   await expect(page.getByRole('region', { name: 'Party ali' })).toContainText('No work on Sunday');
   await expect(page.getByRole('region', { name: 'Party leo' })).toContainText('Pair on the MCP adapter');
   await expect(page.getByRole('region', { name: 'Party ali' })).toContainText(label);
+  // Card G7: the planted label's "=1" is not in its cited line, so it is inferred.
+  const aliNodes = page.getByRole('region', { name: 'Party ali' }).locator('.party-nodes > li');
+  await expect(aliNodes.filter({ hasText: label }).locator('.node-kind')).toHaveText('offer · inferred');
+  await expect(aliNodes.filter({ hasText: 'No work on Sunday' }).locator('.node-kind')).toHaveText('constraint · quoted');
+  await expect(aliNodes.filter({ hasText: label })).toHaveAttribute('data-grounding', 'inferred');
   expect(await page.evaluate(() => window.__pwned)).toBeUndefined();
 
   const match = page.locator('#room-proposals > li', { hasText: 'matches' });
@@ -170,4 +175,25 @@ test('a decision that lands after switching rooms does not replace the new room'
   await expect(page.getByRole('region', { name: 'Party ali' })).toContainText('stale second');
   await expect(page.locator('#room-proposals > li', { hasText: 'matches' })).toContainText('leo: undecided');
   expect(page.url()).toMatch(new RegExp(`#room=${secondRoom}$`, 'u'));
+});
+
+test('a graph stored before G7 shows no mark in the room', async ({ page, request, baseURL }) => {
+  const { ali, leo } = await publishPair(request, baseURL, 'Two evenings of GPU time, unmarked');
+  // A ledger that has not republished an older graph sends nodes without a mark.
+  await page.route('**/api/rooms', async route => {
+    const response = await route.fetch();
+    const body = await response.json();
+    for (const party of body.room.parties) for (const node of party.nodes) node.grounding = null;
+    delete body.room.parties[0].nodes[0].grounding;
+    await route.fulfill({ response, json: body });
+  });
+  await page.goto('/');
+  await page.getByLabel('First graph ID').fill(leo.id);
+  await page.getByLabel('Second graph ID').fill(ali.id);
+  await page.getByRole('button', { name: 'Open room' }).click();
+  const kinds = page.locator('.party-nodes .node-kind');
+  await expect(kinds.first()).toBeVisible();
+  for (const text of await kinds.allTextContents()) expect(text).not.toMatch(/quoted|inferred|null|undefined/u);
+  await expect(page.getByRole('region', { name: 'Party ali' }).locator('.party-nodes > li', { hasText: 'No work on Sunday' }).locator('.node-kind')).toHaveText('constraint');
+  expect(await page.locator('.party-nodes > li[data-grounding]').count()).toBe(0);
 });

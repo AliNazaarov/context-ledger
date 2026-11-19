@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { graphContext } from './context.mjs';
 import { InputError } from './errors.mjs';
 import { canonicalPacket, validateGraph } from './graph.mjs';
+import { groundNodes } from './grounding.mjs';
 import { migrate } from './migrate.mjs';
 import { mountRooms } from './rooms.mjs';
 
@@ -148,10 +149,13 @@ export function openStore(path) {
   `);
   const getSummary = database.prepare(`SELECT ${summaryColumns} FROM sessions WHERE id = ?`);
   const getDetail = database.prepare(`SELECT ${summaryColumns}, messages FROM sessions WHERE id = ?`);
+  // A graph stored before G7 has no quoted or inferred marks; publishing the same
+  // packet again adds them. The ID, row and created_at stay as they were.
   const insertGraph = database.prepare(`
     INSERT INTO graphs (id, session_id, payload)
     VALUES (?, ?, ?)
-    ON CONFLICT (id) DO NOTHING
+    ON CONFLICT (id) DO UPDATE SET payload = excluded.payload
+      WHERE json_valid(graphs.payload) AND json_type(graphs.payload, '$.quotedNodeIds') IS NULL
   `);
   const getGraph = database.prepare('SELECT payload FROM graphs WHERE id = ?');
   const readGraph = id => {
@@ -250,7 +254,8 @@ export function openStore(path) {
       const session = getDetail.get(sessionId);
       if (!session) throw new InputError('Graph transcript session not found.');
 
-      const sourceLines = JSON.parse(session.messages).map(message => message.line);
+      const messages = JSON.parse(session.messages);
+      const sourceLines = messages.map(message => message.line);
       const options = { lookupGraph: id => readGraph(id) };
       validateGraph(packet, sourceLines, options);
       // Derive from the canonical form so derived ID lists follow its order.
@@ -258,7 +263,7 @@ export function openStore(path) {
       const derived = validateGraph(ordered, sourceLines, options);
       const canonical = serializeGraphPacket(ordered);
       const id = createHash('sha256').update(canonical).digest('hex');
-      const payload = { packet: JSON.parse(canonical), ...derived };
+      const payload = { packet: JSON.parse(canonical), ...derived, ...groundNodes(ordered, messages) };
       insertGraph.run(id, sessionId, JSON.stringify(payload));
       return { id, ...JSON.parse(getGraph.get(id).payload) };
     },
