@@ -380,3 +380,19 @@ Next steps:
 
 1. Measure the benefit on the G10 handoff benchmark: the same graded facts with a scoped briefing and a budget, against the whole briefing.
 2. Matching is by words, so a question that uses other words than the labels finds nothing and says so. Embeddings would be a new card with an ADR, because they need a dependency.
+
+## Current checkpoint — G8 one-command agent setup (2026-11-17)
+
+Branch `ruslan/g8-agent-install`. `npm run ledger -- install` and `uninstall` (`src/install.mjs`, wired in `src/cli.mjs`) register the MCP server with Claude Code and Codex at user scope through their own CLIs, and add or remove a short marked block in `~/.claude/CLAUDE.md` and `$CODEX_HOME/AGENTS.md`. The eval and results are in the G8 section of [the eval log](evals.md).
+
+- Every change is printed; `--dry-run` changes nothing and runs only `mcp get`.
+- Uninstall removes the blocks but not the server registrations: it prints `claude mcp remove --scope user context-ledger` and `codex mcp remove context-ledger` for the person to run. Neither CLI shows a user-scope entry exactly enough to prove that it is the one install made (three Codex review rounds; see the eval log).
+- Install never asks Claude with `mcp get`, which can start project servers; Claude's `add` refuses a duplicate itself. Codex's `add` replaces, so install asks `codex mcp get --json` first. A failed server step leaves the instruction file alone. The CLIs run from the home folder.
+- Files are read as bytes. A UTF-16 BOM, NUL bytes, invalid UTF-8, unmatched markers and an edited block are refused before any CLI call. BOMs, symbolic links and file modes are kept. Install then uninstall gives back a file's bytes, except a final line break the file did not have.
+- The CLI is found on `PATH` by the module itself, because `cmd.exe` gives a missing command the same exit status as a failing one. On Windows a `.cmd` shim runs through `cmd.exe` with every argument quoted; an argument with `"` or `%` is refused.
+- Tests use a fake home and stub CLIs only (`tests/install.test.mjs`). A read-only `--dry-run` against the real CLIs on Windows found `claude.exe` and `codex.cmd`, both already registered.
+
+Next steps:
+
+1. A person runs `install` once against their real agents, on Windows and on macOS or Linux, and checks that `claude mcp list` and `codex mcp list` show the server. Then `uninstall`, and the two printed remove commands. The tests only use stubs.
+2. U3 (the demo video) was waiting for G8 and can start once this is merged.

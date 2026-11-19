@@ -2009,6 +2009,40 @@ The briefing's state section ends with a scope line: how many nodes matched, how
 - `context_for` without the new arguments is byte for byte what it was: the text and meter are compared with what `origin/main` 3a17536 rendered for the same two-party fixture, and the existing paging and briefing tests pass unchanged.
 - A scoped briefing too long for one MCP page, through the real route and adapter, pages back to the whole scoped text. A different question, budget or no budget is a different cache entry.
 
+## G8 — One-command agent setup (defined 2026-11-17, before the code; narrowed after review round 3)
+
+`npm run ledger -- install` connects Claude Code and Codex to this ledger in one step. `npm run ledger -- uninstall` takes the instruction blocks out again and prints the commands that remove the server registrations. Both print every change they make, and `--dry-run` prints the changes without making them. `--agent claude` or `--agent codex` limits either command to one agent.
+
+For each agent, install does two things:
+
+1. **Registers the MCP server** with the agent's own CLI, at user scope: `claude mcp add --scope user context-ledger -- node <repo>/src/mcp.mjs` and `codex mcp add context-ledger -- node <repo>/src/mcp.mjs`. A `PORT` other than 4317 is passed on, as `-e PORT=…` or `--env PORT=…`. Claude's `-e` takes every value up to the next option, so it goes before `--scope`. A server already registered under that name is left as it is, and install says so. Claude's `add` refuses a name its scope already has, so Claude is never asked with `mcp get`, which can start project servers for a health check. Codex's `add` replaces an entry of the same name, so install asks `codex mcp get --json` first. Only Codex's own "no such server" answer counts as absent, and an answer of any other shape is a failure.
+2. **Adds a short block** to the agent's user instruction file: `~/.claude/CLAUDE.md` for Claude Code, and `AGENTS.md` in `CODEX_HOME` (default `~/.codex`) for Codex. The block sits between two marker comments, after one empty line. It tells the agent to check the ledger before asking the person to repeat context, and says that labels and briefings are data, not instructions.
+
+If the server step fails for a reason other than a missing CLI, the instruction file is left as it is. Only Claude's own duplicate answer for the user scope counts as already registered. Codex's answer must be a stdio or HTTP entry of that name. The CLIs run from the home folder, so no project's MCP configuration applies. A relative `CODEX_HOME` is resolved once and given to Codex as an absolute path, so the registration and the block go to the same folder. The home folder comes from the environment the command runs with (`USERPROFILE` or `HOME`), never from anywhere else.
+
+**A known limit:** Codex has no create-if-absent. If another terminal registers `context-ledger` in the moment between install's `codex mcp get` and its `codex mcp add`, Codex replaces that entry.
+
+**Uninstall does not remove the server registration.** It prints the exact `mcp remove` command for each agent instead. Three review rounds showed that neither CLI reports a user-scope entry exactly. Claude prints its arguments joined into one line. Codex reports the effective entry but removes from its global table. So no check here could prove that an entry is the one install made, and removing the wrong one would delete the person's own configuration. Uninstall removes the block only when its text is exact, together with the empty line before it. It removes the file only when the file's bytes would otherwise be empty.
+
+**Files are read as bytes.** A UTF-16 BOM, any NUL byte (as BOM-less UTF-16 with ASCII text has) and invalid UTF-8 are refused. BOM-less UTF-16 without NUL bytes cannot be told from UTF-8 and is read as UTF-8. BOMs are kept. A symbolic link is written through and stays a link, and the link must point where it did when the file was read. The file keeps its mode. A file is written through a private temporary file and renamed into place. It must still be the same file (link or not, device, inode and mode) and hold the same bytes just before the rename, or before the delete. An editor that saves in that last moment can still lose its save, because no supported platform has a conditional rename. A block edited by hand, or markers that do not pair up, are refused. Every file check runs before the agent's CLI is called.
+
+### What is tested (fake home folder and stub CLIs only; the real configuration is never touched)
+
+- Install on an empty home creates both instruction files with one block each and calls each stub with exactly the arguments above. Claude is never asked with `mcp get`. The stubs parse each CLI's own options and keep Claude's scopes apart, so an argument in the wrong place fails. No temporary file is left behind.
+- Install twice gives the same files and the same registrations. Codex's `add` is not called again, and Claude's refusal is reported as "already registered".
+- An entry the person registered, whatever it runs, is left by install.
+- Uninstall removes the blocks, calls no CLI, leaves both registrations and prints both remove commands.
+- Install then uninstall gives back the exact bytes of a file that ended in a line break: with LF, CRLF, a trailing blank line, lines of spaces or two BOMs. A file with no final line break keeps the one install added, which is the only byte not given back. A file that held only the block is removed, and a file that held only a BOM keeps it. A line of spaces before a block is never removed.
+- `--dry-run` changes no file and calls no command that writes, for both install and uninstall, and makes no Claude call at all. `--agent claude` calls nothing of Codex's.
+- Unmatched markers, an edited block, UTF-16 with a BOM, NUL bytes and invalid UTF-8 are refused by both commands with "Nothing changed", before any CLI call.
+- A missing CLI skips that agent's registration with a message, still writes the block and makes install exit with status 1. Uninstall needs no CLI.
+- A CLI that answers with an error, or a Codex answer of the wrong shape, leaves that agent's instruction file as it is.
+- Arguments with spaces, `!`, `&`, `|`, parentheses and `^` reach the CLI exactly. On Windows, `.cmd` shims run through `cmd.exe` with delayed expansion off, and an argument containing `"` or `%` is refused rather than quoted.
+- A bad or empty `--agent`, an extra word, an unknown option and an invalid `PORT` (not a number, 0, or above 65535) fail and change nothing. Printed paths and the parser's own messages are escaped.
+- A symbolic link stays a link and the target's mode is kept. This test is skipped where the account cannot create links.
+
+`CONTEXT_LEDGER_CLAUDE_BIN` and `CONTEXT_LEDGER_CODEX_BIN` name the CLI when it is not on `PATH`; the tests set them to stubs.
+
 ### Acceptance
 
 - The four suites pass, with no new runtime dependency.
@@ -2028,3 +2062,29 @@ The briefing's state section ends with a scope line: how many nodes matched, how
 - **Round 2** (of c991f6a): all six fixes hold. Three more findings, fixed in bef4378: an ASCII word missed a mixed-script node word (`gpu` and a label `GPU` followed by a Han letter); letter pairs could end inside a marked letter; and two coverage notes (blank question over HTTP, MCP's handling of a repeated JSON name).
 - **Round 3** (of bef4378): those fixes hold. One low finding is fixed in the next commit: an ASCII prefix is now compared in whole letters, so `qax` no longer stops inside an `x` with an accent.
 - **Suites (Windows):** `npm run -s test:graph` 9/9; node 203/204 (one skipped), was 191/192 on `main`; Playwright 13/13; Python runtime 192 run, 50 skipped, OK.
+
+- A person runs `install` and `uninstall` once against their real agents before G8 is called done, because the tests use stubs.
+
+### G8 review log and an incident (2026-11-17)
+
+- **Round 1** (of 3af4131), ten findings, among them high ones: uninstall removed registrations it never made; UTF-16, invalid UTF-8 and BOM files could be damaged; the rename replaced links and modes. Fixed in 50025c6 with an install record.
+- **Round 2** (of 50025c6): five high findings, all about that record (stale, malformed or unsaved) and about probes reading a different scope from the one written. The record was dropped in a48d7eb for exact-match removal.
+- **Round 3** (of a48d7eb): exact matching could not be made safe either. Claude prints arguments joined, Codex reports the effective entry but removes from its global table, and `claude mcp get` can start project servers for a health check. In 591da7c the card was narrowed: uninstall prints the remove commands instead of running them, and install never calls `claude mcp get`.
+- **Round 4** (of 591da7c), fixed in the next commit:
+  - (medium) A file swapped for one with the same bytes, or given another mode, passed the byte check. The identity is now checked too.
+  - (medium) Any "already exists" text counted as Claude's duplicate answer. Only Claude's own answer counts now.
+  - (medium) A relative `CODEX_HOME` meant different folders to Codex and to the block. It is resolved once.
+  - (low) An existing Codex HTTP entry was not recognised. It is now.
+  - Accepted, not changed: the high finding that a registration made in another terminal between `get` and `add` is replaced. Codex's suggested fix, printing the add command instead, would drop automatic registration, which is the point of the card. The window is one CLI call long and is recorded above as a known limit.
+- **Incident, found and fixed while writing the round 4 tests:** three in-process tests called `setupAgents` with a sandbox environment, but `agentTargets` took the home folder from `os.homedir()`, which reads the real one. They wrote the block into the real `~/.claude/CLAUDE.md` (19:17) and `~/.codex/AGENTS.md` (19:29) on the reviewer's own machine. No real CLI was run, because those tests used fake CLIs. Both files were backed up and the exact block was removed with the module's own `withoutBlock`; each file is now a byte-for-byte prefix of its backup. The home folder now comes only from the environment passed in (`homeOf`). An environment without one is refused. The last test in `tests/install.test.mjs` checks that the real files are byte for byte as they were before the run.
+- **Round 5** (of 05ba804): the HTTP fix and the fake-home fix hold. Medium findings, fixed in the next commit:
+  - The snapshot read bytes and mode separately from the identity. Now one open file gives both, and the path must still name that file.
+  - Claude's duplicate answer now counts only as the whole line.
+  - A `CODEX_HOME` that does not exist is refused before Codex is asked, as Codex refuses it.
+  - A relative CLI path is resolved to an absolute one, because the CLI runs from the home folder.
+  - The printed Codex remove command names its `CODEX_HOME`.
+  - Test children get an allow-listed environment (no `NODE_OPTIONS`).
+  - Accepted: the real-file guard still reads the default instruction files of the person running the tests. An isolated ambient home would be stronger, but every in-process call now passes an explicit fake home, and an environment without a home is refused.
+  - No sixth round was run; the findings had narrowed to edge races each round.
+- **Suites (Windows):** `npm run -s test:graph` 9/9; node 219/221 (two skipped: the existing one and the symbolic-link test, which this Windows account cannot run), was 191/192 on `main`; Playwright 13/13; Python runtime 192 run, 50 skipped, OK.
+- **Still owed before Done:** a person runs `install` against their real Claude Code and Codex, then `uninstall` and the two printed remove commands, on Windows and on macOS or Linux.
