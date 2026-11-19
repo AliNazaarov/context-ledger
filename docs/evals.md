@@ -1614,3 +1614,17 @@ Terms: a **review** is one person's decision on one node of one graph snapshot, 
 | Survives a replay and a reload | Reviews stay after **Replay demo** and after a page reload, because the recording's graph IDs do not change. |
 | Keyboard | Every review control is a button reachable by Tab. After a decision, focus stays in the Review block. |
 | Tests | Node tests for the store (save, undo, edit rules, bad stored data, a throwing storage). A Playwright test approves, edits and rejects three demo nodes, reloads, sees all three, undoes one, checks that live mode has no Review block, and saves a screenshot. |
+
+### P3 results (2026-11-18, macOS)
+
+- **Demo only: pass.** In demo mode the Review block appears once a node is open. Live mode has no Review block and never fetches `review.mjs`, because the demo loads it with a dynamic import.
+- **Approve and reject: pass.** The decision shows in the node's meta, its `aria-label` and its class. A rejected label is struck through. Undo clears the decision.
+- **Edit: pass.** An empty save is refused with a message. `Pair with Ali <b>tonight</b>` is kept and shown as text, with no `b` element created. The evidence heading keeps the original label.
+- **Browser only: pass.** Every request is a GET. Bad stored data, a throwing storage and `null` storage are covered by the node tests, and the e2e test covers invalid JSON in `localStorage`.
+- **Survives a replay and a reload: pass.** **Keyboard: pass.** Approve, Reject and Save move focus to Undo; Undo and Cancel move it to Edit.
+- Screenshot: [docs/console/07-review.png](console/07-review.png).
+- **Independent review** (Claude Sonnet as `ecc:code-reviewer`, read-only). One medium and two low findings, all fixed with tests:
+  - (medium) After a republish under a new graph ID with the node unchanged, the panel kept the old graph ID. It still said "approved", and a new decision was saved to the old snapshot. The panel now follows every republish. A Playwright test approves Leo's goal mid-demo and sees the review start fresh after his next publish; the test fails on the old code.
+  - (low) An open edit form lost its text when the same node was picked again. Showing the same snapshot again is now a no-op, and there is a test for it.
+  - (low) Live mode loaded `review.mjs` although none of it ran. It is now imported only in demo mode, and the live test checks that no request for it is made.
+- **Suites (macOS, Node 26):** node 253/254 (the one failure is the same `tests/mcp.test.mjs` test that fails on `ruslan/console-v0`); Playwright 26/26; `npm run -s test:graph` passes.

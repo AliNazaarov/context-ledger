@@ -4,7 +4,6 @@ import { createBrain } from './brain.mjs';
 import { createEvidence } from './evidence.mjs';
 import { createModel } from './model.mjs';
 import { createOffice, providerNames } from './office.mjs';
-import { createReviewPanel, createReviews, withReviews } from './review.mjs';
 import { demoSource, liveSource } from './source.mjs';
 
 const params = new URLSearchParams(location.search);
@@ -29,17 +28,21 @@ const office = createOffice($('#office'));
 const brain = createBrain($('#brain'), { onSelect: select });
 
 // Card P3: the reviewer prototype runs in demo mode only, on the synthetic recording.
+// startDemo loads it, so live mode never fetches or runs the review code.
 let reviewPanel = null;
-let reviews = null;
-if (demo) {
-  let storage = null;
-  try { storage = window.localStorage; } catch { /* blocked: reviews last for this session */ }
-  reviews = createReviews(storage);
-  reviewPanel = createReviewPanel($('#review'), { reviews, onChange: () => brain.render(graphView()) });
-}
+let attachReviews = view => view;
 
 /** The graph to draw, with each node's review attached in demo mode. */
-const graphView = () => (reviews ? withReviews(model.graph(), reviews) : model.graph());
+const graphView = () => attachReviews(model.graph());
+
+async function startReviews() {
+  const { createReviewPanel, createReviews, withReviews } = await import('./review.mjs');
+  let storage = null;
+  try { storage = window.localStorage; } catch { /* blocked: reviews last for this session */ }
+  const reviews = createReviews(storage);
+  attachReviews = view => withReviews(view, reviews);
+  reviewPanel = createReviewPanel($('#review'), { reviews, onChange: () => brain.render(graphView()) });
+}
 
 function partyName(key) {
   return model.graph().columns.find(column => column.key === key)?.label ?? key;
@@ -146,12 +149,15 @@ function reconcileSelection(changed) {
     selectedKey = null;
     reviewPanel?.clear();
     evidence.clear('That node is no longer in the current graph of its agent.');
-  } else if (changed.has(selectedKey) || found.entry.sessionId !== selectedSession) {
-    // The node changed, or its agent now publishes from another transcript.
-    selectedSession = found.entry.sessionId;
-    brain.select(selectedKey);
+  } else {
+    // A republish is a new snapshot, even with the node unchanged: the review follows it.
     reviewPanel?.show(found);
-    evidence.show(found);
+    if (changed.has(selectedKey) || found.entry.sessionId !== selectedSession) {
+      // The node changed, or its agent now publishes from another transcript.
+      selectedSession = found.entry.sessionId;
+      brain.select(selectedKey);
+      evidence.show(found);
+    }
   }
 }
 
@@ -177,6 +183,7 @@ async function startDemo() {
   $('#mode').textContent = 'Demo';
   document.body.classList.add('is-demo');
   status.textContent = 'Loading the demo…';
+  await startReviews();
   const recording = await (await fetch('/console/demo-recording.json')).json();
   let clock;
   const play = () => {

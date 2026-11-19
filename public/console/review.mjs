@@ -156,7 +156,12 @@ export function createReviewPanel(container, { reviews, onChange }) {
   }
 
   return {
+    /**
+     * Point the block at a node snapshot. The same snapshot again is a no-op, so an open
+     * edit form keeps its text; a new graph ID is a new snapshot and starts unreviewed.
+     */
     show({ entry, node }) {
+      if (current && current.graphId === entry.graph.id && current.nodeId === node.id && current.label === node.label) return;
       current = { graphId: entry.graph.id, nodeId: node.id, label: node.label };
       draw();
     },
