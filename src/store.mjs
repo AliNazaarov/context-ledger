@@ -78,6 +78,9 @@ function messageAt(record, provider, line) {
   if (text?.trim()) return { role, text, line };
 }
 
+// How many skipped line numbers an import reports; the count covers all of them.
+const skippedLinesShown = 10;
+
 /** h: and 32 hex characters of sha256(session ID NUL line NUL the raw line), per docs/architecture.md section 4. */
 function lineKey(sessionId, line, rawLine) {
   return 'h:' + createHash('sha256').update(`${sessionId}\0${line}\0`).update(rawLine).digest('hex').slice(0, 32);
@@ -87,10 +90,17 @@ function lineKey(sessionId, line, rawLine) {
  * The supported messages of a transcript, each with its stable key: u:<uuid> for the
  * first Claude record with a given UUID, otherwise a line-hash key, so a turn without a
  * UUID, or one that repeats a UUID, keeps its line and gets a key of its own.
+ *
+ * Card I2: a line that is not JSON (often a last line cut off while the agent was still
+ * writing) is skipped and counted instead of rejecting the whole file. Messages keep their
+ * line numbers in the file, so citations stay true. A file with no readable line at all is
+ * still refused, since it is not JSONL.
  */
 function parseTranscript(transcript, provider, sessionId) {
   const messages = [];
+  const skipped = [];
   const uuids = new Set();
+  let readable = 0;
   for (const [index, rawLine] of transcript.split('\n').entries()) {
     const line = index + 1;
     const value = rawLine.trim();
@@ -100,8 +110,10 @@ function parseTranscript(transcript, provider, sessionId) {
     try {
       record = JSON.parse(value);
     } catch {
-      throw new InputError(`Invalid JSONL at line ${line}.`);
+      skipped.push(line);
+      continue;
     }
+    readable += 1;
     const message = messageAt(record, provider, line);
     if (!message) continue;
     const uuid = provider === 'claude' ? record.uuid : undefined;
@@ -111,8 +123,14 @@ function parseTranscript(transcript, provider, sessionId) {
     messages.push({ ...message, key: fresh ? 'u:' + uuid : lineKey(sessionId, line, rawLine) });
   }
 
+  if (readable === 0 && skipped.length) throw new InputError(`Invalid JSONL at line ${skipped[0]}.`);
   if (messages.length === 0) throw new InputError('No supported conversation messages found.');
-  return messages;
+  return { messages, skipped };
+}
+
+function withSkipped(summary, skipped) {
+  if (!skipped.length) return summary;
+  return { ...summary, skipped: { count: skipped.length, lines: skipped.slice(0, skippedLinesShown) } };
 }
 
 function sourceName(source) {
@@ -282,10 +300,11 @@ export function openStore(path) {
       const name = sourceName(source);
       if (!isProjectSlug(project)) throw new InputError('P' + projectSlugRule.slice(1));
       const id = createHash('sha256').update(`${provider}\0`).update(transcript).digest('hex');
+      // Parsed before the duplicate check, so a repeated import reports the same skipped lines.
+      const { messages, skipped } = parseTranscript(transcript, provider, id);
       const existing = getSummary.get(id);
-      if (existing) return existing;
+      if (existing) return withSkipped(existing, skipped);
 
-      const messages = parseTranscript(transcript, provider, id);
       const title = titleFor(messages);
       const searchText = [title, ...messages.map(message => message.text)].join('\n').toLowerCase();
       database.exec('BEGIN IMMEDIATE');
@@ -293,7 +312,7 @@ export function openStore(path) {
       try {
         // Another process may have stored the same bytes since the check above.
         const stored = getSummary.get(id);
-        if (stored) return stored;
+        if (stored) return withSkipped(stored, skipped);
         insertProject.run(randomBytes(16).toString('hex'), project, project);
         // Rows first: the foreign key is deferred, and a session inserted with rows
         // already in place is left alone by the trigger for older builds.
@@ -307,7 +326,7 @@ export function openStore(path) {
       } finally {
         if (open) database.exec('ROLLBACK');
       }
-      return getSummary.get(id);
+      return withSkipped(getSummary.get(id), skipped);
     },
 
     list(query, provider, project) {

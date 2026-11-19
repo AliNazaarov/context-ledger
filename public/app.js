@@ -127,6 +127,15 @@ async function openTranscript(id, focusHeading = false) {
   }
 }
 
+// Card I2: a partial import says so, with what was kept and which lines were skipped.
+function importNote(session, skipped) {
+  if (!skipped?.count) return `Imported ${session.source}.`;
+  const plural = (count, noun) => `${count} ${noun}${count === 1 ? '' : 's'}`;
+  const which = skipped.lines.length < skipped.count ? `, first ${skipped.lines.join(', ')}` : ` (${skipped.lines.join(', ')})`;
+  return `Partially imported ${session.source}: kept ${plural(session.messageCount, 'message')}, `
+    + `skipped ${plural(skipped.count, 'unreadable line')}${which}. Messages on those lines are missing.`;
+}
+
 // Deleting asks first, with fixed text: transcript text never goes into the dialog.
 readerDelete.addEventListener('click', async () => {
   const id = selectedId;
@@ -168,13 +177,13 @@ importForm.addEventListener('submit', async (event) => {
   importStatus.textContent = 'Importing transcript…';
 
   try {
-    const { session } = await request('/api/import', {
+    const { session, skipped } = await request('/api/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider, source: file.name, transcript: await file.text() }),
     });
     if (transcriptFile.files[0] === file) transcriptFile.value = '';
-    importStatus.textContent = `Imported ${session.source}.`;
+    importStatus.textContent = importNote(session, skipped);
     const refresh = search();
     if (readerRequest === readerAtImport) await openTranscript(session.id);
     await refresh;

@@ -324,3 +324,9 @@ Next steps:
 2. P1f (Backlog): an origin-scoped browser credential, for example a secret kept in page storage and sent as a header, in place of or beside the cookie. It changes ADR-10, so P1's owner decides.
 3. Known limits: same-user programs can read the token file. The folder is trusted: someone who can write to it can still swap or delete the file. A new data folder on Windows is not restricted, only the token file is. The server's default database is relative to its working folder, while clients default to the repository's. The latent runtime on 4320 has no token of its own. The independent review's low findings (L2–L7) are not addressed on this card. CI runs the Node suite only on Linux, so the Windows ACL tests run only locally (Codex round 4, low, open).
 4. After a merge, MCP configs that set only `PORT` keep working when the ledger runs from the repository. A ledger started with another `CONTEXT_LEDGER_DB` needs the same absolute value in the MCP config.
+
+## Current checkpoint — I2 tolerant JSONL parsing (2026-11-17)
+
+Branch `ruslan/i2-tolerant-jsonl`. A transcript line that is not JSON no longer rejects the whole import. The parser skips it, and `POST /api/import` returns `skipped: { count, lines }` (the first ten line numbers) beside the session. The browser shows "Partially imported", with the counts. Messages keep their line numbers in the file, so citations stay true. A file with no readable line is still refused with `Invalid JSONL at line N.`
+
+Next owner: the skip count is not stored, so a reopened session does not show it. Add it with P1's storage work. No schema change was made here.
