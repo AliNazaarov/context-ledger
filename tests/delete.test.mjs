@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { schemaVersion } from '../src/migrate.mjs';
 import { ConflictError, InputError, openStore } from '../src/store.mjs';
+import { tokenFileFor } from '../src/token.mjs';
+import { bearer, ledgerToken, restrictToOwner } from './ledger-auth.mjs';
 
 // P1d, first part: delete one imported session. Synthetic transcripts only, and only
 // temporary or :memory: databases: never .context-ledger/ledger.sqlite.
@@ -280,14 +282,21 @@ async function startServer(t, prepare) {
   for await (const chunk of child.stdout) {
     output += chunk;
     const match = output.match(/listening at http:\/\/127\.0\.0\.1:(\d+)/);
-    if (match) return Number(match[1]);
+    if (match) {
+      // P1e: every API request carries the token the server wrote next to its database.
+      const port = Number(match[1]);
+      return { port, path, auth: bearer(await ledgerToken(path, port)) };
+    }
   }
   throw new Error('The server did not start.');
 }
 
-const cli = (port, ...args) => execute(process.execPath, ['src/cli.mjs', ...args], { cwd: root, env: { ...process.env, PORT: String(port) } });
-const cliFails = async (port, args, stderr) => {
-  await assert.rejects(cli(port, ...args), error => {
+// The CLI finds the token from PORT and CONTEXT_LEDGER_DB, as it does for the real ledger.
+const cli = (server, ...args) => execute(process.execPath, ['src/cli.mjs', ...args], {
+  cwd: root, env: { ...process.env, PORT: String(server.port), CONTEXT_LEDGER_DB: server.path },
+});
+const cliFails = async (server, args, stderr) => {
+  await assert.rejects(cli(server, ...args), error => {
     assert.equal(error.code, 1);
     assert.equal(error.stdout, '');
     assert.equal(error.stderr.trim(), stderr);
@@ -296,10 +305,12 @@ const cliFails = async (port, args, stderr) => {
 };
 
 test('ledger delete deletes through the server, and refuses cited and unknown sessions', async t => {
-  const port = await startServer(t);
+  const server = await startServer(t);
+  const { port, auth } = server;
   const origin = `http://127.0.0.1:${port}`;
+  const get = path => fetch(origin + path, { headers: auth });
   const post = async (path, body) => {
-    const response = await fetch(origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify(body) });
+    const response = await fetch(origin + path, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify(body) });
     assert.equal(response.status, 200);
     return response.json();
   };
@@ -308,49 +319,50 @@ test('ledger delete deletes through the server, and refuses cited and unknown se
     transcript: JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'A cited synthetic Nimbus note.' }] } }) });
   await post('/api/graphs', v1(cited, 'Nimbus goal'));
 
-  const deleted = await cli(port, 'delete', gone.id);
+  const deleted = await cli(server, 'delete', gone.id);
   assert.equal(deleted.stdout, `Deleted session ${gone.id}.\n`);
   assert.equal(deleted.stderr, '');
-  assert.equal((await fetch(`${origin}/api/sessions/${gone.id}`)).status, 404);
-  assert.deepEqual((await (await fetch(`${origin}/api/sessions?q=nimbus`)).json()).sessions.map(row => row.id), [cited.id]);
+  assert.equal((await get(`/api/sessions/${gone.id}`)).status, 404);
+  assert.deepEqual((await (await get('/api/sessions?q=nimbus')).json()).sessions.map(row => row.id), [cited.id]);
 
-  await cliFails(port, ['delete', gone.id], 'Session not found.');
-  await cliFails(port, ['delete', cited.id], 'Session is cited by 1 graph, so it was not deleted.');
-  assert.equal((await fetch(`${origin}/api/sessions/${cited.id}`)).status, 200);
+  await cliFails(server, ['delete', gone.id], 'Session not found.');
+  await cliFails(server, ['delete', cited.id], 'Session is cited by 1 graph, so it was not deleted.');
+  assert.equal((await get(`/api/sessions/${cited.id}`)).status, 200);
 
   // A DELETE without the Origin, as a page on another site or a plain client sends it, is refused.
-  const bare = await fetch(`${origin}/api/sessions/${cited.id}`, { method: 'DELETE' });
+  const bare = await fetch(`${origin}/api/sessions/${cited.id}`, { method: 'DELETE', headers: auth });
   assert.deepEqual([bare.status, await bare.json()], [403, { error: 'Deleting a session requires the same origin.' }]);
 
   // A list cursor on a session deleted over HTTP is refused; a new listing works.
   const { session: anchor } = await post('/api/import', { provider: 'claude', source: 'anchor.jsonl', transcript: transcript('A synthetic anchor note.') });
-  const page = await (await fetch(`${origin}/api/sessions?limit=1`)).json();
+  const page = await (await get('/api/sessions?limit=1')).json();
   assert.equal(page.next, anchor.id);
-  assert.equal((await cli(port, 'delete', anchor.id)).stdout, `Deleted session ${anchor.id}.\n`);
-  const stale = await fetch(`${origin}/api/sessions?limit=1&after=${anchor.id}`);
+  assert.equal((await cli(server, 'delete', anchor.id)).stdout, `Deleted session ${anchor.id}.\n`);
+  const stale = await get(`/api/sessions?limit=1&after=${anchor.id}`);
   assert.deepEqual([stale.status, await stale.json()], [400, { error: 'Unknown cursor.' }]);
-  const fresh = await (await fetch(`${origin}/api/sessions?limit=10`)).json();
+  const fresh = await (await get('/api/sessions?limit=10')).json();
   assert.deepEqual(fresh.sessions.map(row => row.id), [cited.id]);
 });
 
 test('a server on a WAL database answers a delete with 409 and the journal mode', async t => {
-  const port = await startServer(t, path => {
+  const server = await startServer(t, path => {
     openStore(path).close();
     const setup = new DatabaseSync(path);
     setup.prepare('PRAGMA journal_mode = wal').get();
     setup.close();
   });
+  const { port, auth } = server;
   const origin = `http://127.0.0.1:${port}`;
-  const imported = await fetch(`${origin}/api/import`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin },
+  const imported = await fetch(`${origin}/api/import`, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json', Origin: origin },
     body: JSON.stringify({ provider: 'claude', source: 'wal.jsonl', transcript: transcript('A synthetic WAL server note.') }) });
   const { session } = await imported.json();
-  const refused = await fetch(`${origin}/api/sessions/${session.id}`, { method: 'DELETE', headers: { Origin: origin } });
+  const refused = await fetch(`${origin}/api/sessions/${session.id}`, { method: 'DELETE', headers: { ...auth, Origin: origin } });
   assert.deepEqual([refused.status, await refused.json()], [409, {
     error: 'This ledger database uses journal mode wal, so a delete could leave copies of the transcript in the file. Deleting needs the default rollback journal.',
     journalMode: 'wal',
   }]);
-  await cliFails(port, ['delete', session.id], 'The ledger database does not use the default rollback journal, so the session was not deleted.');
-  assert.equal((await fetch(`${origin}/api/sessions/${session.id}`)).status, 200);
+  await cliFails(server, ['delete', session.id], 'The ledger database does not use the default rollback journal, so the session was not deleted.');
+  assert.equal((await fetch(`${origin}/api/sessions/${session.id}`, { headers: auth })).status, 200);
 });
 
 test('ledger delete sends one DELETE with the local Origin, and prints only fixed text', async t => {
@@ -360,48 +372,60 @@ test('ledger delete sends one DELETE with the local Origin, and prints only fixe
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
-    requests.push({ method: request.method, url: request.url, origin: request.headers.origin, body: Buffer.concat(chunks).length });
+    requests.push({ method: request.method, url: request.url, origin: request.headers.origin, authorization: request.headers.authorization, body: Buffer.concat(chunks).length });
     response.writeHead(reply.status, { 'Content-Type': 'application/json' });
     response.end(reply.raw ?? JSON.stringify(reply.body));
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const port = server.address().port;
+  // P1e: a delete goes only where the token file says the ledger is.
+  const directory = await temporaryDirectory(t, 'ledger-delete-cli-');
+  const path = join(directory, 'ledger.sqlite');
+  const tokenFile = tokenFileFor(path, port);
+  await writeFile(tokenFile, JSON.stringify({ port, token: 'D'.repeat(43) }) + '\n', { mode: 0o600 });
+  restrictToOwner(tokenFile);
+  const target = { port, path };
 
-  assert.equal((await cli(port, 'delete', id)).stdout, `Deleted session ${id}.\n`);
-  assert.deepEqual(requests, [{ method: 'DELETE', url: `/api/sessions/${id}`, origin: `http://127.0.0.1:${port}`, body: 0 }]);
+  assert.equal((await cli(target, 'delete', id)).stdout, `Deleted session ${id}.\n`);
+  assert.deepEqual(requests, [{ method: 'DELETE', url: `/api/sessions/${id}`, origin: `http://127.0.0.1:${port}`, authorization: `Bearer ${'D'.repeat(43)}`, body: 0 }]);
 
   // Bad IDs print the usage and send nothing.
   for (const args of [['delete'], ['delete', 'C'.repeat(64)], ['delete', 'c'.repeat(63)], ['delete', id, id]]) {
-    await assert.rejects(cli(port, ...args), error => error.code === 1 && error.stderr.startsWith('Usage:') && error.stderr.includes('delete <session-id>'));
+    await assert.rejects(cli(target, ...args), error => error.code === 1 && error.stderr.startsWith('Usage:') && error.stderr.includes('delete <session-id>'));
   }
   assert.equal(requests.length, 1);
 
   // The server's own words never reach the terminal: a 409 is built from its count.
   const hostile = `Gone ${String.fromCodePoint(0x1b)}[2J ${String.fromCodePoint(0x202e)}reversed`;
   reply = { status: 409, body: { error: hostile, graphs: 3 } };
-  await cliFails(port, ['delete', id], 'Session is cited by 3 graphs, so it was not deleted.');
+  await cliFails(target, ['delete', id], 'Session is cited by 3 graphs, so it was not deleted.');
   for (const graphs of [0, -1, 1.5, '2', null]) {
     reply = { status: 409, body: { error: hostile, graphs } };
-    await cliFails(port, ['delete', id], 'Context Ledger returned HTTP 409.');
+    await cliFails(target, ['delete', id], 'Context Ledger returned HTTP 409.');
   }
   reply = { status: 403, body: { error: hostile } };
-  await cliFails(port, ['delete', id], 'Context Ledger returned HTTP 403.');
+  await cliFails(target, ['delete', id], 'Context Ledger returned HTTP 403.');
   reply = { status: 404, body: { error: hostile } };
-  await cliFails(port, ['delete', id], 'Session not found.');
+  await cliFails(target, ['delete', id], 'Session not found.');
   reply = { status: 409, body: { error: hostile, journalMode: 'wal' } };
-  await cliFails(port, ['delete', id], 'The ledger database does not use the default rollback journal, so the session was not deleted.');
+  await cliFails(target, ['delete', id], 'The ledger database does not use the default rollback journal, so the session was not deleted.');
   for (const journalMode of [hostile, 'delete', null, 3]) {
     reply = { status: 409, body: { error: hostile, journalMode } };
-    await cliFails(port, ['delete', id], 'Context Ledger returned HTTP 409.');
+    await cliFails(target, ['delete', id], 'Context Ledger returned HTTP 409.');
   }
   reply = { status: 200, body: { deleted: 'd'.repeat(64) } };
-  await cliFails(port, ['delete', id], 'Context Ledger returned an unexpected response.');
+  await cliFails(target, ['delete', id], 'Context Ledger returned an unexpected response.');
   // A body that is not JSON: the parse error would quote it, so it is not printed.
   for (const status of [200, 409]) {
     reply = { status, raw: hostile };
-    await cliFails(port, ['delete', id], status === 200 ? 'Context Ledger returned an unexpected response.' : 'Context Ledger returned HTTP 409.');
+    await cliFails(target, ['delete', id], status === 200 ? 'Context Ledger returned an unexpected response.' : 'Context Ledger returned HTTP 409.');
   }
+  // Without a token for this port, as for a graph packet, nothing is sent (P1e).
+  const sent = requests.length;
+  await cliFails({ port, path: join(directory, 'other.sqlite') }, ['delete', id],
+    'Cannot read the Context Ledger access token. Start the ledger with npm start, and run this with the same PORT and CONTEXT_LEDGER_DB as the ledger.');
+  assert.equal(requests.length, sent);
 });
 
 test('the MCP adapter has no way to delete', async () => {

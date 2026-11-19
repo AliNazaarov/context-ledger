@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { GraphInputError } from './graph.mjs';
 import { LatentError, latentFiles, latentRead, latentTeam, latentTransfer } from './latent.mjs';
 import { ConflictError, InputError, isProjectSlug, isProvider, openStore, projectSlugRule } from './store.mjs';
+import { codeLifetimeMs, createAuth, newToken, removeTokenFile, tokenFileFor, writeTokenFile } from './token.mjs';
 
 const maxRequestBytes = 8 * 1024 * 1024;
 const staticFiles = new Map([
@@ -85,7 +86,25 @@ const defaultLatentUrl = 'http://127.0.0.1:4320';
 const latentUrl = () => process.env.LATENT_URL ?? defaultLatentUrl;
 
 const port = Number(process.env.PORT ?? 4317);
-const store = openStore(process.env.CONTEXT_LEDGER_DB ?? '.context-ledger/ledger.sqlite');
+const database = process.env.CONTEXT_LEDGER_DB ?? '.context-ledger/ledger.sqlite';
+const store = openStore(database);
+
+// A fresh API token at each start, in a file next to the database named for the port
+// (ADR-10; <database>.<port>.token), written only once the port is ours: a second
+// server that cannot listen never replaces the first one's token, and a server on
+// another port writes its own file. Only the CLI and the MCP adapter read the file; the
+// browser signs in with a one-time code. Requests before the file is written get 503.
+const tokenFailure = 'Cannot write the access token file next to the database. Set CONTEXT_LEDGER_DB to a file in a folder you own.';
+if (database === ':memory:') {
+  console.error(tokenFailure);
+  process.exit(1);
+}
+let tokenFile;
+let auth;
+// The token file's identity, so a latent read refuses it under any name (a hard link).
+let tokenIdentity;
+const refuseFiles = () => (tokenIdentity ? [tokenIdentity] : []);
+const signInHelp = 'Sign in first: run npm run ledger -- login and open the link it prints.';
 
 // A handler returns the JSON body of a 200 response, `sent` when it wrote the response
 // itself, or undefined when the record is not there; the request then goes on down
@@ -96,8 +115,9 @@ const idPattern = (prefix, suffix = '') => new RegExp(`^${prefix}/${hexId}${suff
 
 // Entries match on the method and the exact path or the anchored pattern, in order.
 // A request that matches none is a 404 whatever its method (there is no 405). The
-// Host and URL checks run before this table; each write checks its Origin, in readJson
-// or, for the bodiless DELETE, in requireSameOrigin.
+// Host, URL and token checks run before this table; each write checks its Origin, in
+// readJson or, for the bodiless DELETE, in requireSameOrigin. Only the static files and
+// /login are open without the token or a cookie.
 const routes = [
   ...[...staticFiles].map(([path, [file, contentType]]) => ({
     method: 'GET', path, handler: async ({ response }) => {
@@ -107,6 +127,21 @@ const routes = [
       return sent;
     },
   })),
+  { method: 'GET', path: '/login', handler: ({ response, url }) => {
+    // A one-time code from the start-up line or `npm run ledger -- login` becomes a
+    // session cookie. The code is used up whether or not it was still valid.
+    const codes = url.searchParams.getAll('code');
+    const cookie = codes.length === 1 ? auth.redeem(codes[0]) : undefined;
+    if (!cookie) throw new HttpError(401, 'This sign-in link was already used, has expired or is not valid. Run npm run ledger -- login for a new one.');
+    response.writeHead(303, { Location: '/', 'Set-Cookie': cookie });
+    response.end();
+    return sent;
+  } },
+  { method: 'POST', path: '/api/login', handler: ({ request }) => {
+    // Sign-in codes are made with the token file, not with a browser session.
+    if (!auth.bearer(request)) throw new HttpError(403, 'Sign-in links are made with the access token: run npm run ledger -- login.');
+    return { path: '/login?code=' + auth.mintCode(), expiresInSeconds: codeLifetimeMs / 1000 };
+  } },
   { method: 'POST', path: '/api/import', handler: async ({ request, origin }) => {
     const input = await readJson(request, origin, 'Import');
     return { session: store.importTranscript(input) };
@@ -159,16 +194,16 @@ const routes = [
   } },
   { method: 'POST', path: '/api/latent/read', handler: async ({ request, origin }) => {
     const input = await readJson(request, origin, 'A latent read');
-    return latentRead(input, { latentUrl: latentUrl(), latentRoot: process.env.LATENT_ROOT });
+    return latentRead(input, { latentUrl: latentUrl(), latentRoot: process.env.LATENT_ROOT, refuseFiles: refuseFiles() });
   } },
   { method: 'POST', path: '/api/latent/transfer', handler: async ({ request, origin }) => {
     const input = await readJson(request, origin, 'A latent transfer');
-    return latentTransfer(input, { latentUrl: latentUrl(), latentRoot: process.env.LATENT_ROOT });
+    return latentTransfer(input, { latentUrl: latentUrl(), latentRoot: process.env.LATENT_ROOT, refuseFiles: refuseFiles() });
   } },
   { method: 'POST', path: '/api/latent/files', handler: async ({ request, origin }) => {
     // The fallback's numbered text without the runtime: MCP pages a long fallback with it.
     const input = await readJson(request, origin, 'Reading latent files');
-    return latentFiles(input, { latentRoot: process.env.LATENT_ROOT });
+    return latentFiles(input, { latentRoot: process.env.LATENT_ROOT, refuseFiles: refuseFiles() });
   } },
   { method: 'POST', path: '/api/latent/team', handler: async ({ request, origin }) => {
     const input = await readJson(request, origin, 'A latent team run');
@@ -218,6 +253,13 @@ const server = createServer(async (request, response) => {
     }
     const origin = `http://${host}`;
     const url = new URL(request.url, origin);
+    if (!auth) throw new HttpError(503, 'Context Ledger is starting.');
+    if (!staticFiles.has(url.pathname) && url.pathname !== '/login') {
+      if (!auth.allowed(request)) {
+        response.setHeader('WWW-Authenticate', 'Bearer realm="Context Ledger"');
+        throw new HttpError(401, signInHelp);
+      }
+    }
 
     for (const route of routes) {
       if (route.method !== request.method) continue;
@@ -246,5 +288,25 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(port, '127.0.0.1', () => {
-  console.log(`Context Ledger listening at http://127.0.0.1:${server.address().port}`);
+  const localPort = server.address().port;
+  // The plain token lives only in this callback and in the file; auth keeps its digest.
+  const token = newToken();
+  try {
+    tokenFile = tokenFileFor(database, localPort);
+    tokenIdentity = writeTokenFile(tokenFile, token, localPort);
+  } catch {
+    console.error(tokenFailure);
+    process.exit(1);
+  }
+  auth = createAuth({ token, port: localPort });
+  // A clean stop removes the file, so a program that takes the port later gets no
+  // live token from a client. A killed process leaves a dead token behind.
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => {
+      removeTokenFile(tokenFile, auth.isOwnToken);
+      process.exit(0);
+    });
+  }
+  console.log(`Context Ledger listening at http://127.0.0.1:${localPort}`);
+  console.log(`Sign in to the browser app (one use, within ${codeLifetimeMs / 1000} seconds): http://127.0.0.1:${localPort}${'/login?code=' + auth.mintCode()}`);
 });

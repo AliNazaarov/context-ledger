@@ -10,6 +10,7 @@ import { test } from 'node:test';
 import { schemaVersion } from '../src/migrate.mjs';
 import { openStore } from '../src/store.mjs';
 import { startMcp } from './mcp-client.mjs';
+import { bearer, ledgerToken } from './ledger-auth.mjs';
 
 // Card P1c: one messages row per turn with stable keys, schema version 3
 // (docs/evals.md, "P1c — One row per message, stable keys"). Synthetic data only.
@@ -816,7 +817,12 @@ async function startServer(database) {
   for await (const chunk of child.stdout) {
     output += chunk;
     const match = output.match(/listening at (http:\/\/127\.0\.0\.1:(\d+))/u);
-    if (match) return { origin: match[1], port: Number(match[2]), stop: async () => { child.kill(); await once(child, 'exit'); } };
+    if (match) {
+      // P1e: API requests carry the token the server wrote next to its database.
+      const port = Number(match[2]);
+      const auth = bearer(await ledgerToken(database, port));
+      return { origin: match[1], port, database, auth, stop: async () => { child.kill(); await once(child, 'exit'); } };
+    }
   }
   throw new Error('Server exited before listening: ' + output);
 }
@@ -832,12 +838,12 @@ test('the session route returns each message with its key, and MCP session_read 
 ${claudeRecord('assistant', escaped, { uuid: fourth })}`;
   const imported = await fetch(server.origin + '/api/import', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Origin: server.origin },
+    headers: { ...server.auth, 'Content-Type': 'application/json', Origin: server.origin },
     body: JSON.stringify({ provider: 'claude', source: 'leo.jsonl', transcript }),
   });
   assert.equal(imported.status, 200);
   const { session: summary } = await imported.json();
-  const response = await fetch(`${server.origin}/api/sessions/${summary.id}`);
+  const response = await fetch(`${server.origin}/api/sessions/${summary.id}`, { headers: server.auth });
   assert.equal(response.status, 200);
   const { session } = await response.json();
   assert.deepEqual(session.messages, [
@@ -847,7 +853,7 @@ ${claudeRecord('assistant', escaped, { uuid: fourth })}`;
     { role: 'assistant', text: escaped, line: 5, key: `u:${fourth}` },
   ]);
 
-  const client = startMcp(server.port);
+  const client = startMcp(server.port, { CONTEXT_LEDGER_DB: server.database });
   keep(async () => {
     if (client.child.exitCode === null) await client.close();
   });

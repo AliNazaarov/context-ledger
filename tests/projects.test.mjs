@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { defaultProject, schemaVersion } from '../src/migrate.mjs';
 import { InputError, openStore } from '../src/store.mjs';
+import { bearer, ledgerToken } from './ledger-auth.mjs';
 
 // Card P1b: projects as schema version 2 (docs/evals.md, "P1b — Projects"). Synthetic data.
 
@@ -627,13 +628,20 @@ async function startServer(database) {
   for await (const chunk of child.stdout) {
     output += chunk;
     const match = output.match(/listening at (http:\/\/127\.0\.0\.1:(\d+))/u);
-    if (match) return { origin: match[1], port: Number(match[2]), stop: async () => { child.kill(); await once(child, 'exit'); } };
+    if (match) {
+      // P1e: API requests carry the token the server wrote next to its database.
+      const port = Number(match[2]);
+      const auth = bearer(await ledgerToken(database, port));
+      return { origin: match[1], port, database, auth, stop: async () => { child.kill(); await once(child, 'exit'); } };
+    }
   }
   throw new Error('Server exited before listening: ' + output);
 }
 
-async function runCli(args, port) {
-  const child = spawn(process.execPath, ['src/cli.mjs', ...args], { env: { ...process.env, PORT: String(port) }, stdio: ['ignore', 'pipe', 'pipe'] });
+async function runCli(args, port, database) {
+  // The CLI finds the server's token from PORT and CONTEXT_LEDGER_DB (P1e).
+  const env = { ...process.env, PORT: String(port), ...(database === undefined ? {} : { CONTEXT_LEDGER_DB: database }) };
+  const child = spawn(process.execPath, ['src/cli.mjs', ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', chunk => { stdout += chunk; });
@@ -647,14 +655,14 @@ test('HTTP import takes a project, the session list filters by it, and the CLI s
   const database = join(directory, 'ledger.sqlite');
   const server = await startServer(database);
   keep(() => server.stop());
-  const { origin } = server;
+  const { origin, auth } = server;
   const post = async (body, headers = {}) => {
     const response = await fetch(origin + '/api/import', { method: 'POST',
-      headers: { 'Content-Type': 'application/json', Origin: origin, ...headers }, body: JSON.stringify(body) });
+      headers: { ...auth, 'Content-Type': 'application/json', Origin: origin, ...headers }, body: JSON.stringify(body) });
     return { status: response.status, body: await response.json() };
   };
   const get = async path => {
-    const response = await fetch(origin + path);
+    const response = await fetch(origin + path, { headers: auth });
     return { status: response.status, body: await response.json() };
   };
   const imported = async (source, text, project) => {
@@ -711,7 +719,7 @@ test('HTTP import takes a project, the session list filters by it, and the CLI s
   assert.equal(wrongHost, 403);
 
   // CLI: --project sends the filter; a bad slug is refused before any request (no server on the port).
-  const cli = await runCli(['search', '--project', 'acme', 'vega'], server.port);
+  const cli = await runCli(['search', '--project', 'acme', 'vega'], server.port, database);
   assert.equal(cli.code, 0, cli.stderr);
   assert.deepEqual(JSON.parse(cli.stdout).map(session => [session.id, session.project]), [[a2.id, 'acme'], [a1.id, 'acme']]);
   for (const slug of ['Acme', '', 'a--b']) {
