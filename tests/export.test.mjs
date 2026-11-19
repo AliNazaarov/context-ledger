@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { exportNodeId } from '../src/export.mjs';
 import { InputError, openStore } from '../src/store.mjs';
+import { bearer, ledgerToken } from './ledger-auth.mjs';
 
 // Card G12: graphs as one node-link file for code-graph tools. Synthetic data only.
 const say = text => JSON.stringify({ type: 'user', message: { role: 'user', content: text } });
@@ -126,13 +127,20 @@ async function startServer(t) {
   for await (const chunk of child.stdout) {
     output += chunk;
     const match = output.match(/listening at http:\/\/127\.0\.0\.1:(\d+)/u);
-    if (match) return { origin: `http://127.0.0.1:${match[1]}`, port: match[1] };
+    if (match) {
+      // P1e: the API needs the token the server wrote next to its database.
+      const database = join(dir, 'ledger.sqlite');
+      return { origin: `http://127.0.0.1:${match[1]}`, port: match[1], database, auth: bearer(await ledgerToken(database, Number(match[1]))) };
+    }
   }
   throw new Error('server did not start');
 }
 
 test('the export routes and the CLI: escaped JSON that parses back, fixed refusals', async t => {
-  const { origin, port } = await startServer(t);
+  const { origin, port, database, auth } = await startServer(t);
+  // P1e: every request in this test carries the token, and so does the CLI's.
+  const fetch = (url, options = {}) => globalThis.fetch(url, { ...options, headers: { ...auth, ...options.headers } });
+  const cliEnv = { ...process.env, PORT: port, CONTEXT_LEDGER_DB: database };
   const post = (path, body) => fetch(origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify(body) })
     .then(response => response.json());
   const rlo = cp(0x202e);
@@ -169,7 +177,7 @@ test('the export routes and the CLI: escaped JSON that parses back, fixed refusa
     assert.deepEqual({ status: missing.status, body: await missing.json() }, { status: 404, body: { error: 'Not found.' } }, path);
   }
 
-  const cli = spawnSync(process.execPath, ['src/cli.mjs', 'graph', 'export', graph.id], { env: { ...process.env, PORT: port }, encoding: 'utf8' });
+  const cli = spawnSync(process.execPath, ['src/cli.mjs', 'graph', 'export', graph.id], { env: cliEnv, encoding: 'utf8' });
   assert.equal(cli.status, 0, cli.stderr);
   for (const character of [rlo, c1]) assert.ok(!cli.stdout.includes(character));
   assert.ok(cli.stdout.includes(`odd${String.fromCodePoint(0x5c)}u202ename.jsonl`));
@@ -185,10 +193,10 @@ test('the export routes and the CLI: escaped JSON that parses back, fixed refusa
   assert.equal(pair.graph.links_left_out, 0);
   assert.deepEqual(pair.links.map(link => [link.ledger_from, link.ledger_to, link.relation]),
     [[exportNodeId(ali.id, 'other-port'), exportNodeId(graph.id, 'port'), 'conflicts']]);
-  const both = spawnSync(process.execPath, ['src/cli.mjs', 'graph', 'export', graph.id, ali.id], { env: { ...process.env, PORT: port }, encoding: 'utf8' });
+  const both = spawnSync(process.execPath, ['src/cli.mjs', 'graph', 'export', graph.id, ali.id], { env: cliEnv, encoding: 'utf8' });
   assert.equal(both.status, 0, both.stderr);
   assert.deepEqual(JSON.parse(both.stdout), pair);
-  const bad = spawnSync(process.execPath, ['src/cli.mjs', 'graph', 'export', 'nope'], { env: { ...process.env, PORT: port }, encoding: 'utf8' });
+  const bad = spawnSync(process.execPath, ['src/cli.mjs', 'graph', 'export', 'nope'], { env: cliEnv, encoding: 'utf8' });
   assert.equal(bad.status, 1);
   assert.match(bad.stderr, /Usage:/u);
 });

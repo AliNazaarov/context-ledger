@@ -1410,6 +1410,661 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - a file with no kept answer stops the run.
 - No new runtime dependency.
 
+## P1a — Storage engine decision (evidence collected 2026-11-17)
+
+ADR-003 picked better-sqlite3 because `node:sqlite` had no FTS5. P1a checks whether that is still true, before any dependency is added.
+
+- **What is tested:** `tests/sqlite-fts5-probe.test.mjs` creates an FTS5 table in memory, runs one `MATCH` query, and reports the Node version, platform, SQLite version and whether FTS5 works. It never fails when FTS5 is missing.
+- **Expected result:** a probe line on every system that runs the Node suites.
+- **Results:** Node 22.14.0 on Windows (local) has SQLite 3.47.2 and no FTS5. Node 22.23.4 on Linux (CI) has SQLite 3.53.4 with FTS5. Public reports agree: 22.19.0 has none and 22.22.2 has it.
+- **Outcome:** a proposed revision of ADR-003 in `docs/architecture.md` §5.1: stay on `node:sqlite`, probe FTS5 at open, fall back to `instr` search with a named warning. It is accepted when the user approves the PR.
+- **Codex, round 1:** one high, three medium and three low findings, all fixed in the document:
+  - (high) The design created the FTS5 table and its triggers unconditionally, so a database made on a build with FTS5 could break writes on one without it. FTS5 is now an optional index the store creates and maintains itself, with a watermark, a rebuild path, and a refusal for deletes it cannot carry into an index it cannot open.
+  - (medium) The fallback contract was not written down. It is today's session-level match, newest first, with the same pagination.
+  - (medium) Older sections still named better-sqlite3. The landing note now marks them as the original plan while P1a is pending.
+  - (medium) The AGENTS.md reason was overstated. It now says a second dependency needs an approved ADR, and that a missing prebuilt binary means a source build.
+  - (low) The evidence table now links the CI run and marks the public reports as unchecked. `doctor` tells users to rerun its check rather than naming a version.
+  - (low) The two approval moments are now one: ADR-003's revision is accepted only with the P1a PR.
+  - (low) §4's legacy-ID formula did not match the store. It now keeps `sessions.id` as it is.
+- **Codex, round 2** (of 92fda47): one high, two medium and two low findings, all fixed in the document:
+  - (high) §6's purge still cascaded into FTS rows, which no longer happens without triggers. The store now removes each message from the index with FTS5's `delete` command and the original text, in the same transaction as the canonical delete, and runs `optimize` only when an index exists.
+  - (medium) A watermark over `messages.id` could miss rows after a delete, a downgrade and a reused ID. It is replaced by an `fts_pending` table written with each insert while the index cannot be updated, and drained in one transaction with the index changes.
+  - (medium) A forced-fallback switch cannot prove downgrade compatibility. The implementing card must also reopen the same database on a genuinely module-free build (Node 22.14.0), then on an FTS5 build.
+  - (low) The fallback contract now includes the session title and the descending session `rowid` order.
+  - (low) The landing note now says what happens to the better-sqlite3 passages when P1a is accepted or rejected.
+- **Codex, round 3** (of 8351c3a): no high findings. Three medium and two low, all fixed in the document:
+  - (medium) §4 still created the FTS5 index in the first migration and lacked `fts_pending`. The migration now has `fts_pending`, and the index is shown as a separate block the store creates where FTS5 exists.
+  - (medium) Draining only at open missed a module-free process appending while an FTS5 process had the file open. A process with FTS5 now drains before each indexed search and inside each delete or purge, before its FTS5 `delete` commands.
+  - (medium) §6's scheduled retention and evidence-only cleanup could be blocked without saying so. A blocked run records why and what it would have removed, and an evidence-only export reports that its cleanup did not run.
+  - (low) The fallback contract now includes the provider filter and empty queries.
+  - (low) Rejection now restores the original ADR-003 entry and the lifecycle text, not only removes §5.1.
+- **Codex, round 4** (of 7533cc7, the round 3 fixes): no high findings. Two medium and one low, fixed in the document:
+  - (medium) A drain followed by a separate search could miss a message appended in between. Each indexed search now drains and queries inside one transaction.
+  - (medium) A blocked evidence-only cleanup was promised to a later run, but nothing remembered it. The pending cleanup is now recorded in `settings` and carried out by the next retention run that can update the index.
+  - (low) The rejection instructions now also cover the paragraph that points to §5.1.
+
+## G6 — Product and eval review (run 2026-11-17)
+
+The card asked Codex for a read-only review of the product and evals at cycle 4. Cycle 4 is long past, so on the user's instruction Codex ran it read-only on the state of `main` and the open PRs on 2026-11-17, from Claude Code. The full review is [docs/reviews/g6-2026-11-17.md](reviews/g6-2026-11-17.md).
+
+- **What the evals support:** import, search and hand-offs that keep source lines; typed graphs with valid citations and the two-party room rules; and MCP discovery and paging in real clients. All of it is on synthetic data. M2b transfer is shown for one trained small-model pair only.
+- **What is not yet proven:** the hand-off savings rest on synthetic data, and the cycle 7 figures on six early facts. G10's live runs are still owed. The latent team results show no advantage over random vectors (cycles 13 and 14).
+- **Main user risks:** a real citation can support a wrong label; local transcript text reaches the agent through `session_read` and the latent fallback; party names in rooms are not verified.
+- **Recommended next cycle:** run G10 live on Claude Code and Codex with human-checked labels and a pass rule written first (at least 10 paired runs, 90% of facts carried, 30% fewer median input tokens). Hold the "3× faster, 5× fewer tokens" claim until then.
+- **Board actions taken from it the same day:** I1, I2 and I3 went ahead without P1 (PRs #35, #33, #34). P1's design landed on `main`, and its implementation was split into P1a–P1e (the P1 PR).
+- **Outcome:** done. No code changed.
+
+## P1b — Projects (defined 2026-11-17, before implementation)
+
+Card P1b on `ruslan/p1b-projects`, from `main` 3a17536. The design is `docs/architecture.md` sections 4 and 11 on PR #37 (`ruslan/p1-design`), which is not on `main` yet: section 4 gives `projects (id, slug unique, name, ..., created_at)` and a `project_id` on every session, and section 11 says the migration sequence restarts at version 2 on top of today's version 1, with projects first. This card adds only that. Message rows, stable keys, deletion, retention, `client`, the API token and the browser stay out. Synthetic data only. Baseline on `main` 3a17536 (Windows): run before the first code change and recorded in the results.
+
+**Rules decided here, before the code:**
+
+- **Slugs.** A project slug matches `^[a-z0-9]+(?:-[a-z0-9]+)*$` (the party pattern) and has at most 64 characters. Anything else is refused with fixed text that never echoes the value.
+- **Default project.** The migration creates one project with slug `default` and name `Default`. Every session that exists when a file is migrated joins it. An import without `project` (or with `project: null`) goes to `default`.
+- **New projects.** An import that names a slug no project has yet creates that project (name = slug) in the same transaction as the session.
+- **Same bytes in a second project.** A session ID is `sha256(provider \0 bytes)`, so it does not depend on the project. Importing bytes that are already stored returns the stored session unchanged, with the project it already has. It is not moved, not copied, and no project is created for that request. The `project` field of the response is how the caller sees this. Moving a session between projects is not part of this card.
+- **Project IDs.** 32 random lowercase hex characters. They stay inside the database; the API names projects by slug.
+- **Older builds.** `project_id` is added with `ALTER TABLE`, so it cannot be `NOT NULL` with a foreign key in SQLite. A trigger puts any session inserted without a project, including by a build from before version 1, into `default`, the same way version 1's triggers stamp graphs and rooms.
+
+| Eval | Expected |
+| --- | --- |
+| Schema version 2 | A new file and an opened version 1 file both end at `PRAGMA user_version = 2` with a `projects` table (`id` primary key, `slug` unique and not null, `name`, `created_at`), `sessions.project_id` referencing `projects(id)`, an index on it and the `sessions_project` trigger. `schemaVersion` exports 2. |
+| Version 1 file | A version 1 file built in the test (version 1 DDL and rows, no projects) upgrades in place: every session, graph, room and choice row keeps its values, every session is in `default`, and graphs and rooms read back as before. Reopening changes neither schema nor rows. |
+| Unversioned file | A version 0 file (the 19f6522 DDL) goes straight to version 2 with both versions' changes, and `tests/migrate.test.mjs` still passes with its version assertions moved to 2. |
+| Safe to repeat | A version 1 file that already has a `projects` table and a `default` project (a step run before) migrates without error or a second `default`. |
+| Atomic | A failure inside the version 2 step (the index name already taken by a table) rolls back to version 1 with the schema unchanged. |
+| Newer files | A file at version 3 is refused with the existing message and left byte for byte as it was. |
+| Older build writes | A session inserted with the 19f6522 statement, which has no `project_id`, lands in `default`. |
+| Import names its project | `importTranscript({ ..., project: 'acme' })` returns a summary with `project: 'acme'` and creates the project once; a second session into `acme` reuses it. Without `project` the summary says `default`. Invalid slugs (upper case, spaces, double or edge hyphens, 65 characters, a number, an object) are refused before anything is written. |
+| Same bytes, second project | Importing the bytes of an `acme` session with `project: 'beta'` returns the `acme` summary with the same ID; `beta` is not created and `acme` still lists one session. |
+| Search filters by project | `list(query, provider, project)` and `listSessionsPage({ ..., project })` return only that project's sessions, combined with the query and provider filters and with paging (cursors stay valid inside a project). An unknown but valid slug returns an empty list. Summaries from import, list, page and `get` carry `project`. |
+| HTTP | `POST /api/import` accepts `project`. `GET /api/sessions?project=acme` filters, with and without `limit`; a bad or repeated `project` gets 400 with fixed text. The Host and Origin checks are unchanged: a cross-origin import with a project is still 403 and creates nothing. |
+| CLI | `npm run ledger -- search --project acme <query>` sends `project` and prints only that project's sessions; an invalid slug is refused before any request. |
+| Nothing else changes | No new dependency. No raw control or format characters in `src/` or `tests/`. All four suites pass. |
+
+**Results — P1b (2026-11-17):** every row passes on Windows. The tests are in `tests/projects.test.mjs` (13 tests); `tests/migrate.test.mjs` and `tests/list-api.test.mjs` were adjusted as described below.
+
+- **Schema version 2 — passed.** `src/migrate.mjs` adds `projects (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, created_at TEXT NOT NULL) STRICT`, the `default` project (name `Default`, a random 32-hex ID), `sessions.project_id REFERENCES projects(id)`, the index `sessions_project_id` and the trigger `sessions_project`. `schemaVersion` is 2. In a STRICT table SQLite also marks the primary key `NOT NULL`, which the test records.
+- **Version 1 file — passed.** The test writes the version 1 DDL and rows itself (no projects), copying created_at and party before the version 1 triggers exist. After opening, every session, graph, room and choice row is unchanged, every session is in `default`, graphs and rooms read back as published, and a second open changes neither schema nor rows.
+- **Unversioned file — passed.** A 19f6522 file goes straight to version 2. `tests/migrate.test.mjs` now asserts `schemaVersion` instead of 1, compares the version 0 session columns (the table now also has `project_id`), and bumps its "newer" file to `schemaVersion + 1`.
+- **Safe to repeat — passed.** A version 1 file with a `projects` table and a `default` row already in place migrates without a second `default`, and its sessions join the existing row.
+- **Atomic — passed.** A table named `sessions_project_id` makes the step fail; the file stays at version 1 with its schema and session columns unchanged.
+- **Newer files — passed.** Version 3 is refused with the existing message and its bytes are unchanged. Three cases came from the review (below): a newer file without the version 0 tables, a file that a newer build upgrades between this build's first version read and its next step, and a current file that opens while another connection holds the write lock.
+- **Older build writes — passed.** The 19f6522 insert, which names no project, lands in `default` through the trigger.
+- **Import names its project — passed.** `acme` is created once and reused, no `project` or `project: null` gives `default`, a 64-character slug is accepted, and 13 invalid values (upper case, a space, `a--b`, edge hyphens, `_`, empty, 65 characters, a zero-width space, a number, an object, an array, `true`) are refused with fixed text and nothing written. The project and the session commit in one `BEGIN IMMEDIATE` transaction.
+- **Same bytes, second project — passed.** The response is the stored `acme` summary with the same ID, and there is no `beta` row. The same text from Codex is a different session (the provider is part of the ID) and goes to `beta`.
+- **Search filters by project — passed.** `list` and `listSessionsPage` filter by project alone and combined with the query and the provider; paging inside `acme` returns its sessions newest first, and an unknown valid slug returns nothing. Summaries from import, list, page and `get` carry `project`.
+- **HTTP — passed.** `POST /api/import` takes `project`; `GET /api/sessions?project=` filters with and without `limit`. A bad, empty or repeated `project` is 400 with fixed text. A cross-origin import is 403 and writes no session or project; a wrong Host is 403.
+- **CLI — passed.** `ledger search --project acme vega` prints only `acme` sessions. Invalid or repeated `--project` is refused before any request: the test points the CLI at port 1, where nothing listens, and gets the slug message, not "Cannot reach".
+- **Nothing else changes — passed.** No new dependency, and no raw control or format characters in `src/` or `tests/`. One existing test changed: `tests/list-api.test.mjs` checked that 120 short sessions fit one 40,000-character MCP result. With `"project": "default"` on every row, 120 no longer fit, so it now uses 110, which is still more than one 100-row ledger page.
+- **Not done here:** the browser always imports into `default` and shows no project; MCP `session_search` returns the project but cannot filter by it; sessions cannot be moved between projects; there is no project listing route.
+
+**Codex review (read-only), five rounds.**
+
+Round 1, on 21b0811:
+
+- **Medium — fixed (1c7b988).** `GET /api/sessions?project=` with an empty value listed every project. It is now a 400 like any invalid slug, with and without `limit`.
+- **Medium — fixed (1c7b988, completed in de69cec).** `openStore` ran its DDL before `migrate()` checked the version, so a newer file without the old tables changed before it was refused. This predates P1b. A newer file with only a `messages` table now keeps its bytes.
+- **Low — fixed (1c7b988).** No test showed that a failed session insert leaves no project behind. A test trigger now aborts the insert after the project is created; neither row persists and the next import commits.
+- **Low — fixed (1c7b988, made deterministic in de69cec).** The second lookup under the lock was untested. Two processes now race the same bytes into `left` and `right`; both get the winner's summary and only the winner's project exists.
+
+Round 2, on 1c7b988:
+
+- **Medium — fixed (de69cec).** The version check still ran outside the write lock, so a newer build could upgrade the file between the check and the DDL. The version 0 DDL, including the room tables (now `roomsSchema` in `src/rooms.mjs`), runs inside `migrate()`'s `BEGIN IMMEDIATE`, after the version is read again. This first took the lock on every open, which round 3 corrected.
+- **Medium — fixed (de69cec).** `parseArgs` kept only the last `--project`, so `--project BadSlug --project good` sent a request. A repeated `--project` is now refused.
+- **Low — fixed (de69cec).** The race test signalled readiness before the first lookup and relied on a 750 ms sleep. Each child now stops at its import's `BEGIN IMMEDIATE` until both are there.
+- **Low — fixed (de69cec).** The duplicate test checked that `beta` had no sessions, not that it did not exist. It now reads `projects`.
+
+Round 3, on de69cec:
+
+- **Medium — fixed (44df0b1).** Taking `BEGIN IMMEDIATE` on every open meant a writer holding the lock could stall a store opening a current file for the 5-second busy timeout, then fail it. A version 2 file now opens with no lock and no DDL. The lock, the second version read and the version 0 DDL happen only when a migration may run, so DDL still never runs without a version check under the lock. A new test opens a current file while another connection holds the lock.
+- **Low — fixed (44df0b1).** The upgrade-race test relied on a 750 ms sleep, so a slow child could read version 3 first and pass even against 1c7b988. The child now stops right after its first version read, for a version 1 and a version 2 file. The holder drops `room_choices` and moves the file to version 3, and only then is the child let go. At version 1 the child is refused under the lock; at version 2 it runs no DDL and fails on the missing table. In both cases `room_choices` is not recreated.
+
+Round 4, on 44df0b1:
+
+- **Medium — fixed (7349ba6).** With no lock on a current file, a newer build could upgrade it between the first version read and the end of `openStore`. If the upgrade kept the tables, the store opened on a newer schema. The version is now read again after the statements are prepared, and a newer file is refused. The upgrade-race test has a third case: a version bump that keeps every table, which is refused with the newer-schema message.
+- **Low:** none.
+- **Known limit, not fixed:** an upgrade by a newer build while this store stays open is not detected. Catching it would mean holding a lock for the store's whole life, which would block every other writer.
+
+Round 5, on 7349ba6:
+
+- **High and medium:** none. Codex found that the round 4 recheck catches an upgrade that keeps the tables, takes no write lock, keeps the existing message and closes the connection on refusal.
+- **Low — fixed (this commit).** The round 4 test case paused the child at its first version read, so it would still pass if the recheck moved ahead of statement preparation. A new test pauses the child right after `openStore` prepares its last statement (the graph list). It fails if any other statement is prepared after that point. The parent then commits version 3 with every table kept and releases the child. The child is refused with the newer-schema message and the store never opens. With the recheck moved ahead of preparation, this test fails.
+
+Each regression test was checked by removing its fix (twelve mutations across the five rounds); each mutation fails at least its own test.
+
+**Suites (Windows, after the round 5 fix):** `npm run -s test:graph` 9/9; node 204/205 (one skipped; the `main` baseline was 191/192); Playwright 13/13; Python runtime 192 run, OK (50 skipped).
+- **Codex, round 6** (of c442c22, the round 5 test): no high or medium findings. Two low, fixed in the next commit: the test now waits for close rather than exit, so the child's output has drained before it is checked; and its cleanup waits for the child to end before the folder is removed.
+
+## P1c — One row per message, stable keys (defined 2026-11-17, before implementation)
+
+Card P1c on `ruslan/p1c-message-rows`, stacked on P1b (PR #42, `ruslan/p1b-projects` 3491cc4). The design is `docs/architecture.md` sections 4 and 11 on PR #37. Section 4 gives a `messages` table with `UNIQUE (session_id, key)` and `UNIQUE (session_id, seq)`, and message keys: `u:<record uuid>`, or `h:` plus 32 hex characters of `sha256(sessionId \0 line \0 raw line)`, or `l:<line>` for legacy sessions. Section 11 says a session is still one row holding its messages as JSON, which this card replaces. The storage engine (P1a) is still open, so this card stays on `node:sqlite` and adds no dependency and no FTS5. Synthetic data only.
+
+**Rules decided here, before the code:**
+
+- **Schema version 3.** `messages (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED, seq INTEGER NOT NULL, line INTEGER NOT NULL, role TEXT NOT NULL CHECK (role IN ('user', 'assistant')), text_json TEXT NOT NULL, key TEXT NOT NULL, UNIQUE (session_id, key), UNIQUE (session_id, seq)) STRICT`. `seq` is the message's 0-based position in its session. `text_json` holds the turn's text as a JSON string literal (changed in review round 1, below): `node:sqlite` cuts a string at a NUL when it reads one and replaces lone surrogates when it binds one, so plain text in SQLite would not give back what was imported, while the JSON column did. A search index can decode the column with `json_extract` when P1a builds one. `id` is internal and never exported. It is there so that a later FTS5 index (if P1a picks one) can use it as its rowid without a rebuild.
+- **Session IDs do not change.** A session ID stays `sha256(provider \0 bytes)`, and a graph still cites file lines. Moving to `provider:uuid` session IDs would change every session ID and every graph's `sessionId`, so it is the next card, not this one.
+- **Keys on import.** A Claude record whose `uuid` is a UUID-shaped string gets `u:<uuid>` the first time that UUID appears in the session. Every other message gets `h:` plus the first 32 hex characters of `sha256(sessionId \0 line \0 raw line)`. That covers Codex records, a Claude record without a UUID-shaped `uuid`, and a later record that repeats a UUID already used. The raw line is that line's text between newline characters exactly as imported, including a trailing carriage return. The design's rule for repeated UUIDs (skip identical bytes, fail on different bytes) would drop or refuse turns that import today and move their line citations. It waits for the `provider:uuid` card; here a repeat keeps its turn and its line under a hash key.
+- **Keys of migrated sessions.** The stored JSON has neither raw lines nor UUIDs, so no hash key can be computed for a session that already exists. Its messages get `l:<line>`, as section 4 says for legacy sessions. Keys never change once written: importing the same bytes again returns the stored session with its `l:` keys.
+- **Readers.** `get`, the line check in `publishGraph` and `getGraphContext` read messages from rows in `seq` order. So do the routes built on them and the MCP `session_read` and `context_for` tools, which read the HTTP API. Each message in an API response gains `key`, after `role`, `text` and `line`.
+- **The JSON column stays, as a copy that sessions are not read from.** New imports still write `sessions.messages`, and every read of a session uses the rows. Only two things read the column: the version 3 step, once, and the `sessions_messages` trigger when an older build inserts a session (wording corrected in the Codex round on the PR #45 fixes). Builds from before schema versions (19f6522 and earlier) never check `user_version`, so they can still open a version 3 file. With the column kept they keep working instead of failing, and the `sessions_messages` trigger gives any session they insert its rows (with `l:` keys) from that JSON. Dropping the column means a table rebuild in a forward-only migration with no backup yet (section 4's `VACUUM INTO` is not built). That belongs with the `provider:uuid` card, which rebuilds `sessions` anyway.
+- **Search stays on `search_text`.** That column already holds the title and every message text, lowercased by JavaScript. Moving `instr` onto message rows would either use SQLite's ASCII-only `lower()`, which changes results for non-ASCII text, or store a second lowered copy of every message, and each term would become a subquery over rows. P1a decides what replaces search (FTS5 over the decoded `messages.text_json`, or a degraded `LIKE`), so this card leaves it as it is.
+- **Migration checks (revised after the PR #45 review, below).** The version 3 step reads each session's stored JSON array once, as its exact bytes (`node:sqlite` cuts text at a NUL when it reads it), decodes it in the file's own text encoding (UTF-8, or UTF-16 if the file was created that way), and parses it once in JavaScript. It checks each message before writing its row: an object with a `user` or `assistant` role, a string text, a line written as an integer from 1 to 2^53 - 1, no field named twice in the message, no `role`, `text` or `line` field name followed by a NUL (SQLite compares names only up to one; any other name with a NUL is an extra field and is ignored), no nesting deeper than SQLite's 1,000 levels, and no line used twice in the session. JavaScript would read `1.0` or `1.00000000000000001` as 1, and it keeps the last of two fields with one name where SQLite keeps the first, so both are refused, as is a leading byte order mark. That keeps the step as strict as the SQL checks it replaced (Codex round on the PR #45 fixes). Rows keep the array order, and each text is written as `JSON.stringify(text)`, as an import writes it. A session ID of 64 hex characters is bound from JavaScript; any other ID is copied by rowid in SQL, so it stays exact. Rowids are read as BigInt, since a rowid can be above 2^53. Until the review the step copied in SQL (`->`, not `->>`) and then checked every session's rows against its stored messages in full (review round 1). The rows are now written from the same parsed values that were checked, so that second pass is gone. A file that already has a `messages` table or a `sessions_messages` trigger is refused before anything is written. One session that cannot be copied makes the whole step fail and roll back, leaving the file at its version. The error names the session by its ID when that is 64 lowercase hex characters (every ID this project writes), and otherwise by its row. It then says in fixed words what is wrong and that the migration rolled back. It quotes no transcript content.
+
+| Eval | Expected |
+| --- | --- |
+| Schema version 3 | A new file, and version 2, version 1 and unversioned files, all end at `PRAGMA user_version = 3` with the `messages` table above, its two unique constraints and the `sessions_messages` trigger. `schemaVersion` exports 3. |
+| Version 2 file | A version 2 file built in the test (P1b DDL and rows, two projects) upgrades in place. Each session's rows match its JSON messages in order (`seq`, `line`, `role`, `text`) with `l:<line>` keys. Every session, project, graph, room and choice row keeps its values, and graphs, rooms and context read back as before. A new graph citing a stored line publishes; one citing any other line is refused. Reopening changes neither schema nor rows. |
+| Version 1 and unversioned files | Both go straight to version 3 with every earlier step's changes and the same rows as above. The P1b and migrate tests still pass, with their version assertions made relative to `schemaVersion`. |
+| Leftovers (revised in review round 4) | The step is one transaction, so it never leaves part of itself behind. A version 2 file that already holds a `messages` table (even one of exactly this shape, with or without matching rows), anything else on such a table, or a `sessions_messages` trigger (in any letter case, on any table) is refused with fixed text and left byte for byte unchanged. The first draft reused such a table, keeping its rows where they matched. |
+| Atomic | A session whose `messages` JSON is malformed, or is not an array of messages, makes the open fail. The error names that session and says in fixed words what is wrong and that the migration rolled back (revised after the PR #45 review). The file stays at version 2 with its schema and rows unchanged. |
+| Upgrade time (added after the PR #45 review) | A synthetic version 2 ledger of 2,000 sessions with 200 messages each is upgraded and timed, while a second process opens the same file. Timings before and after the change are recorded. If the upgrade still takes longer than the 5 s `busy_timeout`, that is stated as a known limit with the numbers. |
+| Legacy keys (added after the PR #45 review) | A migrated session keeps `l:<line>` keys. The same bytes imported into a fresh ledger get the same session ID, lines and texts with `u:` keys (Claude) or `h:` keys (Codex). Importing them again into the migrated ledger leaves the `l:` keys as they are. |
+| Newer files | A file at version 4 is refused with the existing message and left byte for byte as it was. |
+| Older build writes | A session inserted into a version 3 file with the 19f6522 statement gets one row per JSON message with `l:<line>` keys, joins `default`, and reads back through `get`. |
+| Keys on import | A Claude transcript with UUIDs gets `u:<uuid>` keys. A Codex transcript gets `h:` keys equal to a recomputation in the test. Two identical turns on different lines get different keys. A repeated UUID, a missing `uuid` and a non-UUID `uuid` (one with a control character among them) get `h:` keys. A CRLF transcript hashes the carriage return. The same bytes imported into a second, empty store get the same session ID and the same keys. The session and its rows commit in one transaction. |
+| Readers use rows | With the JSON column overwritten in the test, `get`, graph publishing (the line check), graph context and search are unchanged. |
+| HTTP and MCP | `GET /api/sessions/:id` returns `key` on every message; MCP `session_read` output is unchanged. |
+| Nothing else changes | No new dependency and no FTS5. No raw control or format characters in `src/` or `tests/`. All four suites pass. |
+
+**Results — P1c (2026-11-17):** every row passes on Windows. The tests are in `tests/message-rows.test.mjs` (18 tests since the PR #45 review). `tests/projects.test.mjs` now states its versions relative to `schemaVersion` (the current version, and `schemaVersion + 1` for a newer file) instead of the literals 2 and 3. Nothing else in it changed.
+
+- **Schema version 3 — passed.** `src/migrate.mjs` adds `messages (id, session_id, seq, line, role, text_json, key)` as STRICT, with `UNIQUE (session_id, key)`, `UNIQUE (session_id, seq)`, a deferred, cascading foreign key to `sessions`, and the `sessions_messages` trigger. `schemaVersion` is 3. There is no virtual table and no new dependency. The column is `text_json`, not `text`, after review round 1 (below).
+- **Version 2 file — passed.** The test builds a version 2 file from the P1b DDL, with sessions in `default` and `acme`. After opening, each session's rows are its JSON messages in order with `l:<line>` keys. Every session, project, graph, room and choice row is unchanged, and graphs, rooms and graph context read back exactly as before. A graph citing line 4 publishes; lines 2 (a record that is not a turn) and 5 are refused. A second open changes neither schema nor rows.
+- **Version 1 and unversioned files — passed.** Both reach version 3 with every earlier step's changes and the same rows.
+- **Leftovers — passed.** Thirteen kinds of leftover in a version 2 file are refused with fixed text, leaving the file byte for byte unchanged at version 2. They include a `messages` table of exactly this shape (empty, with matching rows, or with too few), rows for a missing session, a table with no foreign key, the deferred clause only in a comment, partial unique indexes, a trigger on `messages`, a view named `messages`, a table named `Messages`, and `sessions_messages` triggers on `sessions` and on `projects` (in either case). Version 0 and version 1 files with a leftover are refused in the same way, with their earlier steps rolled back, and they migrate once it is removed (review round 5). This row replaced "Safe to repeat" in review round 4.
+- **Atomic — passed.** Eleven kinds of bad stored JSON fail the open and leave the file byte for byte unchanged at version 2: malformed JSON, an object, a number in the array, a `system` role, a missing text, a numeric text, line 0, a string line, a fractional line, line 2^53 and line 2^63. The last two come from review round 1. Since the PR #45 review the error names the session, and the test adds more cases: an empty value, a NUL after the array, `null` and an array inside the array, bytes that are not UTF-8, two messages on one line (until then a raw SQLite unique-key error), a repeated `text`, `line` or escaped field name, lines `1.0`, `1e0` and `1.00000000000000001`, a leading byte order mark, a NUL after a `line`, `role` or `text` field name, and nesting 1,001 levels deep.
+- **Newer files — passed.** Version 4 is refused with the existing message and its bytes are unchanged. The P1b newer-file and upgrade-race tests pass at `schemaVersion + 1`.
+- **Older build writes — passed.** The 19f6522 insert into a version 3 file gets one row per JSON message with `l:` keys, joins `default`, reads back through `get` and can be cited. Repeating the insert adds nothing.
+- **Keys on import — passed.** First-use Claude UUIDs get `u:` keys. These get `h:` keys equal to the test's own recomputation: a repeated UUID (including one in another letter case, from review round 1), a missing `uuid`, a non-UUID string, a UUID with a control character, and a number. Two identical `ok` turns get different keys, and a CRLF Codex file hashes the carriage return. The same bytes in a second, empty store give the same ID and keys, and importing the same bytes again writes nothing. A session that fails to insert leaves no rows, and a row without its session fails at commit.
+- **Readers use rows — passed.** With `sessions.messages` overwritten with text that is not JSON, `get`, graph context, search, paging and the line check in `publishGraph` are unchanged. A NUL and lone surrogates survive a fresh import, a migration and an older build's insert exactly (review round 1).
+- **HTTP and MCP — passed.** `GET /api/sessions/:id` returns `key` on every message. The MCP `session_read` page for a four-turn session shows no key and equals a literal copy of the page as it was rendered before keys existed. One of the turns contains a `~~~` run and a right-to-left override.
+- **Nothing else changes — passed.** No new dependency and no FTS5. No raw control or format characters in `src/` or `tests/`.
+- **Decided, not built:** session IDs stay content-addressed; `sessions.messages` is still written; search stays on `search_text`; migrated sessions keep their `l:` keys for good. The reasons are in the rules above.
+
+**Codex review (read-only), five rounds.** Round 1 was run twice on the same diff (c9d5712, and 8d69c17, which added only a test): once by this session and once by an earlier copy of it working in the same worktree. Both runs found the same five issues, so they are listed once.
+
+Round 1, on c9d5712:
+
+- **High (Medium in one run) — fixed (f8b9b8f).** `node:sqlite` cuts a string at a NUL when it reads one and replaces lone surrogates when it binds one. A turn with either came back changed from rows, while the JSON column had kept it. Rows now hold the text as a JSON string literal (`text_json`). The store writes it with `JSON.stringify` and decodes it on read; the migration and the trigger copy the stored literal with `->`. A new test covers all three write paths.
+- **Medium — fixed (f8b9b8f).** A version 2 file with pre-existing rows passed the step if only the count matched, so a wrong line could be cited afterwards. Every row had to match its stored message in full. Round 4 later replaced reuse with refusal.
+- **Low — fixed (f8b9b8f).** Repeated UUIDs were compared case-sensitively, so a repeat in upper case got a second `u:` key. They now compare in lower case, and the key keeps the first spelling.
+- **Low — fixed (f8b9b8f).** Lines above `Number.MAX_SAFE_INTEGER` passed the check and then could not be read, and 2^63 surfaced a SQLite error. Lines must now be from 1 to 2^53 - 1.
+- **Low — fixed (f8b9b8f).** The MCP test checked only the headings. It now compares the whole page.
+
+Round 2, on f8b9b8f:
+
+- **High:** none. Codex confirmed the round 1 fixes.
+- **Medium — fixed (8e2f5f3, superseded by ce08237).** A `sessions_messages` trigger already in the file was kept (`IF NOT EXISTS`) even if it wrote nothing. The fix dropped and recreated it.
+- **Medium — fixed (8e2f5f3, superseded by ce08237).** Rows naming no session passed, because a deferred key checks only rows written in the transaction. The fix added `PRAGMA foreign_key_check(messages)`.
+- **Low — fixed (8e2f5f3).** The backfill sorted every message under the write lock. The sort is gone, since `seq` carries the order, and the query plan has no temporary B-tree.
+- **Low — fixed (8e2f5f3).** The MCP comparison used the same renderer as the code. It now compares against literal text.
+
+Round 3, on 8e2f5f3:
+
+- **High:** none.
+- **Medium — fixed (26a3961, superseded by ce08237).** A pre-existing `messages` table without its foreign key was reused, so deleting a session would have left its messages. The fix checked the table's shape.
+- **Low — fixed (26a3961, superseded by ce08237).** The step would drop a `sessions_messages` trigger defined on another table. The fix refused one.
+
+Round 4, on 26a3961:
+
+- **High:** none.
+- **Medium (four) — fixed (ce08237).** Four leftovers passed the round 3 shape check: partial unique indexes, a deferred clause inside a comment, `SESSIONS_MESSAGES` on another table, and a trigger on `messages` that deletes rows. The step is one transaction and never leaves part of itself behind, so these objects can only come from elsewhere. The step now refuses any `messages` table, anything on a table of that name, and any `sessions_messages` object, in any case. It always creates the table and the trigger itself. The shape check, the orphan check and the trigger replacement are gone.
+
+Round 5, on ce08237:
+
+- **High and medium:** none. Codex found that this repository's version 0, 1 and 2 DDL creates no matching object, and that a failed attempt rolls back.
+- **Low — fixed (this commit).** The leftover test used only version 2 files. Version 0 and 1 files with a leftover now show that their earlier steps roll back and that they migrate once it is removed.
+
+Each regression test that still applies was checked by undoing its fix. That makes seven mutations: raw text in rows, a reader that accepts raw text, a migration that decodes text, case-sensitive UUIDs, no line bound, no leftover refusal, and a heading change in the shared renderer. Each one fails at least its own test. Two checks are not tested by inputs. The full-row comparison after the backfill checks the step's own copy; since round 4 no input reaches it, so undoing it fails no test. The `typeof` check on lines from round 1 turned out to be covered by the bound and was removed.
+
+**Suites (Windows, after the round 5 fix):** `npm run -s test:graph` 9/9; node 216/217 (one skipped; P1b had 204/205, and this card adds 12 tests); Playwright 13/13; Python runtime 192 run, OK (50 skipped).
+
+**Independent review of PR #45 (read-only, 2026-11-18).** It found no high findings, five medium and four low. The low ones (6 to 9) are left as they are. The medium ones were handled as follows.
+
+1. **One malformed legacy session made `openStore` throw for the whole ledger, with an error that named no session — fixed.** The step still fails as a whole and rolls back, so there is never a partial upgrade. The error now names the session and the problem, for example `Session <64 hex> cannot be moved to schema version 3: a stored message is not an object with a user or assistant role, a string text and a line from 1 to 2^53 - 1. The migration rolled back, so the file was not changed.` The fixed reasons are "its stored messages are not a JSON array", that one, "a stored message has the same field twice", "a stored message has a role, text or line field name followed by a NUL character" and "its stored messages are nested more than 1,000 levels deep" (added in the Codex rounds below), and "two stored messages have the same line". An ID of any other form is named as `The session in row <n>`, so no stored text is printed. The atomic test builds a version 2 file, breaks the second of its two sessions in 27 ways and checks the exact message for each, and that the file is byte for byte unchanged. It also checks bytes that are not UTF-8 and an ID with a newline and a NUL. Against the old `src/migrate.mjs` this test fails, and the other 13 tests of that commit pass.
+2. **The upgrade could hold the write lock past the 5 s `busy_timeout` — confirmed, then reduced.** `evals/migration/v3-upgrade.mjs` builds the version 2 file in a temp folder and deletes it afterwards: 2,000 sessions of 200 turns of 20 to 1,000 characters, 400,000 turns and 220.4 MiB of text. It upgrades the file in a child process and opens the same file from a second process 0.3 s later. Timings are on Windows 11 with Node 22.14.0 and SQLite 3.47.2, with other agents' test runs on the same machine, so they vary by about ±1 s.
+
+   | Code | Upgrade, 2,000 x 200 | Second process |
+   | --- | --- | --- |
+   | Before (2ebf73f, SQL copy) | 6.6, 7.0, 7.5, 7.5, 7.5 and 9.3 s | Failed with `database is locked` in 4 of 6 runs, after 6.7 to 6.9 s; opened in 2, after 6.3 and 6.8 s |
+   | After (one JavaScript pass, 5a80f16) | 4.3, 4.0 and 4.1 s | Opened in 3 of 3, after 3.7 to 4.0 s |
+   | After the Codex round (field and line-token checks added) | 4.1, 4.4 and 4.4 s | Opened in 3 of 3, after 3.9 to 4.2 s |
+   | After the second Codex round (NUL-name and depth checks added) | 6.8, 4.3, 4.3 and 4.3 s (the 6.8 s run was under load) | Opened in 4 of 4, after 4.0 to 6.5 s |
+   | After, 3,000 x 200 (600,000 turns, 330.6 MiB) | 7.3 and 7.4 s | Opened in 2 of 2, after 7.0 and 7.2 s |
+
+   Timing `openStore` alone on copies of the same file, alternating the two builds (5 pairs), gave 7.3 to 8.3 s before and 4.1 to 5.3 s after. **Known limit:** the upgrade costs about 10 µs per turn here, so a ledger with more than about 480,000 turns (about 270 MiB of text in this mix) still takes longer than 5 s. A second process that opens it meanwhile (the server, the MCP adapter or the CLI) can then fail with `database is locked`, and opening again after the upgrade works. On Windows a waiting process gave up after 6.7 to 6.9 s in the failed runs, not at exactly 5 s, and got through after 7.0 to 7.2 s in others, so whether it fails is a race. `busy_timeout` and the design are unchanged.
+3. **The SQL re-parsed each turn several times — changed, with a smaller effect than expected.** Timing the old step's phases on the 2,000-session file gave 1.1 to 1.5 s for the check query, 3.3 to 3.7 s for the copy, 2.5 to 2.8 s for the full re-check of the copy, and 0.1 to 0.2 s for the commit. Re-parsing was a small part of that, because SQLite keeps recent JSON parses: `json_each` over every session took 0.43 s, and three accessors per turn added only 0.35 s. Most of the cost is writing 400,000 rows into the table and its two unique indexes. The step is now one pass in the same transaction (`copyStoredMessages`). It reads each array once as bytes, parses it once, checks it and inserts its rows, and the re-check pass is gone (see the revised "Migration checks" rule). That accounts for the timings in item 2. Copying an ID by rowid through `INSERT ... SELECT` for every row was tried and took 6.3 s, so only IDs that are not 64 hex characters take that path. A larger page cache made no clear difference, so it was left out.
+4. **Turn text is stored three times — kept as designed, measured.** `sessions.messages` (the JSON copy for builds from before versions), `sessions.search_text` (the lowered search copy) and `messages.text_json` each hold every turn's text. On the 2,000-session ledger the file grows from 459.8 MiB to 820.5 MiB on upgrade (+360.7 MiB, 1.78 times, for 220.4 MiB of text). On the 3,000-session ledger it grows from 689.7 MiB to 1,230.9 MiB. The import also runs `JSON.stringify` twice per turn. The `provider:uuid` card (next step 3 of the P1c handoff) removes the JSON column. It rebuilds `sessions` anyway, after a `VACUUM INTO` backup. P1a decides what replaces `search_text`. The schema is unchanged here.
+5. **Migrated sessions keep `l:<line>` keys while fresh imports get `u:` or `h:` keys — intended, now pinned by a test.** This is design section 4: the stored JSON has neither raw lines nor UUIDs, so no `u:` or `h:` key can be derived for a session that already exists, and keys never change once written. A new test imports the version 2 file's Claude and Codex transcripts into a fresh ledger. The session IDs, lines and texts match, and the keys differ (`l:` against `u:` and `h:`). Importing the same bytes again into the migrated ledger keeps the `l:` keys. Matching sessions across ledgers by key waits for the `provider:uuid` card, which links a legacy session to its UUID session (`legacy_id` in section 4).
+
+A second new test covers the rowid path: a session whose ID holds a NUL migrates under its exact ID. Two mutations were checked, and each fails its test: binding the ID as JavaScript read it (the commit fails on the foreign key), and reading the stored array as text (a NUL after the array is no longer refused).
+
+**Codex review (read-only) of the fixes, on 5a80f16.** It found no high findings, three medium and four low. All of them are fixed in the next commit, each with a test:
+
+- **Medium — fixed.** `JSON.parse` keeps the last of two fields with one name, while SQLite (the old copy, and the trigger for older builds) keeps the first, so `"text": "first", "text": "last"` changed which text was migrated. The step now refuses a message with a repeated field, even one spelled with an escape: "a stored message has the same field twice". A scan of each array's own elements finds such fields after `JSON.parse` has accepted the text. Names inside texts, inside nested objects and next to escaped quotes are not counted, and a test pins that.
+- **Medium — fixed.** A rowid above 2^53 failed to convert to a JavaScript number before the session could be named, so the upgrade failed where the SQL copy had worked. Rowids are now read as BigInt. A test migrates sessions at rowids 2^53 + 1 and 2^53 + 2 (one with an opaque ID that holds a NUL), and a bad one there is named by its exact row.
+- **Medium — fixed.** The step decoded every file as UTF-8, so a ledger created in UTF-16 failed on every session. It now reads `PRAGMA encoding` and decodes with that encoding. The ID length check counts 128 bytes in UTF-16, so IDs are still named and bound directly. UTF-16le and UTF-16be version 2 files migrate with the same rows, and a bad session in each is named by its ID.
+- **Low — fixed.** `1.0`, `1e0` and `1.00000000000000001` passed as line 1, and a leading byte order mark was dropped by the decoder; the SQL checks refused all of them. The step now checks the raw line token and keeps the byte order mark, so all are refused again.
+- **Low — fixed.** The Codex half of the legacy-key test derived its expected hashes from the fresh ID. It now fixes the ID in advance and makes the same line, text and re-import checks as the Claude half.
+- **Low — fixed.** In the benchmark, a child that exited before it started left the run waiting and skipped the cleanup. That now fails the run, and the folder is still removed.
+- **Low — fixed.** The docs called `sessions.messages` never read. The wording now names its two readers: the version 3 step and the trigger for older builds.
+
+Mutations checked, each failing its test: decoding as UTF-8 always, a 64-byte ID check in UTF-16, no repeated-field check, any line token, and dropping the byte order mark. The previous commit's `src/migrate.mjs` fails the atomic test and the wide-rowid test. Codex also confirmed the earlier points with probes on Node 22.14.0: a NUL and lone surrogates survive, a throw inside the loop resets the statement and rolls back to version 2, and the error text holds only a hex ID or a number. The added checks cost little: the upgrade still takes about 4 s (see the table above).
+
+**Codex review (read-only) of 2f44b8a, the second round on the fixes.** It found no high findings, one medium and two low, all fixed in the next commit. Codex also checked the scanner with 128 in-memory cases (runs of backslashes, escaped quotes, delimiters inside strings, nesting and an escaped `line` name) and found no wrong string end or misaligned element.
+
+- **Medium — fixed.** An escaped NUL in a field name could change a line citation. In `"line\u0000suffix": 9, "l\u0069ne": 1`, JavaScript sees two different names and took line 1, while SQLite compares names only up to the NUL and took line 9, as the trigger for older builds still would. A message with a NUL in a field name is now refused: "a stored message has a field name that holds a NUL character".
+- **Low — fixed.** The scan accepted nesting deeper than SQLite's limit of 1,000 levels, which the old SQL check refused. Such a session now fails with "its stored messages are nested more than 1,000 levels deep". A test checks both sides against SQLite's own `json_valid`: 1,000 levels migrate and 1,001 are refused.
+- **Low — fixed.** Comments in `src/migrate.mjs` and `src/store.mjs` still called `sessions.messages` never read. They now name its two readers.
+
+Both new checks were mutation-checked: without each, its test fails.
+
+**Suites (Windows, after the Codex round on the PR #45 fixes):** `npm run -s test:graph` 9/9; node 220/221 (one skipped; this card had 16 tests then); Playwright 13/13; Python runtime 192 run, OK (50 skipped). No raw control or format characters in `src/`, `tests/` or `evals/migration/`.
+
+**Suites (Windows, after the second Codex round):** `npm run -s test:graph` 9/9; node 221/222 (one skipped; this card had 17 tests then); Playwright 13/13; Python runtime 192 run, OK (50 skipped). No raw control or format characters in `src/`, `tests/` or `evals/migration/`.
+
+**Codex review (read-only) of ed38502, the third round on the fixes.** It found one medium, fixed in the next commit.
+
+- **Medium — fixed.** The NUL check refused too much. An extra field that the copy ignores, such as `meta` followed by an escaped NUL and `suffix`, failed the whole migration, though it had migrated before. Now a name with a NUL is refused only when its part before the NUL is `role`, `text` or `line`, a field that SQLite would read in its place. The fixed reason is now "a stored message has a role, text or line field name followed by a NUL character". The atomic test refuses such names for all three fields. A new test migrates a message with the extra names `meta` + NUL + `suffix`, NUL + `line` and `lines` + NUL, and gets the same row as before. With the fix undone (the ed38502 `src/migrate.mjs`), the new test fails. With no NUL check at all, the atomic test fails.
+
+**Suites (Windows, after the third Codex round):** `npm run -s test:graph` 9/9; node 222/223 (one skipped; this card has 18 tests); Playwright 13/13; Python runtime 192 run, OK (50 skipped). No raw control or format characters in `src/`, `tests/` or `evals/migration/`.
+
+**Codex review (read-only) of 2e38cd4, the fourth round, run by the coordinating session.** It found no high findings. The two it found are accepted as known limits for the human reviewer, with no code change:
+
+- **Medium — accepted.** A field name of `role`, `text` or `line` followed by a NUL is refused even when it comes after the real field, although SQLite and JavaScript would both read the first one. The store writes stored messages with `JSON.stringify` from known fields, so such names cannot occur in a ledger the store wrote. The refusal fails safe: the whole step rolls back and the error names the session.
+- **Low — accepted.** No test covers the case where the real field comes before its NUL alias. It would only pin the refusal described above.
+
+This closes P1c's review loop. A human review of the version 3 migration is still owed.
+
+## P1d — Delete a session (defined 2026-11-17, before implementation)
+
+Branch `ruslan/p1d-session-delete`, from `origin/main` 3a17536. This is the first part of card P1d (Delete and retention). It deletes one imported session. Project delete and purge by retention days need P1b's projects and come later. Synthetic transcripts only. Every test uses a temporary or `:memory:` database, never `.context-ledger/ledger.sqlite`. This card deletes user data, so the PR needs a human review as well as the Codex review (AGENTS.md section 4.4).
+
+| Eval | Expected |
+| --- | --- |
+| Store delete | `deleteSession(id)` removes the session row and returns true. `get`, `list` and `listSessionsPage` no longer return it, and the other sessions are unchanged. An unknown ID returns false and changes nothing. No schema change: `user_version` stays 1 and the table definitions are the same. |
+| Refused while cited | While any graph has `graphs.session_id` equal to the ID, `deleteSession` throws a `ConflictError` that names how many graphs cite it ("cited by 1 graph", "cited by 2 graphs") and changes nothing. The session, its graphs and any room on them stay readable. Rooms reference graphs, not sessions, so a session in a room is already refused through its graph. The check and the delete run in one `BEGIN IMMEDIATE` transaction, and `PRAGMA foreign_keys` stays ON, so a graph cannot slip in between them. |
+| Really gone | After a delete, a search for a word that was only in that session finds nothing, because `search_text` is in the same row. In a temporary file database, the raw bytes of the `.sqlite` file no longer contain the session's message text, title or source name, and no `-journal` file is left. SQLite does not zero freed space by default (`PRAGMA secure_delete` is 0 in Node 22's build; measured: the text stays in the file after a plain `DELETE`). The delete therefore sets `secure_delete = ON` for its own transaction only and puts the previous value back afterwards, which is checked. The file does not shrink until a `VACUUM`; this card does not run one. Bytes of the rollback journal that the file system freed are outside the ledger's reach. *Added after review round 1:* a database in WAL mode (which another tool can leave a ledger file in; the ledger never sets it) keeps the old pages until a checkpoint, so a delete there is refused with 409 and the journal mode, and nothing changes. A list cursor that points at a deleted session gets the existing 400 `Unknown cursor.`, and a listing started again finds the rest. |
+| HTTP | `DELETE /api/sessions/:id` with the same Host check as every route and the same exact-Origin rule as every write: a foreign Origin, the other local name's Origin or no Origin is 403 `Deleting a session requires the same origin.`, checked before the lookup, so an unknown ID also gets 403 without it. With the right Origin: 200 `{ deleted: id }`, 404 for an unknown, upper-case, short or long ID, 409 `{ error, graphs }` while cited. GET, POST, PUT and PATCH on the ID stay as they were. `tests/routes.test.mjs` is updated on purpose: its old loop sent DELETE to `/api/sessions/<graph id>` and expected 404 because there was no route. It still gets 404, now from the handler (no such session), and a new block pins the DELETE cases above. |
+| CLI | `npm run ledger -- delete <session-id>` sends `DELETE /api/sessions/<id>` with the local Origin and prints `Deleted session <id>.` A bad ID prints the usage and sends nothing. 404 prints `Session not found.`, 409 prints `Session is cited by N graph(s), so it was not deleted.` built from the integer count, not from the server's text, and anything else prints `Context Ledger returned HTTP <status>.`. Exit code 1 on every error, and stdout stays empty. *Added after review rounds 1 and 2:* a 409 whose `journalMode` is `wal` or `persist` prints `The ledger database does not use the default rollback journal, so the session was not deleted.`; any other 409 body gets the generic message; a success whose body is not JSON, or names another ID, prints `Context Ledger returned an unexpected response.` |
+| Browser | The open transcript has a Delete button. It asks with `window.confirm` (fixed text, no transcript text in it). Cancel sends nothing. Accept sends the DELETE, clears the reader and refreshes the list, so the transcript is gone from search. A refusal shows the server's message in the reader status through `textContent`. Playwright covers accept, cancel and a cited session. |
+| No MCP delete | The MCP adapter gets no delete tool, because agents must not delete people's data. Its HTTP client only sends GET and POST. A test checks that no tool name, description or schema mentions delete, remove, purge or erase, that no file in `src/mcp/` names DELETE or `deleteSession`, and that tools/list offers the same 13 tool names in the same order. |
+| Escaping | No raw control or format characters other than tab, newline and carriage return in the changed files under `src/` and `tests/`. |
+| Suites | `npm run -s test:graph`, `node --test tests/*.test.mjs`, Playwright and the Python runtime checks all pass. |
+
+### Results — P1d delete a session (2026-11-17, Windows)
+
+All rows pass. Commits: 874fc86 (implementation), 6c49fff (review round 1 fixes), then the round 2 fixes in the commit that adds these results. The tests are `tests/delete.test.mjs` (12), the new DELETE block in `tests/routes.test.mjs`, and `tests/e2e/delete.spec.mjs` (3).
+
+- **Store delete:** pass. `deleteSession` removes the row and returns true; `get`, `list` and `listSessionsPage` drop it and the kept session's detail is unchanged; unknown IDs return false. `sqlite_master` and `user_version` (1) are identical before and after.
+- **Refused while cited:** pass. 1 graph and 2 graphs give the exact messages and `details.graphs`; sessions in a room are refused through their graphs, and the room, graphs and context stay readable. A refusal runs `ROLLBACK`, and the next write on the same connection works. `PRAGMA foreign_keys` is checked to be 1 after a delete, and a direct `DELETE` of a cited row fails on the foreign key, so the schema refuses it too.
+- **Really gone:** pass. After a delete, searches for its words return nothing. The `.sqlite` bytes hold none of the session's message text, title or source name, both while the store is open and after close, and the folder holds only `ledger.sqlite` (no `-journal`). A control test pins the premise: Node 22.14's SQLite has `secure_delete` 0, and a plain `DELETE` leaves the text in the file. The delete runs `PRAGMA secure_delete = ON`, `BEGIN IMMEDIATE`, `COMMIT` or `ROLLBACK`, then puts back the previous mode, checked with OFF and FAST. Why ON is justified: the card's point is that the transcript is gone, and without it the deleted text stays readable in free pages; it applies to this delete only, so no other write pays for it. The file keeps its size until a `VACUUM`, which this card does not run (the project purge in the design does). A WAL database is refused (409 with `journalMode: "wal"`, over HTTP and from the CLI) and nothing changes. A list cursor on a deleted session gets 400 `Unknown cursor.` over HTTP, and a new listing returns the rest.
+- **HTTP:** pass. `tests/routes.test.mjs` now pins 20 more probes: foreign Origin, the other local name's Origin and no Origin give 403 before the lookup (also for an unknown ID), a foreign Host 403, unknown, upper-case, short, long and trailing-slash IDs 404, `DELETE /api/sessions` 404, a cited session 409 `{ error, graphs: 1 }`, PATCH 404, a delete 200 `{ deleted: id }`, then 404 on GET and on a second DELETE, and search no longer finds it. One existing probe changed on purpose: the loop that sent DELETE with a `{}` body to `/api/sessions/<graph id>` now gives the body a `Content-Length`. Node's client sends a DELETE body without framing, and with a route there the server read those bytes as a second, malformed request (400 from Node's parser, without the security headers). The answer is still 404, now from the handler. A DELETE body is not read.
+- **CLI:** pass, with a real server and with a fake one. The fake records exactly one `DELETE /api/sessions/<id>` with the local Origin and no body. Bad IDs send nothing. A hostile server text (ESC and U+202E) never reaches stderr: in a 409 with or without a valid count or journal mode, a 403, a 404, a wrong ID and a body that is not JSON.
+- **Browser:** pass. Playwright: cancel sends no DELETE request and keeps the transcript; accept sends one DELETE, clears the reader and search finds nothing; a cited session shows `Delete failed. This session is cited by 1 graph, so it cannot be deleted.`; an intercepted 409 whose error is markup is shown as literal text and adds no element.
+- **No MCP delete:** pass. The 13 tool names are pinned in order, no tool text matches delete, remove, purge or erase, and no file in `src/mcp/` or `src/mcp.mjs` names DELETE or `deleteSession`. An agent with a shell can still run `ledger delete`; keeping agents out of that is P1e's token or a later card, not this one.
+- **Escaping:** pass. The changed files in `src/`, `tests/` and `public/` hold no raw control or format characters other than tab, newline and carriage return.
+- **Mutation checks (by hand, not committed):** each of these makes a new test fail: no foreign-key mapping in `publishGraph`, restoring `secure_delete` to OFF whatever it was, no journal-mode check, printing the CLI's JSON parse error, and `PRAGMA foreign_keys = OFF`.
+- **Suites** (on the final commit): `npm run -s test:graph` 9/9; node 203/204 with one skipped (the 12 new tests in `tests/delete.test.mjs`; `main` had 191/192); Playwright 16/16 (13 before, plus the 3 in `tests/e2e/delete.spec.mjs`), run under the machine-wide port lock; Python runtime 192 run, 50 skipped, OK. Linux CI runs on the PR.
+- **Codex review, round 1** (`codex exec --sandbox read-only`, of 874fc86). Two medium, five low; all fixed in 6c49fff with a regression test:
+  - (medium) The CLI printed `response.json()`'s parse error, which quotes the body, so a malformed 200 put raw ESC and U+202E on stderr. Now a fixed message. The same parse now covers every CLI command.
+  - (medium) In WAL mode a committed delete leaves the old pages until a checkpoint. A delete is now refused outside the rollback journal modes (delete, truncate, memory, off).
+  - (low) A graph publish racing a delete on another connection hit the foreign key and became a 500. Now the existing 400 `Graph transcript session not found.`, tested with two connections.
+  - (low) A cursor on a deleted session: now in the eval and tested.
+  - (low) Hard-coding the `secure_delete` restore, or turning foreign keys off, would have passed; the file bytes were only checked after close. All three are now tested.
+  - (low) The cancel test did not count requests, and the refusal test used plain text. Both fixed.
+  - (low) "tools/list is unchanged" was claimed but only the count was checked, and the scan missed the e2e spec. The names are pinned and the scan widened.
+- **Codex review, round 2** (of 6c49fff). No high or medium. Four low, all fixed in the results commit: the CLI accepted any `journalMode` value as a journal refusal (now only `wal` or `persist`, others get the generic message); the WAL and cursor claims were tested only on the store (now also over HTTP); the CLI row did not list the new messages (amended above); the scan missed `public/styles.css` (added).
+- **Human review:** still owed. This card deletes user data (AGENTS.md section 4.4).
+
+## P1e — Loopback API token (`ruslan/p1e-loopback-token`, defined 2026-11-17, before implementation)
+
+ADR-10 in the P1 design (PR #37, section 6): the loopback server needs a secret on every API request, the browser gets it as a cookie through a one-time sign-in link, and the CLI and the MCP adapter read it from a file. This card is security work: it needs a human security review before merge (AGENTS.md section 4).
+
+**Threat model.**
+
+- **Other local users** on the same machine can reach 127.0.0.1 but cannot read files in the owner's account. Today they can read and write the whole ledger. After this card they get 401 on every API route unless they can read the token file (mode 0600 on POSIX, in a 0700 folder) or steal a browser cookie.
+- **Other local processes of the same user** (including agents and malware) can read the token file, so they are not stopped. The token stops honest clients that were not given access and processes sandboxed away from the user's files; it does not stop same-user malware. The decisions route keeps its `Sec-Fetch-Site` rule, which an agent with the token can still forge.
+- **A web page in the user's browser** cannot read the token or the cookie. The cookie is `HttpOnly; SameSite=Strict`. The Host allowlist (DNS rebinding), the exact Origin check on writes, JSON-only bodies and no CORS stay as they are, so a page can neither read API responses nor write.
+- **Not protected:** same-user malware, root or an administrator; anyone who can read the token file; a page served from another port on 127.0.0.1 in the same browser, which receives the cookie because cookies are not isolated by port (so another local user who gets the owner to open their local page can take a browser session until it expires or the server restarts); a sign-in link that someone else opens first within its lifetime. On Windows the file mode is not enforced: the token file gets the ACL of its folder, which under the user profile is normally the user, SYSTEM and Administrators.
+
+| Eval | Expected |
+| --- | --- |
+| Token at start | Each server start writes a fresh token of at least 32 random bytes to `<database>.token`, created exclusively (an existing file or link there is removed first, and a race fails closed) with mode 0600 where the OS supports it, in a folder created as 0700. The server keeps only a SHA-256 digest in memory. The token is never printed. |
+| Every API request needs it | Without the token or a valid session cookie, every route outside the static files and `/login`, every method and every unknown path, answers 401 with a fixed message and `WWW-Authenticate: Bearer`. A wrong, short, long or malformed token, a cookie from another start, and a token sent as a cookie all get 401. The comparison is constant time on digests. Static files stay public. |
+| Checks keep their order | The Host and URL checks still come before the token check (a foreign Host without a token is 403, not 401). With the token, every probe in `tests/routes.test.mjs` answers as before; the only change to that test is that it sends the token, plus a block that pins the 401s. |
+| Browser sign-in | The server prints a one-time sign-in URL `/login?code=…` at start; `npm run ledger -- login` prints a new one. A code works once, within 60 seconds, and sets an `HttpOnly; SameSite=Strict; Path=/` session cookie (12 hours, per port), then redirects to `/` (303). A used, expired, unknown or malformed code is 401 and sets no cookie. The token itself never reaches the browser, a URL or a fragment; codes are minted only with the bearer token, not with a cookie. |
+| CLI and MCP keep working | The CLI and the MCP adapter read the token file named by `CONTEXT_LEDGER_DB` (the repository's `.context-ledger/ledger.sqlite` by default) on each request and send `Authorization: Bearer`. Their errors for a missing file or a refused token are fixed sentences that name neither the token nor a path; a ledger that is not running still gives the existing "Cannot reach" message. |
+| Suites | Every node test and Playwright spec that calls the API passes, using the token file (node) or the sign-in link (browser). Playwright adds a browser test for sign-in and for an unauthenticated page. Node, graph, Playwright and Python suites pass. |
+
+**Amendments after review (2026-11-17).** Two rows above say more than the build does, and are corrected here rather than edited in place. "Browser sign-in": the cookie is *named* per port, but browsers send it to every port on 127.0.0.1, so it is not isolated per port (see the open high finding below). "Every API request needs it": constant time applies to the bearer comparison; codes and sessions are looked up by their SHA-256 digests. Code and session lifetimes are upper bounds: a holder of the token can evict them by minting more (32 codes, 64 sessions). The token file now also names the port (`{ "port": …, "token": … }`), is written only once the server holds its port, and clients send the token only to that port.
+
+**Results — P1e (2026-11-17, Windows):** the six rows pass, with one open high finding that needs the human security review. A human security review is required before merge in any case (AGENTS.md section 4).
+
+- **Token at start:** pass. `src/token.mjs` makes 32 random bytes (base64url, 43 characters) per start and writes `<database>.token` from the listen callback: existing file or link removed, then created with `wx` and mode 0600, in a folder created 0700. The server keeps only the SHA-256 digest; the plain token lives only in the listen callback. The start-up output never contains it (checked in `tests/token.test.mjs`). A second server that cannot bind the port exits with `EADDRINUSE` before touching the file. Ctrl-C or SIGTERM removes the file if it still holds this server's token. If the file cannot be written, the server exits with a fixed sentence that names no path. POSIX mode and link cases run on Linux CI only; on Windows the file takes its folder's ACL.
+- **Every API request needs it:** pass. Everything except the three static files and `/login` is 401 without the bearer or a live cookie, with `WWW-Authenticate: Bearer realm="Context Ledger"`: every route, unknown paths, other methods, a wrong, short, long or malformed token, the token as a cookie, a cookie from an earlier start. `POST /api/login` mints codes with the bearer only (403 with a cookie).
+- **Checks keep their order:** pass. `tests/routes.test.mjs` sends the token on every probe and its 192 probes answer as before. A new block pins 401 on 21 guarded probes without a token and with a wrong one, and shows that no latent request reached the runtime. It also checks that a foreign Host is still 403, a bad URL still 400, and the static files still 200 without a token.
+- **Browser sign-in:** pass. The start-up line and `npm run ledger -- login` print `/login?code=…`. A code works once within 60 seconds and gives 303 to `/` with `context_ledger_<port>=…; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`. A used, expired, unknown, malformed or missing code, the token itself, or two codes in one link (neither is used up) gives 401 and no cookie. The cookie reads, writes with the right Origin, and confirms a room proposal only with `Sec-Fetch-Site: same-origin`. `tests/e2e/auth.spec.mjs` checks this in Chromium: an unauthenticated page shows the sign-in hint, `document.cookie` is empty, and a reused link gets 401 in a second browser context.
+- **CLI and MCP keep working:** pass. Both read the token file named by `CONTEXT_LEDGER_DB` (default: the repository's `.context-ledger/ledger.sqlite`) on every request. The MCP test keeps one adapter process across a ledger restart on the same port. Each client sends the token only to the port the file names and says, in a fixed sentence, which port the token is for. A graph publish and `demo/publish-reference.mjs` send nothing without a matching token. A missing, malformed, linked or other-user file is "Cannot read the Context Ledger access token…", a wrong token is "…refused the access token…", and a ledger that is not running is still "Cannot reach…". No message holds the token or a path. The handoff benchmark, `demo/rehearse.mjs` and the latent evals pass the token too (the evals only to a literal `http://127.0.0.1:<port>`).
+- **Suites:** node 207/212 (5 skipped: 4 POSIX-only token cases on Windows and the existing port-4320 skip), was 191/192 before this card. Graph check 9/9. Playwright 14/14 (was 13; +1 `auth.spec.mjs`), every spec signing in through `tests/e2e/fixtures.mjs`. Python runtime 198 run, 50 skipped, OK. `src/` and `tests/` hold no raw control or format characters.
+- **Codex review, round 1** (`codex exec --sandbox read-only`, of 89d67c5). One high, four medium, four low:
+  - (high, **open**) Browsers send the cookie to every port on 127.0.0.1. A page served by another local program, including another user's, receives it and can replay it from a native client until it expires (12 h) or the server restarts. Not fixed here: ADR-10 chose an HttpOnly cookie, and the fix (an origin-scoped credential, for example a secret in page storage sent as a header) changes that design. It goes to the human security review, with Backlog card P1f. The README now warns about it.
+  - (medium) `/api/latent/files` could return the token file when `LATENT_ROOT` held the database. Fixed: `.token` is a secret suffix in `rules/latent-rules.json`, with 3 new shared conformance cases, and the Node reader checks the resolved path as Python already did.
+  - (medium) Clients sent the token to whatever listened on `PORT`. Fixed: the file names the port, and clients and scripts check it.
+  - (medium) Reads trusted the file type, and creation trusts the folder. Fixed: reads are non-blocking (a FIFO cannot hang a client) and accept only small regular files of the current user. The folder is documented as a requirement (README, Windows ACL).
+  - (medium) A second start replaced a running server's token. Fixed: the file is written after `listen` succeeds.
+  - (low, accepted) Opening a link uses up its code, so a link preview could spend it first. The code is also visible in the terminal. A code is single-use and valid for 60 s.
+  - (low, partly fixed) Other output paths: the plain token is no longer kept at module level. MCP still passes a listener's short 4xx message through as before; with the port check, a foreign listener no longer gets the token it could echo.
+  - (low, documented) The server's default database is relative to the working folder, while clients default to the repository's database. The README now says this.
+  - (low) Four tests a mutation would pass. Fixed: one MCP process across a restart, two fresh codes in one link, a cookie-only room decision, and a real search result in the browser test.
+- **Codex review, round 2** (of b66b59b). No new high finding; it agreed that leaving the cookie finding to the human review is reasonable if that review accepts the risk explicitly. Fixed, each with a test:
+  - `localhost` could reach `::1`; LEDGER URLs now need the literal 127.0.0.1.
+  - A program taking the port after shutdown could get a stale token; a clean stop now removes the file.
+  - A publish body went out without a matching token; it no longer does.
+  - Token reads now refuse links (O_NOFOLLOW) and POSIX files with group or other bits.
+  - A hard link to the token file inside `LATENT_ROOT` was readable. It is now refused by file identity. The new test found it readable on Windows at first: path `stat` there reports `dev` 0, so the identity comes from the writing descriptor, as bigints.
+  - Script errors now escape the listener's text.
+  - The second-start test now asserts `EADDRINUSE`.
+  - Still documented, not fixed: two servers on different ports and one database share one token file, and the newer start wins. A writable `LATENT_ROOT` can still swap files between the check and the open.
+- **Codex review, round 3** (of 4c4d869). No high finding. One medium: the clean-stop read did not use the guarded read, so a FIFO put in place of the file could hang a stop. Fixed: it is now bounded, non-blocking and refuses links and non-regular files, with a POSIX test that swaps in a FIFO before the stop. Two lows fixed: the latent evals now also escape `data.reason`, and the permissive-mode test sets 0644 with `chmod`, so the umask cannot weaken it. Two lows accepted: URL parsing also takes IPv4 spellings like `127.1`, which is the same address (now in the code comment), and a stop exits 0 without draining requests. The race between a stop and an overlapping start on one database is documented. Rounds 1 to 3 recorded here; no round found a way to reach an API handler without the token or a cookie.
+- **Independent review of PR #46, medium findings (2026-11-18).** No high finding. Both mediums are fixed, each with a regression test; the cookie-across-ports finding stays with card P1f, and the lows are left as they are.
+  - (M1) On Windows the token file took its folder's inherited ACL, and readers checked nothing there. Under a folder such as `C:\data`, or in this machine's temp folder (which names a second local user), other users could read it. Fixed in `src/token.mjs`, in the form that Codex rounds 4 and 5 (below) led to. On win32, Windows PowerShell writes and reads the token file, each time through one handle that is both checked and used. The writer creates the file (`FileMode.CreateNew`, `FileShare.None`) with a protected security descriptor whose owner and only entry are the current user, so the file is never open to anyone else, not even for a moment. It checks that descriptor on the new handle and only then writes the record, which it reads from stdin. A path that already names something fails without being removed. A later failure empties the new file through its handle. Node checks the SDDL that PowerShell reports again. It takes the file's identity from a descriptor whose content is this start's record. A reader opens the file in PowerShell and reads owner and DACL as SDDL (which does not depend on the display language) and at most 257 bytes, all from the same handle. It refuses a file that another account owns (an owner may always change the DACL) or that grants anyone else an allow entry: SYSTEM, Administrators, Everyone, another user, a NULL DACL, a conditional or object entry. Such a file is `{ exposed: true }`. The CLI and the MCP adapter then stop before sending anything, and they and `demo/publish-reference.mjs` say so in a fixed sentence: "The Context Ledger access token file can be read by other users, so it was not used. Restart the ledger to write a private one." PowerShell runs from System32 with `execFile`, without a shell. It takes its script as `-EncodedCommand` and the path in an environment variable. The token goes only through that child's private stdin and stdout pipes, never its arguments or environment. POSIX is unchanged: mode 0600, and a reader refuses other modes or owners as "Cannot read…". Tests: `privateToOwner` unit cases on every OS, and two win32-only tests. The first starts the server in a folder that hands every new file `Everyone:F`. The server's file must still be owned by this user, with a DACL of exactly `D:P(A;;FA;;;<SID>)`. A DACL replaced after creation would read `D:PAI`, so the test also catches a return to fixing the ACL afterwards. The second grants Everyone read on a token file. The CLI search, a graph publish, the MCP adapter and the demo script all refuse it in fixed words that name no token or path, and a recording listener receives no request at all. Test helpers that write token files by hand restrict them with `restrictToOwner` in `tests/ledger-auth.mjs`.
+  - (M2) A second server on another `PORT` with the same database replaced the first one's token file, which broke the first one's CLI and MCP. Fixed without changing ADR-10: the file is now per port, `<database>.<port>.token` (by default `.context-ledger/ledger.sqlite.4317.token`). It is still named and written only after `listen` succeeds. The CLI, the MCP adapter, `tokenForUrl`, the demo and eval scripts and the test helpers (`tests/ledger-auth.mjs`, `tests/e2e/fixtures.mjs` through `CONTEXT_LEDGER_E2E_PORT`) read the file for their `PORT`. The port check inside the file stays, for a file that was copied or renamed. The "Cannot read…" sentences now name `PORT` as well as `CONTEXT_LEDGER_DB`. The new test starts two servers on one database: both files hold their own token, and the CLI and an MCP adapter work against each. Each token gets 401 on the other server. A second server on the same port still exits with `EADDRINUSE` and leaves the first file alone (the existing test, now on the per-port path). `.token` stays the secret suffix, and `rules/latent-conformance.json` gains the per-port name.
+  - **Codex review, round 4** (`codex exec --sandbox read-only`, of d9db967, the first form of these fixes: share-mode-0 create, then icacls). No high finding. It confirmed the per-port naming and every caller. Two medium and three low:
+    - (medium, fixed) Share mode 0 does not block an ACL-only open. An account that the inherited ACL granted `WRITE_DAC` could open the new file in the gap before icacls ran, keep that handle, and later grant itself read. Fixed: the file is created with its final security descriptor, so there is no gap. The `Everyone:F` folder test pins it.
+    - (medium, fixed in round 5) The reader checked the DACL by path, not by the open handle, and did not check the owner. The first fix (5ed07f7) added the owner check and compared file indexes after the path check. A reader that held the file with share mode 0 was tried and dropped, because 7 Playwright workers reading at once failed with EBUSY.
+    - (low, fixed) An exposed file still let the request go out without the token. The CLI and the MCP adapter now stop first, and the test asserts that the listener saw nothing.
+    - (low, fixed without an injection test) A short write or a failed close could leave a file behind. The POSIX writer now checks the byte count and removes the file after any failure, including a failed close. The Windows writer empties its own file through its handle. No test injects these failures.
+    - (low, open) CI runs the Node suite only on Linux, so the Windows-only tests run only locally. Adding a Windows Node job is a CI change outside this card. It is noted for the human reviewer.
+  - **Codex review, round 5** (of 5ed07f7). No high finding. Two medium and three low:
+    - (medium, fixed) The writer checked the ACL by path but wrote through its own descriptor, so a redirected ancestor could make the check describe another file. (medium, fixed) The reader's file-index comparison ignored the volume, and 64-bit indexes are not unique on ReFS. Fixed together: on Windows, PowerShell checks and writes, and checks and reads, through one handle. Node no longer reads or writes the Windows token file through a second handle. The only exception is the writer's identity read, which is tied to the file by its fresh content. The path-identity comparison is gone.
+    - (low, fixed) The writer could delete an entry it did not create after a `CreateNew` collision. A collision now fails without removing anything, and a later failure empties the file through its own handle instead of removing by path. No test injects a collision.
+    - (low, fixed in the docs) The residual race was described as needing full control of the folder. With handle-based checks it no longer exists on Windows. The README's folder rule (other users must not be able to replace files there) covers the remaining denial of service.
+    - (low, accepted) The `D:P` assertion checks the final descriptor, not the constructor call. It still fails for a file whose ACL was fixed after creation (`D:PAI`) or left inherited, and a test of the script text would only repeat the code.
+  - **Codex review, round 6** (of a3fddaa). No high finding, and no POSIX regression. One medium and two low, all fixed:
+    - (medium) The Windows reader still opened the path twice: Node checked type and size, then PowerShell opened it again for owner, DACL and content. Fixed: on Windows, Node no longer opens the path, and PowerShell checks type (`CanSeek`; .NET already refuses handles that are not disk files) and size (at most 256 bytes) on the handle it reads from. The new test (a folder and a 300-byte private file give nothing, a 256-byte one is read) checks the PowerShell path. It does not fail when the in-handle check is removed, because .NET refuses folders and Node's own length check still rejects the 257 bytes read. The race itself cannot be forced deterministically, and the code now has only one open.
+    - (low) The reader shared the file for reading and writing but not deletion, so a server that stopped during a read could not remove the file and left it behind. Fixed: `FileShare.Delete` is added. The test uses the hook `CONTEXT_LEDGER_TEST_READ_HOLD_MS`, which only keeps the reader's handle open longer after its read. It removes the file during the read, and the read still returns the record. The test fails with EBUSY when the delete sharing is taken out.
+    - (low) When Node rejected the writer's reported SDDL, it removed the file by path after PowerShell had closed it, which could delete a file that replaced it. A failure there could also throw a file system error that names the path. Fixed: `emptyIfOwnRecord` empties the file through its own descriptor, and only if it holds this start's record, which only this start knows. Nothing is removed by path, and every failure of the Windows identity step is one fixed sentence. The test checks that the own file is emptied in place, that a file with other content is left as it is, and that a missing file is not an error. It fails when the cleanup removes by path.
+    - Checked by undoing each fix: the delete-sharing and cleanup tests fail. The type-and-size test does not, for the reasons above.
+  - **Codex review, round 7** (of 70addd6, the last agent round on this card). No high finding. One medium and three low. Each fix is kept small, and what would need a redesign is listed as a known limit below.
+    - (medium, fixed in part) When Node rejects the writer's reported descriptor, cleanup reopens the file for writing. A reader that shares read and delete but denies write can block that reopen and leave the record in the file. Fixed: `emptyIfOwnRecord` now reports `'emptied'`, `'not ours'` or `'failed'` instead of swallowing the failure. When cleanup fails, the server's error is a fixed sentence that says the file could not be emptied and must be deleted before the next start. The test makes the file read-only, which has the same effect as the deny-write reader. It expects `'failed'` and the record intact, and fails when the old swallowing is restored. **Known limit:** cleanup still needs write access. Emptying through the writer's own handle before it closes would need the writer to stay open across Node's check (an async, two-way exchange with PowerShell), and that redesign is not built. The record stays in a file private to the user. The case only arises after PowerShell's own check passed and Node's second check did not.
+    - (low, fixed) When the identity lookup after the write failed, startup exited without cleanup, and `closeSync` sat outside the guards. Fixed: a failed lookup runs the same cleanup and fixed sentences, and every `closeSync` in these paths is guarded. No test forces the lookup to fail.
+    - (low, fixed) The delete-sharing test assumed PowerShell opens within 3 s. The test hook is now `CONTEXT_LEDGER_TEST_READ_MARKER`: after its read, with the handle still open, the reader creates the marker file and waits up to 10 s until the test removes it. The test waits for the marker, removes the token file, then removes the marker. It still fails with EBUSY when delete sharing is taken out.
+    - (low, fixed) The type-and-size test also passed with the old two-open reader. The new test counts the opens `src/token.mjs` makes on the token path through `node:fs/promises`: 0 on Windows, 1 on POSIX. It wraps `open` and calls `syncBuiltinESMExports`. It fails when a Node open comes back before PowerShell's.
+    - Checked by undoing each fix: the cleanup-report, open-count and delete-sharing tests fail. The identity-failure cleanup has no test.
+    - **Known limits for the human security reviewer**, after rounds 1 to 7: cleanup after a rejected Windows descriptor needs write access (above). There are no failure-injection tests for a `CreateNew` collision, a short write, a failed close or a failed identity lookup. CI runs the Node suite only on Linux, so the Windows-only tests run only locally. Round 7's fixes have had no Codex round of their own.
+  - Suites after rounds 4 to 7: node 215/220 (5 skipped: the same 4 POSIX-only cases and the port-4320 skip; the four Windows-only tests skip on POSIX), was 207/212 before these fixes. Graph check 9/9. Playwright 14/14, three runs in a row. Python runtime 198 run, 50 skipped, OK. `src/` and `tests/` hold no raw control or format characters. On Windows a start now takes about 0.5 s longer, and each client read about 0.4 s longer (one PowerShell run each).
+- **Not covered by this card:** the latent runtime on port 4320 has no token of its own; it is a separate listener, as before. Same-user programs can read the token file, as the threat model says.
+
+## I2 — Tolerant JSONL parsing (defined 2026-11-17, before implementation)
+
+Real data showed that one unreadable line, often a last line cut off while the agent was still writing, made the whole session fail to import. I2 skips such lines and says how many it skipped. It changes only the parser, not the database.
+
+All tests use synthetic transcripts.
+
+### What is tested and the expected result
+
+- **Some lines unreadable.** A Claude Code transcript and a Codex transcript, each with readable messages around unreadable lines (a cut-off last line, a line of plain text, an unclosed object), import. The result names how many lines were skipped and the first ten of their line numbers.
+- **Line numbers stay true.** Every message keeps the line number it has in the file, so a graph citing line 4 still points at line 4 after earlier lines were skipped, and a graph citing a skipped line is refused.
+- **Nothing readable.** A file in which no line is JSON is still refused with `Invalid JSONL at line N.`, naming the first line, and nothing is stored.
+- **Readable but empty.** A file of readable lines with no messages is still refused with `No supported conversation messages found.`
+- **Same file, same answer.** Importing the same file again returns the same session and the same skip report.
+- **A clean file is unchanged.** A transcript with no unreadable line returns exactly the session summary it returned before I2, with no skip report.
+- **The browser says so.** After an import with skipped lines, the import status reads "Partially imported", with how many messages were kept, how many lines were skipped and which ones, and that messages on those lines are missing.
+- **Through HTTP.** `POST /api/import` returns the skip report beside the session, and a file with nothing readable is still a 400 that stores nothing.
+
+### Acceptance for the code
+
+- `node --test tests/*.test.mjs` and `npx playwright test` pass, with the cases above in `tests/import-tolerant.test.mjs` and the library browser spec.
+- No new dependency and no schema change.
+
+### I2 results (2026-11-17)
+
+- `tests/import-tolerant.test.mjs` 8/8 and the library browser spec 4/4. Full suites on Windows: `npm run -s test:graph` 9/9, `node --test tests/*.test.mjs` 199 (198 pass, 1 skipped), `npx playwright test` 14/14, and `runtime/` Python 192 run (50 skipped).
+- **Codex, round 1:** no high findings. One medium and three low, fixed in the next commit:
+  - (medium) A partial import read like a clean one. The status now says "Partially imported", how many messages were kept, which lines were skipped, and that messages on them are missing.
+  - (low) The rejection test checked only a search for the rejected text. It now checks the rejected files' own session IDs (see round 2).
+  - (low) The Codex case only had a cut-off last line. It now has a bad line between two messages and checks that the later message keeps its line number.
+  - (low) Citations were not tested. A graph citing a kept line by its file number is accepted, and one citing a skipped line is refused.
+- **Codex, round 2** (of af581a9): the four fixes are complete. One low finding: comparing whole session lists can fail when other browser workers import at the same time. The test now checks that neither rejected file is stored under its own session ID.
+- **Left for P1:** after reopening a partially imported session, nothing says lines were skipped. Keeping that needs a stored count, which is a schema change; P1 owns the storage redesign, so I2 adds none.
+
+## I1 — Large-file import from a file path (defined 2026-11-17, before implementation)
+
+Real data: 16% of Claude Code sessions are larger than the 8 MiB limit on an HTTP request, mostly because of long tool output that the importer drops anyway. I1 adds an explicit command, `npm run ledger -- import --provider claude|codex <file.jsonl>`. It reads the file as a stream, line by line, and writes the session straight into the ledger database (`CONTEXT_LEDGER_DB`, or the same default as the server), whether or not the server is running. The raw file is never held in memory whole. Nothing is collected in the background: the user names the file.
+
+All tests use synthetic transcripts.
+
+### What is tested and the expected result
+
+- **Same session as the browser.** For the same file, the command stores exactly what the browser import stores: the same session ID (SHA-256 of the provider, a NUL and the decoded text), title, messages, line numbers and skip report. Checked on files with CRLF line ends, a byte-order mark, blank lines, no final line break, unreadable lines (I2), and multi-byte characters split across read chunks. Importing a file both ways gives one session.
+- **Larger than 8 MiB.** A synthetic Claude Code file of more than 20 MiB, mostly tool output, imports and keeps its user and assistant messages with their line numbers.
+- **Long lines.** A single line of several MiB, read in many chunks, is parsed as one line. A line longer than 64 MiB (in UTF-8 bytes) is skipped and counted like an unreadable line, without being joined in memory.
+- **Bounded sessions.** More than 64 MiB of messages in one file, counted as stored in UTF-8 bytes, is refused with a clear message, since one session is still one database row until P1.
+- **Refusals.** A missing file, a folder, a file with nothing readable, or a provider other than claude or codex is refused with a short message and exit code 1, and nothing is stored. Errors never echo the path or the file's text.
+- **Output.** The command prints the session summary (and the skip report, if any) as escaped JSON, like `search`.
+- **The browser points to it.** A file of 8 MiB or more, or one whose request would pass 8 MiB once quoted as JSON, is refused in the browser with a message that names the command.
+- **Shared database.** The CLI and a running server importing the same file at the same moment give one session.
+
+### Acceptance for the code
+
+- `node --test tests/*.test.mjs` and `npx playwright test` pass, with the cases above in `tests/import-file.test.mjs`.
+- No new dependency and no schema change.
+
+### I1 results (2026-11-17)
+
+- `tests/import-file.test.mjs` 14 (plus a FIFO case that runs only off Windows) and the library browser spec 7/7.
+- **Codex, round 1:** no high findings; four medium and three low:
+  - (medium) It reported that the Codex parity fixture lacked `payload.type: 'message'`. It does have it, and the case passed; a test now checks its kept and skipped lines explicitly.
+  - (medium) A file with no line break could build one string until V8's limit. Lines are now kept as fragments, joined once, and a line over 64 MiB is skipped and counted without being joined.
+  - (medium) Every skipped line number was kept, and a huge first message was spread into an array for its title. Only the count and the first ten line numbers are kept now. The title is read only as far as it needs, and a test checks it matches the old rule. More than 64 MiB of message text is refused.
+  - (medium) `parseArgs` errors could print a raw option, and a database that failed to open could print its path. Both now give fixed messages, and every CLI error line is escaped.
+  - (low) A FIFO was opened before the check. The path is now checked first, the descriptor again after opening, and closing never hides the first error.
+  - (low) There was no test of the CLI and a running server on one database. One now imports the same file both ways at once and finds one session.
+  - (low) A file under 8 MiB could still be too large once quoted. The browser now measures the request and shows the same hint, since the server refuses it before reading and the browser would only see a failed fetch.
+- **Codex, round 2** (of b7baa96): the round 1 fixes hold, with two medium and three low findings:
+  - (medium) Both 64 MiB limits counted UTF-16 code units, so CJK text could pass them at about 72 MiB. Both now count UTF-8 bytes, with tests on wide characters.
+  - (medium) Many tiny messages were bounded only by their text. The budget now counts each message as stored, with its role, line and JSON syntax.
+  - (low) The browser hint said the file itself was 8 MiB or more, and read the provider after an await. It now says the import is over the browser's 8 MiB limit, with the provider taken at submit time.
+  - (low) CLI error lines kept line breaks and joiners. Every message other than the usage text is now escaped onto one line by `terminalLine` in `src/text.mjs`.
+  - (low) The shared-database test cannot force both writers past the duplicate check at once. Not changed: the store is synchronous within a process, SQLite serialises writers across processes, and the insert is `ON CONFLICT (id) DO NOTHING`, so the race ends in one row by construction.
+
+## D3 — T3 Code thread importer (defined 2026-11-17, before code)
+
+D3 imports T3 Code threads into the ledger from a copy of T3's database that the person makes. It reads the copy read-only and never looks for T3's own files. No T3 Code install was used: the layout below comes from T3's public source only, and the test database is built from that source's table definitions with synthetic threads.
+
+### Pinned release and source read
+
+- **Release:** T3 Code `v0.1.10`, commit `7d32075e3757ded707914e2450c3e392a9665765` (2026-11-16), repository `pingdotgg/t3code`. Its database schema head is migration 96, `RepairStaleTitleRegeneration`. For comparison, `v0.1.9` ends at migration 81 and `main` at `c48825322df347d266ab7465332ad490b3bf2aaf` (2026-11-18) at 98; the importer refuses both.
+- **Files read at that commit:**
+  - `apps/server/src/config.ts` (`deriveServerPaths`: the database is `<base-dir>/userdata/statev2.sqlite`)
+  - `apps/server/src/persistence/Migrations.ts` (the migration manifest, 1 to 96) and `apps/server/src/persistence/databaseMigrationHead.ts` (the schema version is the highest `migration_id` in `effect_sql_migrations`)
+  - `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts`, `Migrations/OrchestrationV2/Foundation.ts` and `Migrations/081_ProjectionMessageSearchText.ts` (the tables read and every column added later); migrations 056 to 096 were searched for other changes to those tables, and there are none
+  - `apps/server/src/orchestration-v2/ProjectionStore.ts` (how events write the thread, run, provider-thread and message rows, and that a thread's messages are read `ORDER BY created_at ASC, message_id ASC`)
+  - `apps/server/src/orchestration-v2/messageSearchIndex.ts` and `Migrations/069_ThreadMessageSearch.test.ts` (which messages T3 itself counts as conversation)
+  - `packages/contracts/src/orchestrationV2.ts` (`OrchestrationV2AppThread`, `OrchestrationV2Run`, `OrchestrationV2ProviderThread`, `OrchestrationV2ConversationMessage`), `packages/contracts/src/providerInstance.ts`, `packages/contracts/src/model.ts` (driver names) and `packages/contracts/src/baseSchemas.ts` (IDs)
+  - `docs/user/thread-migration.md` and `.agents/skills/test-t3-app/references/sqlite-fixtures.md`
+  - `.repos/effect/packages/effect/src/sql/Migrator.ts` (the Effect copy T3 vendors: the SQLite form of `effect_sql_migrations`, `migration_id integer PRIMARY KEY NOT NULL`, `name VARCHAR(255) NOT NULL`)
+
+### The layout at schema 96 (what the importer reads)
+
+- `effect_sql_migrations(migration_id, name, …)`: the schema version.
+- `orchestration_v2_projection_threads`: one row per thread; `thread_id`, `title`, `created_at`, `deleted_at`. `provider_instance_id` names a provider *instance* (a slug the person can choose), not the agent, so it is not used to pick the agent.
+- `orchestration_v2_projection_runs`: one row per run (a user turn and the agent's reply); `thread_id`, `provider_thread_id`, and in `payload_json` the `modelSelection.model` that ran it. `orchestration_v2_projection_run_attempts` also names a `provider_thread_id` per attempt.
+- `orchestration_v2_projection_provider_threads`: the agent's own conversation; `driver` is the agent kind. `claudeAgent` is Claude Code and `codex` is Codex; T3 also has `cursor`, `grok`, `kiro`, `opencode`, `pi`, `acpRegistry` and others.
+- `orchestration_v2_projection_messages`: `message_id`, `thread_id`, `run_id`, `role` (`user`, `assistant` or `system`), `streaming` (0 or 1), `created_at`, and `payload_json` with `text` and `createdBy` (`user`, `agent` or `system`; absent on older rows, which were the user's).
+
+### What the importer does
+
+- `npm run ledger -- import-t3 <copy> [--thread <id>] [--list]`. The path is always given; there is no default and no search for T3's files. A path named `statev2.sqlite` inside a folder named `userdata` is refused as T3's live database; this is a name check only, and a link to that file under another name is not caught. A copy with a non-empty `-wal` file beside it is refused, since it is not one snapshot. The file is opened with SQLite's read-only flag and `query_only`.
+- **Fail closed on the layout.** The copy must record exactly the 96 migrations of the pinned manifest, by ID and name, and each table above must be a table (not a view) with every column read, its declared type and its primary key. Anything else is refused with one fixed sentence that names the supported release.
+- **One agent per thread, checked per run.** Each run's agent is the `driver` of the provider threads named by that run and by each of its attempts. One `claudeAgent` driver across the thread maps to provider `claude`, one `codex` to `codex`. A thread is refused when another agent ran it, when more than one agent did (also when only an attempt switched), when a provider thread or driver is missing, when an assistant message has no run or its run names no provider thread, or when it has no run at all (for example a thread copied from T3 V1 without run records). A queued run that holds only the person's message needs no agent. Subagent threads (`lineage.relationshipToParent = subagent`) are refused; T3 shows them inside their parent. A fork holds only its own messages in this table (T3 adds the inherited history when it reads the thread), so only those are imported. The ledger's provider list stays Claude Code and Codex, so no schema change.
+- **Messages and line numbers.** A thread's messages are taken in T3's own order (`created_at`, then `message_id`). Message *n* in that order is line *n*, counting every message, so a cited line stays the same message even though system messages, user-role notices T3 or the agent wrote (`createdBy` other than `user`), unfinished (`streaming = 1`) and empty messages are not imported. This is T3's own rule for conversation messages: every finished assistant message counts. Line numbers belong to one snapshot: a later copy of a grown thread is a new session, in which the earlier messages keep their lines unless T3 inserted an earlier-sorting message. A final line carries the T3 thread ID, so two threads with the same text stay two sessions. The lines are written in the mapped provider's JSONL form and sent to the running ledger's `POST /api/import`, so the existing parser and store do the import. The source name is `t3-<thread-id>.jsonl`.
+- **Deleted threads** (`deleted_at` set) are not imported. Thread IDs must be 1 to 128 letters, digits, hyphens or underscores; another form is refused without being shown.
+- **Size.** The 8 MiB request limit is counted on the encoded request while the messages are read, so a larger thread is refused, in `--list` too, without being built in full or sent.
+- **Errors are fixed sentences.** No error echoes a path, an ID from the file, or message text. Server errors are replaced by the CLI's own sentences, except three fixed store messages. If the connection drops in the middle, the imports already confirmed are printed, the thread in flight and the rest are listed as unknown, and importing again finishes the job without duplicates. `--list` prints each thread's ID, agent, model names, importable message count and title through `terminalJson`, which escapes control, format and bidi characters.
+
+### Acceptance
+
+`tests/import-t3.test.mjs` builds a schema-96 database at test time in a temporary folder with `node:sqlite` (no `.sqlite` file is committed), from the `CREATE TABLE` statements of the pinned migrations, filled with synthetic threads:
+
+1. A Claude Code thread imports as provider `claude`, with the user and assistant messages in T3's order, each at the line of its position among all the thread's messages, and source `t3-<id>.jsonl`.
+2. A Codex thread imports as provider `codex` the same way.
+3. System messages, generated notices, streaming and empty messages are left out, and the lines of the messages after them do not move.
+4. Messages inserted out of `created_at` order come back in T3's order, and ties break on `message_id`.
+5. A thread run by Cursor, one run by both Claude Code and Codex, one whose run points at a missing provider thread, and one with no run are each refused with their fixed sentence.
+6. A copy at schema 81 or 98, one with the wrong name at 96, one missing a required column, an empty SQLite file and a file that is not SQLite are each refused, and the message does not contain the path.
+7. A path `…/userdata/statev2.sqlite` is refused before it is opened. The copy's bytes are unchanged after an import, and only empty SQLite side files appear beside it.
+8. Two threads with the same messages give two sessions. Importing the same copy twice gives the same session IDs.
+9. A deleted thread is not imported; `--thread` with an unknown or malformed ID is refused with a fixed sentence.
+10. The CLI posts each thread to `/api/import` on its loopback origin, prints escaped JSON, never prints text from a refused thread, and exits 1 when a thread is refused. `--list` needs no server.
+11. Message text with bidi and control characters is stored as written and printed escaped.
+
+The four suites pass. Codex reviews the change read-only against the pinned source; each finding gets a fix with a regression test, and a second round checks the fixes.
+
+### Not checked
+
+- The test database is made from T3's table definitions, not written by T3. A person with T3 Code v0.1.10 installed should make a few synthetic threads with Claude Code and Codex, quit T3, copy `statev2.sqlite`, and run the importer on the copy.
+- Opening a copy in WAL mode read-only can leave empty `-shm` and `-wal` files beside it (Node 22.14's `node:sqlite` takes no `immutable` URI). The copy itself is not changed; a test checks both.
+- A copy made while T3 runs may miss what is still in T3's `-wal` file. Quit T3 Code before copying.
+
+### D3 review (2026-11-17)
+
+- **Codex, round 1** (read-only, of 6384054): two high, five medium and one low finding, all addressed in the next commit, each with a regression test in `tests/import-t3.test.mjs`. Codex could not fetch the pinned T3 source from its sandbox, so it reviewed against the layout written here; the source-dependent claims are checked by the author only.
+  - (high) Agent attribution dropped run identity, so a thread with one Claude run and a second run with an answer but no provider thread passed as Claude. Attribution is now per run and per attempt; an answer whose run names no provider thread, or that has no run, refuses the thread; a switch recorded only in an attempt counts as two agents.
+  - (high) The layout gate checked only the head, two migration names and column names. It now checks all 96 migrations by ID and name, that each table is a table, and each column's declared type and primary key. Tests cover a gap at 50, a renamed 50, a view in place of the messages table, a messages table without its key, and a retyped `driver`.
+  - (medium) A 400 or 413 from the server could put server text on stderr. Server errors now map to the CLI's own sentences, except three fixed store messages; a test sends a path, a thread ID and U+2028 in the error.
+  - (medium) WAL side files. Node 22.14's `node:sqlite` takes no `immutable` URI (checked), so a read can still create empty `-shm` and `-wal` files. A test now checks the directory: only those two, the `-wal` empty, the copy's bytes unchanged. A copy with a non-empty `-wal` is refused. The live-path check is documented as a name check.
+  - (medium) A dropped connection lost the summary, and any string `session.id` counted as success. Confirmed imports are now printed, the thread in flight and the rest are listed as unknown, and the session ID, provider and source are checked.
+  - (medium) The size check ran after the whole thread was built. The reader now iterates rows and counts the encoded request as it goes; a test hits exactly 8 MiB and one byte over with multibyte text, quotes, a backslash and a control character, and `--list` reports the same refusal.
+  - (medium) Subagent and fork rules were not explicit, and this eval said generated notices are excluded while assistant rows bypass `createdBy`. Subagent threads are now refused; a fork imports only its own rows (T3 adds inherited history when it reads, in `ProjectionStore.ts`, `inheritedPrefix`); the eval now states T3's own rule, under which every finished assistant message counts.
+  - (low) Session identity and lines belong to one snapshot. Documented, and a test checks that a grown thread is a new session whose earlier lines are unchanged.
+- **Codex, round 2** (read-only, of b039917): the server-error and size findings are fixed; the subagent, fork and notice rules are fixed as documented; the snapshot finding is documented (its test passes on the old code too, as Codex noted). Five new findings, fixed in the next commit with a regression test each except the last:
+  - (medium) A connection that dropped inside a success body was reported as a refusal and the batch went on. The body is now read inside the transport step, so that thread and the rest are listed as unknown.
+  - (medium) A transcript already stored under another source name came back with that name and was reported as refused. The CLI now checks the session ID against the store's own hash of provider and transcript, and the provider, instead of the source.
+  - (medium) A streaming or empty assistant row without a run refused a thread whose imported answers were all attributed. Only answers that are imported need an agent now.
+  - (medium) A primary key over `message_id` and another column passed the key check. The whole key must now be the one pinned column.
+  - (low) An error other than "not found" when checking for the `-wal` file counted as no file. It now refuses the copy as unreadable. No test: a permission error on that file cannot be made portably in a test.
+- **Not reviewed again:** the round 2 fixes (commit after b039917) have no third Codex round.
+
+### D3 results (2026-11-17)
+
+- Acceptance items 1 to 11 pass in `tests/import-t3.test.mjs` (25 tests, with the review regressions), on a schema-96 database built from the pinned table definitions with synthetic threads. No `.sqlite` file is committed.
+- Suites on Windows, Node 22.14: `npm run -s test:graph` 9/9; `node --test tests/*.test.mjs` 216 passed, 1 skipped, 0 failed (217); Playwright 13/13; `runtime/` Python 192 run, 50 skipped, OK.
+- **Still owed:** a person with T3 Code v0.1.10 installed makes synthetic Claude Code and Codex threads, quits T3, copies `statev2.sqlite`, and runs `--list` and an import on the copy, recording the result here. A human review of the read-only handling and the error text.
+
+## G7 — Quoted or inferred nodes (defined 2026-11-17, before the code)
+
+When an agent publishes a graph, each node is marked **quoted** or **inferred**. Quoted means the transcript lines the node cites hold what its label claims, by the same floor the latent findings use (`isGrounded` in `src/latent.mjs`): every number and quoted literal in the label appears in the cited lines, at least one code name does when the label has any, and otherwise at least one content word does. Inferred means they do not, so a reader should open the cited lines before trusting the node. A label with nothing to compare (only short or common words) is inferred too: a node needs positive evidence to be quoted. It is a floor, not proof that a label is true.
+
+### What is tested (synthetic transcripts only)
+
+- **Publish:** a graph with a node whose label repeats its cited line ("Use port 4317", citing "the ledger stays on port 4317") and a node whose label adds a number the line does not hold ("Retry 5 times", citing "retry a few times") is stored with `quotedNodeIds` naming the first and `inferredNodeIds` naming the second, in the graph's canonical node order. Both v1 and v2 graphs are marked.
+- **Cited text:** only the cited lines count. A label whose facts are on another line of the same transcript is inferred.
+- **Graphs from before G7:** a stored graph without marks gets them when the same packet is published again; its ID and creation time do not change. A graph that is never republished stays unmarked, and every reader treats it as unmarked rather than as inferred.
+- **`context_for`:** an inferred node's line ends its citation with `, inferred`, and the briefing then says once what inferred means, in its last section so that the stable prefix does not move. A graph with only quoted nodes reads byte for byte as it did before G7.
+- **Browser:** the room view shows "quoted" or "inferred" next to each node's kind, as text, and nothing for an unmarked node. A Playwright check covers a room with one node of each.
+- **Read API:** `GET /api/graphs/:id` and `graph_read` return the two lists with the graph; the room API puts the mark on each node.
+
+### Acceptance
+
+- The four suites pass (`npm run -s test:graph`, `node --test tests/*.test.mjs`, `npx playwright test`, and the Python runtime checks).
+- No new runtime dependency and no schema version change.
+- Codex reviews the change read-only; findings are fixed with tests or recorded here.
+
+### G7 results (2026-11-17)
+
+- **Built:** `src/grounding.mjs` marks each node at publish time with `isGrounded` from `src/latent.mjs`. A node is quoted only with positive evidence. The payload gains `quotedNodeIds` and `inferredNodeIds`; the packet and graph ID do not change. Graphs stored before G7 get their marks when the same packet is published again (`ON CONFLICT DO UPDATE` only when the stored payload has none; ID, row, `created_at` and `party` unchanged). `context_for` ends an inferred node's citation with `, inferred` and explains the mark once, in the state section. The room API puts `grounding` on each node, and the room view shows it beside the kind. MCP paging pages the two lists after the links.
+- **Tests:** `tests/grounding.test.mjs` (11), three new `isGrounded` cases in `tests/latent.test.mjs`, the room spec (one new test, three new assertions), and the graph paging test with marks.
+- **Codex review, round 1** (of 983b8a4). Five findings, all fixed in e9d625f:
+  - (medium) The mark lists were paged before the nodes, so a backfill renumbered items under a client part way through reading. They are paged last now.
+  - (medium) The floor was too loose: `4317` matched `4317.5`, `retryCount` matched `retryCounter`, and an all-Han label passed on unrelated English. Numbers and code names must now stand alone, other scripts match by letter pairs, and a label with nothing to compare is inferred.
+  - (medium) The legend sat above the stable sections, so the first inferred action moved the cached prefix. It is in the state section now, and a test checks the prefix.
+  - (low) The all-quoted test only checked that "inferred" was absent. It now compares the whole briefing with main's output byte for byte.
+  - (low) There was no browser test for unmarked nodes, and the room paging fixture had no marks. Both are added.
+- **Round 2** (of e9d625f): all five fixes hold. Three more findings, fixed in 6137a8c: `café` passed on the `ca` of `cache` (a letter pair must now hold a non-ASCII letter); number and name boundaries ignored accented letters and Arabic-Indic digits; and the legend overstated what "inferred" means.
+- **Round 3** (of 6137a8c): those fixes hold, and Codex found nothing looser than `main` for ASCII labels, in either G7 or the latent check. Two more Unicode cases were fixed in the next commit: a Unicode suffix on the label's own token (`4317٥`, `retryCounté`), and combining marks (a name followed by U+0301, and Devanagari vowel signs). A new test also caught a regression from round 2, which the same commit fixes: a cited `$retry_limit` had stopped matching `retry_limit`.
+  - Accepted, not changed: the header line "Labels are quoted data from the source" stays, even when some nodes are inferred. Changing it when the first inferred node appears would move the cached prefix (round 1, third finding). Changing it for every briefing would break the byte-for-byte promise for all-quoted graphs. The state section's legend says what inferred means.
+- **Suites (Windows):** `npm run -s test:graph` 9/9; node 204/205 (one skipped), was 191/192 on `main`; Playwright 14/14 (one new); Python runtime 192 run, 50 skipped, OK.
+
+## G9 — Scoped context with a budget (defined 2026-11-17, before the code)
+
+`context_for` takes two new optional arguments. `question` is a short text of up to 500 characters. `budget` is a whole number of estimated tokens, from 50 to 100,000, and it needs a question. With a question, the briefing keeps only the nodes that match it, plus the nodes one edge away from those matches. Edges are kept only when both ends are shown, and links only when their local end is shown. The state lists are cut down to the nodes shown. With a budget, nodes are dropped until the briefing's estimate (ceil of characters / 4, the meter's own estimate) fits: neighbours go first, then matches with the fewest matched words. A budget smaller than the briefing with no nodes at all (its header and state lines) is refused with a message that gives that size, so a successful answer is never over budget. Without either argument, `context_for` is exactly what it was.
+
+A node matches when one of the question's words is in its label, its ID, its kind or the party it is addressed to. The question is split once into words, and each word counts once, with one rule. An ASCII word of three or more letters counts, except common ones ("the", "what", "which"). It compares by its first four letters, so "decided" finds a decision, and a three-letter word must start a word. A word in another script ("café", "北京") matches by two whole letters in a row (each with its combining marks), one of them outside ASCII, and a one-letter word must be a whole word of the node. The 500-character limit counts characters (code points), as the published schema does.
+
+The briefing's state section ends with a scope line: how many nodes matched, how many are shown as neighbours, how many were left out for the budget, and the budget itself. The question is not echoed back. When nothing matches, the briefing shows no nodes and says so, so the agent can ask again or call without a question.
+
+### What is tested (synthetic transcripts only)
+
+- A question naming one decision returns that decision, the decision it supersedes (one edge away) and no unrelated node. The edge between them is shown, and the meter counts the scoped text.
+- A question that matches nothing returns the header, an empty node list and the "nothing matched" scope line.
+- A budget smaller than the full scoped briefing drops neighbours before matches. For every budget from 50 up to the full briefing, the answer is either refused or within the budget, and once one budget is answered every larger one is too.
+- The question and budget are checked at the API and in the MCP adapter. An empty, blank or oversized question (also in characters outside the BMP), a budget outside 50 to 100,000 or not a whole number, and a budget without a question are refused with fixed messages that echo nothing. A repeated parameter is refused at the API. The MCP adapter reads arguments with JSON.parse, which keeps the last value of a repeated name, so a repeat there is not detected; the value used is still checked.
+- A scoped briefing keeps only edges between shown nodes, links from shown nodes, the linked-graph lines of those links, and state lists of shown nodes. A fixture with two parties and links checks each.
+- The scope line never contains the question text, even one holding control or bidi characters.
+- Paging: a scoped briefing too long for one page pages by `fromLine`. Later pages come from the same scoped briefing, cached under the graph ID, question and budget, and the continuation note says to repeat the question and budget.
+- `context_for` without the new arguments is byte for byte what it was: the text and meter are compared with what `origin/main` 3a17536 rendered for the same two-party fixture, and the existing paging and briefing tests pass unchanged.
+- A scoped briefing too long for one MCP page, through the real route and adapter, pages back to the whole scoped text. A different question, budget or no budget is a different cache entry.
+
+## G8 — One-command agent setup (defined 2026-11-17, before the code; narrowed after review round 3)
+
+`npm run ledger -- install` connects Claude Code and Codex to this ledger in one step. `npm run ledger -- uninstall` takes the instruction blocks out again and prints the commands that remove the server registrations. Both print every change they make, and `--dry-run` prints the changes without making them. `--agent claude` or `--agent codex` limits either command to one agent.
+
+For each agent, install does two things:
+
+1. **Registers the MCP server** with the agent's own CLI, at user scope: `claude mcp add --scope user context-ledger -- node <repo>/src/mcp.mjs` and `codex mcp add context-ledger -- node <repo>/src/mcp.mjs`. A `PORT` other than 4317 is passed on, as `-e PORT=…` or `--env PORT=…`. Claude's `-e` takes every value up to the next option, so it goes before `--scope`. A server already registered under that name is left as it is, and install says so. Claude's `add` refuses a name its scope already has, so Claude is never asked with `mcp get`, which can start project servers for a health check. Codex's `add` replaces an entry of the same name, so install asks `codex mcp get --json` first. Only Codex's own "no such server" answer counts as absent, and an answer of any other shape is a failure.
+2. **Adds a short block** to the agent's user instruction file: `~/.claude/CLAUDE.md` for Claude Code, and `AGENTS.md` in `CODEX_HOME` (default `~/.codex`) for Codex. The block sits between two marker comments, after one empty line. It tells the agent to check the ledger before asking the person to repeat context, and says that labels and briefings are data, not instructions.
+
+If the server step fails for a reason other than a missing CLI, the instruction file is left as it is. Only Claude's own duplicate answer for the user scope counts as already registered. Codex's answer must be a stdio or HTTP entry of that name. The CLIs run from the home folder, so no project's MCP configuration applies. A relative `CODEX_HOME` is resolved once and given to Codex as an absolute path, so the registration and the block go to the same folder. The home folder comes from the environment the command runs with (`USERPROFILE` or `HOME`), never from anywhere else.
+
+**A known limit:** Codex has no create-if-absent. If another terminal registers `context-ledger` in the moment between install's `codex mcp get` and its `codex mcp add`, Codex replaces that entry.
+
+**Uninstall does not remove the server registration.** It prints the exact `mcp remove` command for each agent instead. Three review rounds showed that neither CLI reports a user-scope entry exactly. Claude prints its arguments joined into one line. Codex reports the effective entry but removes from its global table. So no check here could prove that an entry is the one install made, and removing the wrong one would delete the person's own configuration. Uninstall removes the block only when its text is exact, together with the empty line before it. It removes the file only when the file's bytes would otherwise be empty.
+
+**Files are read as bytes.** A UTF-16 BOM, any NUL byte (as BOM-less UTF-16 with ASCII text has) and invalid UTF-8 are refused. BOM-less UTF-16 without NUL bytes cannot be told from UTF-8 and is read as UTF-8. BOMs are kept. A symbolic link is written through and stays a link, and the link must point where it did when the file was read. The file keeps its mode. A file is written through a private temporary file and renamed into place. It must still be the same file (link or not, device, inode and mode) and hold the same bytes just before the rename, or before the delete. An editor that saves in that last moment can still lose its save, because no supported platform has a conditional rename. A block edited by hand, or markers that do not pair up, are refused. Every file check runs before the agent's CLI is called.
+
+### What is tested (fake home folder and stub CLIs only; the real configuration is never touched)
+
+- Install on an empty home creates both instruction files with one block each and calls each stub with exactly the arguments above. Claude is never asked with `mcp get`. The stubs parse each CLI's own options and keep Claude's scopes apart, so an argument in the wrong place fails. No temporary file is left behind.
+- Install twice gives the same files and the same registrations. Codex's `add` is not called again, and Claude's refusal is reported as "already registered".
+- An entry the person registered, whatever it runs, is left by install.
+- Uninstall removes the blocks, calls no CLI, leaves both registrations and prints both remove commands.
+- Install then uninstall gives back the exact bytes of a file that ended in a line break: with LF, CRLF, a trailing blank line, lines of spaces or two BOMs. A file with no final line break keeps the one install added, which is the only byte not given back. A file that held only the block is removed, and a file that held only a BOM keeps it. A line of spaces before a block is never removed.
+- `--dry-run` changes no file and calls no command that writes, for both install and uninstall, and makes no Claude call at all. `--agent claude` calls nothing of Codex's.
+- Unmatched markers, an edited block, UTF-16 with a BOM, NUL bytes and invalid UTF-8 are refused by both commands with "Nothing changed", before any CLI call.
+- A missing CLI skips that agent's registration with a message, still writes the block and makes install exit with status 1. Uninstall needs no CLI.
+- A CLI that answers with an error, or a Codex answer of the wrong shape, leaves that agent's instruction file as it is.
+- Arguments with spaces, `!`, `&`, `|`, parentheses and `^` reach the CLI exactly. On Windows, `.cmd` shims run through `cmd.exe` with delayed expansion off, and an argument containing `"` or `%` is refused rather than quoted.
+- A bad or empty `--agent`, an extra word, an unknown option and an invalid `PORT` (not a number, 0, or above 65535) fail and change nothing. Printed paths and the parser's own messages are escaped.
+- A symbolic link stays a link and the target's mode is kept. This test is skipped where the account cannot create links.
+
+`CONTEXT_LEDGER_CLAUDE_BIN` and `CONTEXT_LEDGER_CODEX_BIN` name the CLI when it is not on `PATH`; the tests set them to stubs.
+
+## G11 — Graph diff between snapshots (defined 2026-11-17, before the code)
+
+A party that publishes again makes a new graph snapshot, and until now an agent had to read both snapshots and compare them itself. `GET /api/graphs/:id/diff?from=:otherId` and the MCP tool `graph_diff` (`graphId`, `fromGraphId`) say what changed from the older snapshot to the newer one:
+
+- **Nodes:** added, removed and changed. A node is changed when it keeps its ID but its label, kind, status, addressee or cited lines differ; the diff names each changed field with its old and new value.
+- **Decisions newly superseded:** decisions that a `supersedes` edge in the newer graph replaces and that were current in the older one.
+- **Questions newly answered or opened**, and **ready actions** gained and lost, from the stored derived lists.
+- **Edges and links:** added and removed.
+
+Both graphs must be version 2 graphs of the same party. Diffing a graph with itself is allowed and reports no change. The diff is JSON, in the canonical order of each graph. The MCP tool renders it as escaped JSON and pages it like `graph_read`.
+
+The room view uses it: a room is tied to two snapshots, so when a newer graph of either party exists, the room says so and shows what changed. A person then opens a new room on the newer graphs, as before.
+
+### What is tested (synthetic transcripts only)
+
+- Two snapshots of one party that add, remove and change nodes (a relabelled decision, an action moved from pending to completed, a node citing new lines), supersede a decision, answer a question and add a link: each change appears once, in the right list, with old and new values. Unchanged nodes do not appear.
+- Swapping `from` and the graph gives the mirror image (added and removed swap).
+- Diffing a graph with itself gives empty lists.
+- Different parties, a version 1 graph, an unknown graph, a malformed ID, a missing `from` and a repeated parameter are refused with fixed messages. A refused `graph_diff` reaches no ledger.
+- Labels in the diff are data: `graph_diff` output escapes control and bidi characters, and the browser sets them with `textContent`.
+- Room: with a newer graph for one party, `GET /api/rooms/:id` names it (`newerGraphs`), and the room view shows the change count and the changed labels. Playwright covers it.
+
 ## G12 — Export for code-graph tools (defined 2026-11-17, before the code; revised after trying the real Graphify and after review round 1)
 
 Graphs can be exported as node-link JSON, the format NetworkX writes and Graphify keeps in `graphify-out/graph.json` (edges under `links`), so `graphify merge-graphs` can put decisions beside a code graph. Several graphs go into **one file, a bundle**. `merge-graphs` gives each input file its own ID prefix when their tags collide, so links between graphs only survive inside one file. The routes are `GET /api/export?graph=<id>&graph=<id>…` (1 to 20 graphs) and `GET /api/graphs/:id/export` (one graph). The CLI is `node src/cli.mjs graph export <id> [<id>…]`. Run it directly, because `npm run` prints a banner into a redirected file. The HTTP body is the node-link JSON itself, with no wrapper, escaped like every export.
@@ -2836,6 +3491,64 @@ Graphs can be exported as node-link JSON, the format NetworkX writes and Graphif
 
 - The four suites pass, with no new runtime dependency.
 - Codex reviews the change read-only; findings are fixed with tests or recorded here.
+
+### G9 results (2026-11-17)
+
+- **Built:** `src/scope.mjs` ranks the nodes for a question and cuts the result to a budget. `graphContext` in `src/context.mjs` renders the scoped graph with the same `contextText`, plus a last scope line, and reads each linked graph once per request. `GET /api/graphs/:id/context` takes `question` and `budget`, and `context_for` takes them too, caching paged scoped briefings under graph ID, question and budget. Without either argument, nothing changes.
+- **Tests:** `tests/scope.test.mjs` (13): ranking and matching rules, the budget, the golden unscoped output, the links fixture, the MCP cache and argument checks, and the real route with paging.
+- **Codex review, round 1** (of 103051b), six findings, fixed in c991f6a:
+  - (high) A budget smaller than the briefing with no nodes was answered over budget. It is refused now, with the size, and every budget path checks the meter.
+  - (medium) Words were double-counted, `café` became `caf` (finding `cafeteria`), and one letter of another script matched anywhere. The question is now split once into Unicode words, each with one rule.
+  - (medium) The cache-key test changed two things at once. Question and budget are now varied one at a time, each with its own text.
+  - (low) The 500 limit counted UTF-16 units, not characters. It counts code points now.
+  - (low) Each budget probe repeated work. It now counts shown matches directly and reads linked graphs once.
+  - (low) The eval claimed more than the tests checked. A golden output from main, a links fixture and real-route paging are added.
+- **Round 2** (of c991f6a): all six fixes hold. Three more findings, fixed in bef4378: an ASCII word missed a mixed-script node word (`gpu` and a label `GPU` followed by a Han letter); letter pairs could end inside a marked letter; and two coverage notes (blank question over HTTP, MCP's handling of a repeated JSON name).
+- **Round 3** (of bef4378): those fixes hold. One low finding is fixed in the next commit: an ASCII prefix is now compared in whole letters, so `qax` no longer stops inside an `x` with an accent.
+- **Suites (Windows):** `npm run -s test:graph` 9/9; node 203/204 (one skipped), was 191/192 on `main`; Playwright 13/13; Python runtime 192 run, 50 skipped, OK.
+
+- A person runs `install` and `uninstall` once against their real agents before G8 is called done, because the tests use stubs.
+
+### G8 review log and an incident (2026-11-17)
+
+- **Round 1** (of 3af4131), ten findings, among them high ones: uninstall removed registrations it never made; UTF-16, invalid UTF-8 and BOM files could be damaged; the rename replaced links and modes. Fixed in 50025c6 with an install record.
+- **Round 2** (of 50025c6): five high findings, all about that record (stale, malformed or unsaved) and about probes reading a different scope from the one written. The record was dropped in a48d7eb for exact-match removal.
+- **Round 3** (of a48d7eb): exact matching could not be made safe either. Claude prints arguments joined, Codex reports the effective entry but removes from its global table, and `claude mcp get` can start project servers for a health check. In 591da7c the card was narrowed: uninstall prints the remove commands instead of running them, and install never calls `claude mcp get`.
+- **Round 4** (of 591da7c), fixed in the next commit:
+  - (medium) A file swapped for one with the same bytes, or given another mode, passed the byte check. The identity is now checked too.
+  - (medium) Any "already exists" text counted as Claude's duplicate answer. Only Claude's own answer counts now.
+  - (medium) A relative `CODEX_HOME` meant different folders to Codex and to the block. It is resolved once.
+  - (low) An existing Codex HTTP entry was not recognised. It is now.
+  - Accepted, not changed: the high finding that a registration made in another terminal between `get` and `add` is replaced. Codex's suggested fix, printing the add command instead, would drop automatic registration, which is the point of the card. The window is one CLI call long and is recorded above as a known limit.
+- **Incident, found and fixed while writing the round 4 tests:** three in-process tests called `setupAgents` with a sandbox environment, but `agentTargets` took the home folder from `os.homedir()`, which reads the real one. They wrote the block into the real `~/.claude/CLAUDE.md` (19:17) and `~/.codex/AGENTS.md` (19:29) on the reviewer's own machine. No real CLI was run, because those tests used fake CLIs. Both files were backed up and the exact block was removed with the module's own `withoutBlock`; each file is now a byte-for-byte prefix of its backup. The home folder now comes only from the environment passed in (`homeOf`). An environment without one is refused. The last test in `tests/install.test.mjs` checks that the real files are byte for byte as they were before the run.
+- **Round 5** (of 05ba804): the HTTP fix and the fake-home fix hold. Medium findings, fixed in the next commit:
+  - The snapshot read bytes and mode separately from the identity. Now one open file gives both, and the path must still name that file.
+  - Claude's duplicate answer now counts only as the whole line.
+  - A `CODEX_HOME` that does not exist is refused before Codex is asked, as Codex refuses it.
+  - A relative CLI path is resolved to an absolute one, because the CLI runs from the home folder.
+  - The printed Codex remove command names its `CODEX_HOME`.
+  - Test children get an allow-listed environment (no `NODE_OPTIONS`).
+  - Accepted: the real-file guard still reads the default instruction files of the person running the tests. An isolated ambient home would be stronger, but every in-process call now passes an explicit fake home, and an environment without a home is refused.
+  - No sixth round was run; the findings had narrowed to edge races each round.
+- **Suites (Windows):** `npm run -s test:graph` 9/9; node 219/221 (two skipped: the existing one and the symbolic-link test, which this Windows account cannot run), was 191/192 on `main`; Playwright 13/13; Python runtime 192 run, 50 skipped, OK.
+- **Still owed before Done:** a person runs `install` against their real Claude Code and Codex, then `uninstall` and the two printed remove commands, on Windows and on macOS or Linux.
+
+### G11 results (2026-11-17)
+
+- **Built:** `src/diff.mjs` (the diff and its counts); `GET /api/graphs/:id/diff?from=:otherId` and the store's `diffGraphs`; the MCP tool `graph_diff`, paged by item; `newerGraphs` in rooms; and the room view's notice, which lists changed labels and has a button that fills the form.
+- **Tests:** `tests/diff.test.mjs` (11), the pinned tool list and required arguments, and two Playwright tests in `tests/e2e/room.spec.mjs` (a newer graph, and a diff that answers after another room was opened).
+- **Codex review, round 1** (of the first G11 commit), eight findings, fixed in 39556a9:
+  - (medium) A graph from another transcript under the same party name was offered as the room's update. It is now marked `sameSession: false`, shown as unverified, and has no form button.
+  - (medium) A reused node ID could fake a supersession or an answer. Both now need the real edge and kind.
+  - (medium) A removed ready action was missing from `readyActionsLost`.
+  - (low) The room summary left out answered questions and ready changes.
+  - (low) `graph_diff` was outside the tool-list bound. It now has a bound of its own.
+  - (low) Unknown parameters were accepted. The route now takes only `from`.
+  - (low) Weak assertions were tightened.
+  - (low) No paging or race test existed for the new room data. Both are added in round 2.
+- **Round 2** (of 39556a9): most fixes hold. One medium finding: a later graph from another session hid the room's own same-session update. Same session and other sessions are now looked up separately, and both can show. Two low findings: a lost ready action took the name of a node that reused its ID, and readiness rows were hidden behind "Changed". Both are fixed, with the paging-across-sections and browser race tests asked for.
+- **Suites (Windows):** `npm run -s test:graph` 9/9; node 202/203 (one skipped), was 191/192 on `main`; Playwright 15/15 (two new); Python runtime 192 run, 50 skipped, OK.
+- **Known limit:** party names are self-asserted. A graph from another transcript is shown, marked unverified, but not offered.
 
 ### G12 results (2026-11-17)
 
