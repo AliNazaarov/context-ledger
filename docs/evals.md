@@ -955,6 +955,29 @@ Source: a review of the project map (floorplan) against CI, the handoff notes an
 - **Suites:** node 151/152 (one skipped) against a baseline of 139/140; the 12 new tests all pass. Python runtime 131 run, 24 skipped, OK. Playwright was not run, because the orchestrator runs it. No browser journey changed.
 - **Orchestrator check (2026-11-16):** Playwright 13/13 on this branch. On a Windows checkout with `core.autocrlf` the files are CR LF, and the hidden-character check in `tests/handoff-bench.test.mjs` counted the carriage return as hostile, so the test failed there (it passed only where the files were written with LF). The check now allows tab, newline and carriage return, as AGENTS.md section 6 does. Checked both ways: it passes with CR LF files and still fails on a vertical tab.
 
+### H7 — Windows deadline flake (`ruslan/windows-deadline-flake`, defined 2026-11-17, before the fix)
+
+On the Windows CI runner (Python 3.13), `DeadlineBeforeNextCallTest.test_only_the_reader_runs_and_the_read_returns_504` (`runtime/tests/test_limits.py`), and `DeadlineTest.test_model_call_timeout_is_capped_by_the_deadline` and `DeadlineTest.test_late_read_is_504_and_stops_calling_the_model` (`runtime/tests/test_review_fixes.py`, the last seen in a rerun of PR #29, run 44237430567) fail at random with `502 {'error': 'Model server timed out.'}` instead of 504. They failed PRs #29–#32, none of which touch `runtime/`. Cause: `_Run.call` passes what is left of the read deadline as the model call's timeout, then turns the timeout's 502 into a 504 only if `remaining()` is at or below 0 after the call. The socket's wait is timed by the operating system, not by `time.monotonic()`, so on Windows the socket can time out while the pool's clock still shows a little time left. (The first draft of this entry blamed a shared 15.6 ms tick; Codex pointed out that Python 3.13 on Windows reads `time.monotonic()` from `QueryPerformanceCounter`, so only the socket side is coarse.)
+
+| Eval | Expected |
+| --- | --- |
+| Timeout capped by the deadline is 504 | A model call whose timeout was set by the read deadline (what was left was at or below the client's own timeout) and that times out returns 504 "The latent read ran out of time.", even when `remaining()` is still above 0 after the call. A synthetic test makes the socket time out at once with a deadline still a few milliseconds away; it fails on `main` (502) and passes with the fix. |
+| Client's own timeout stays 502 | When the client's own timeout is shorter than what is left of the deadline and the call times out, the read still returns 502 "Model server timed out." |
+| Other 502s unchanged | A non-timeout 502 (for example HTTP 500 from the model server) stays 502 when the deadline capped the timeout and time is left, and still becomes 504 when the deadline has passed, as before. |
+| Suites | `python -m unittest discover -s tests -t .` in `runtime/` passes on Windows and in WSL; the node suite and graph checks are unchanged. The PR's `runtime (windows-latest, Python 3.13)` job is green, and rerunning the failed job on PRs #29–#32 passes. |
+
+**Results — H7 (2026-11-17):** the first three rows pass locally. The last row's CI part is in the PR.
+
+- **Timeout capped by the deadline is 504:** pass. `runtime/tests/test_deadline_clock.py` makes the socket time out at once with the deadline still 5 s ahead, which is a stronger case than a few milliseconds. The client's own timeout is 30 s. It checks that the read returns 504 with time still showing. Three paths are covered: the first attempt, the folded retry after a chat template refuses the system message, and a refusal that uses up the call's budget before the retry. The test also checks that the socket gets what is left of the deadline, not the client's 30 s. Against `main`'s runtime code all three cases fail with 502.
+- **Client's own timeout stays 502:** pass. With a 1 s client timeout and a deadline 5 s ahead, the read returns 502 "Model server timed out.". The test passes on `main` and with the fix.
+- **Other 502s unchanged:** pass. HTTP 500 with time left stays 502 "Model server returned HTTP 500.". HTTP 500 that arrives after the deadline is still 504. Both tests pass on `main` and with the fix.
+- **Suites:** Windows (Python 3.13) runtime 198 run, 50 skipped, OK. WSL (Python 3.12) runtime OK. Node 191/192 (1 skipped). Graph check 9/9. The three deadline tests ran 25 times in a row on Windows with no failure. They never failed locally before the fix either, so the loop shows no regression. It does not prove the fix. The CI part of this row is recorded in the PR.
+- **Codex review** (`codex exec --sandbox read-only`, of c3b3b0f): no change from 502 to 504 or back beyond the intended one, and no other caller depends on the error's class or message. Four findings:
+  - (low) The tests did not check that the timeout reaches the socket, or the folded-retry path. Fixed: the tests above now record the timeout `urlopen` gets and cover both retry paths.
+  - (low) The 15.6 ms `time.monotonic()` diagnosis was wrong for Python 3.13. Fixed in the cause above and in the code comment.
+  - (medium, existed before this card) The timeout applies to each socket operation, so a model server that trickles its reply can hold a read and its slot past the deadline, and a reply that arrives late is accepted. Not fixed here: card H8.
+  - (low, existed before this card) A connect timeout capped by the deadline is wrapped in `URLError` and returns 503 "not ready". Not fixed here: card H8.
+
 ## Cycle 11 — Latent runtime performance baseline (defined 2026-11-12, before measuring)
 
 Card C11. Until now the latent runtime had accuracy evals but no performance figures. This cycle measures it on the RTX 4090 Laptop GPU (16 GB), vLLM 0.33.0 in WSL2, with the synthetic fixtures only.
@@ -1386,6 +1409,50 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## P1a — Storage engine decision (evidence collected 2026-11-17)
+
+ADR-003 picked better-sqlite3 because `node:sqlite` had no FTS5. P1a checks whether that is still true, before any dependency is added.
+
+- **What is tested:** `tests/sqlite-fts5-probe.test.mjs` creates an FTS5 table in memory, runs one `MATCH` query, and reports the Node version, platform, SQLite version and whether FTS5 works. It never fails when FTS5 is missing.
+- **Expected result:** a probe line on every system that runs the Node suites.
+- **Results:** Node 22.14.0 on Windows (local) has SQLite 3.47.2 and no FTS5. Node 22.23.4 on Linux (CI) has SQLite 3.53.4 with FTS5. Public reports agree: 22.19.0 has none and 22.22.2 has it.
+- **Outcome:** a proposed revision of ADR-003 in `docs/architecture.md` §5.1: stay on `node:sqlite`, probe FTS5 at open, fall back to `instr` search with a named warning. It is accepted when the user approves the PR.
+- **Codex, round 1:** one high, three medium and three low findings, all fixed in the document:
+  - (high) The design created the FTS5 table and its triggers unconditionally, so a database made on a build with FTS5 could break writes on one without it. FTS5 is now an optional index the store creates and maintains itself, with a watermark, a rebuild path, and a refusal for deletes it cannot carry into an index it cannot open.
+  - (medium) The fallback contract was not written down. It is today's session-level match, newest first, with the same pagination.
+  - (medium) Older sections still named better-sqlite3. The landing note now marks them as the original plan while P1a is pending.
+  - (medium) The AGENTS.md reason was overstated. It now says a second dependency needs an approved ADR, and that a missing prebuilt binary means a source build.
+  - (low) The evidence table now links the CI run and marks the public reports as unchecked. `doctor` tells users to rerun its check rather than naming a version.
+  - (low) The two approval moments are now one: ADR-003's revision is accepted only with the P1a PR.
+  - (low) §4's legacy-ID formula did not match the store. It now keeps `sessions.id` as it is.
+- **Codex, round 2** (of 92fda47): one high, two medium and two low findings, all fixed in the document:
+  - (high) §6's purge still cascaded into FTS rows, which no longer happens without triggers. The store now removes each message from the index with FTS5's `delete` command and the original text, in the same transaction as the canonical delete, and runs `optimize` only when an index exists.
+  - (medium) A watermark over `messages.id` could miss rows after a delete, a downgrade and a reused ID. It is replaced by an `fts_pending` table written with each insert while the index cannot be updated, and drained in one transaction with the index changes.
+  - (medium) A forced-fallback switch cannot prove downgrade compatibility. The implementing card must also reopen the same database on a genuinely module-free build (Node 22.14.0), then on an FTS5 build.
+  - (low) The fallback contract now includes the session title and the descending session `rowid` order.
+  - (low) The landing note now says what happens to the better-sqlite3 passages when P1a is accepted or rejected.
+- **Codex, round 3** (of 8351c3a): no high findings. Three medium and two low, all fixed in the document:
+  - (medium) §4 still created the FTS5 index in the first migration and lacked `fts_pending`. The migration now has `fts_pending`, and the index is shown as a separate block the store creates where FTS5 exists.
+  - (medium) Draining only at open missed a module-free process appending while an FTS5 process had the file open. A process with FTS5 now drains before each indexed search and inside each delete or purge, before its FTS5 `delete` commands.
+  - (medium) §6's scheduled retention and evidence-only cleanup could be blocked without saying so. A blocked run records why and what it would have removed, and an evidence-only export reports that its cleanup did not run.
+  - (low) The fallback contract now includes the provider filter and empty queries.
+  - (low) Rejection now restores the original ADR-003 entry and the lifecycle text, not only removes §5.1.
+- **Codex, round 4** (of 7533cc7, the round 3 fixes): no high findings. Two medium and one low, fixed in the document:
+  - (medium) A drain followed by a separate search could miss a message appended in between. Each indexed search now drains and queries inside one transaction.
+  - (medium) A blocked evidence-only cleanup was promised to a later run, but nothing remembered it. The pending cleanup is now recorded in `settings` and carried out by the next retention run that can update the index.
+  - (low) The rejection instructions now also cover the paragraph that points to §5.1.
+
+## G6 — Product and eval review (run 2026-11-17)
+
+The card asked Codex for a read-only review of the product and evals at cycle 4. Cycle 4 is long past, so on the user's instruction Codex ran it read-only on the state of `main` and the open PRs on 2026-11-17, from Claude Code. The full review is [docs/reviews/g6-2026-11-17.md](reviews/g6-2026-11-17.md).
+
+- **What the evals support:** import, search and hand-offs that keep source lines; typed graphs with valid citations and the two-party room rules; and MCP discovery and paging in real clients. All of it is on synthetic data. M2b transfer is shown for one trained small-model pair only.
+- **What is not yet proven:** the hand-off savings rest on synthetic data, and the cycle 7 figures on six early facts. G10's live runs are still owed. The latent team results show no advantage over random vectors (cycles 13 and 14).
+- **Main user risks:** a real citation can support a wrong label; local transcript text reaches the agent through `session_read` and the latent fallback; party names in rooms are not verified.
+- **Recommended next cycle:** run G10 live on Claude Code and Codex with human-checked labels and a pass rule written first (at least 10 paired runs, 90% of facts carried, 30% fewer median input tokens). Hold the "3× faster, 5× fewer tokens" claim until then.
+- **Board actions taken from it the same day:** I1, I2 and I3 went ahead without P1 (PRs #35, #33, #34). P1's design landed on `main`, and its implementation was split into P1a–P1e (the P1 PR).
+- **Outcome:** done. No code changed.
 
 ## P1b — Projects (defined 2026-11-17, before implementation)
 
