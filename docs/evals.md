@@ -1442,3 +1442,14 @@ ADR-003 picked better-sqlite3 because `node:sqlite` had no FTS5. P1a checks whet
   - (medium) A drain followed by a separate search could miss a message appended in between. Each indexed search now drains and queries inside one transaction.
   - (medium) A blocked evidence-only cleanup was promised to a later run, but nothing remembered it. The pending cleanup is now recorded in `settings` and carried out by the next retention run that can update the index.
   - (low) The rejection instructions now also cover the paragraph that points to §5.1.
+
+## G6 — Product and eval review (run 2026-11-17)
+
+The card asked Codex for a read-only review of the product and evals at cycle 4. Cycle 4 is long past, so on the user's instruction Codex ran it read-only on the state of `main` and the open PRs on 2026-11-17, from Claude Code. The full review is [docs/reviews/g6-2026-11-17.md](reviews/g6-2026-11-17.md).
+
+- **What the evals support:** import, search and hand-offs that keep source lines; typed graphs with valid citations and the two-party room rules; and MCP discovery and paging in real clients. All of it is on synthetic data. M2b transfer is shown for one trained small-model pair only.
+- **What is not yet proven:** the hand-off savings rest on synthetic data, and the cycle 7 figures on six early facts. G10's live runs are still owed. The latent team results show no advantage over random vectors (cycles 13 and 14).
+- **Main user risks:** a real citation can support a wrong label; local transcript text reaches the agent through `session_read` and the latent fallback; party names in rooms are not verified.
+- **Recommended next cycle:** run G10 live on Claude Code and Codex with human-checked labels and a pass rule written first (at least 10 paired runs, 90% of facts carried, 30% fewer median input tokens). Hold the "3× faster, 5× fewer tokens" claim until then.
+- **Board actions taken from it the same day:** I1, I2 and I3 went ahead without P1 (PRs #35, #33, #34). P1's design landed on `main`, and its implementation was split into P1a–P1e (the P1 PR).
+- **Outcome:** done. No code changed.

@@ -236,6 +236,17 @@ Next steps:
 3. Still owed from earlier: Ali's review of the runtime changes from cycle 9, the human review of PR #8's schema migration, and Ali's decision on `VLLM_NGRAM=1` (cycle 11).
 4. PR #3 (Ali's draft M0 benchmark, based on `feature/semantic-graph`) was left open: it is Ali's and conflicts with its base.
 
+## Current checkpoint — G6 product and eval review (2026-11-17)
+
+Branch `codex/g6-product-review`. Codex, the card's owner, reviewed the product and evals as they stood on 2026-11-17 (read-only; run from Claude Code). The review is [docs/reviews/g6-2026-11-17.md](reviews/g6-2026-11-17.md). Its main points:
+
+- **Evidence.** The handoff savings rest on synthetic data. The cycle 7 figures come from six early facts, and G10's live runs are still owed. The latent team results show no advantage over random vectors.
+- **Risks.** A real citation can support a wrong label. Local transcript text reaches the agent through `session_read` and the latent fallback. Party names in rooms are not verified.
+- **Next cycle.** Run G10 live on Claude Code and Codex with human-checked labels, under a pass rule written in advance. Hold the "3× faster, 5× fewer tokens" claim until then.
+- **Board.** P1's design part is done. Its implementation should go back to Ready with a named owner and a first storage test.
+
+The board changes it recommends are left to the card owners; this PR only adds the review.
+
 ## Current checkpoint — H7 Windows deadline flake (2026-11-17)
 
 The runtime job on the Windows runner failed at random on PRs that do not touch `runtime/` (#29–#32). Three deadline tests got 502 "Model server timed out." instead of 504. `_Run.call` (`runtime/latent_pool/pool.py`) now decides before each model call whether the read deadline is the shorter limit. If that call then times out, the read returns 504, whatever the clock reads afterwards. The client raises `ModelTimeout` (`runtime/latent_pool/__init__.py`), which is still a 502 with the same message, so the client's own timeout and every other 502 behave as before. Regression tests are in `runtime/tests/test_deadline_clock.py`. Eval and results: H7 in `docs/evals.md`.
