@@ -2043,6 +2043,28 @@ If the server step fails for a reason other than a missing CLI, the instruction 
 
 `CONTEXT_LEDGER_CLAUDE_BIN` and `CONTEXT_LEDGER_CODEX_BIN` name the CLI when it is not on `PATH`; the tests set them to stubs.
 
+## G11 — Graph diff between snapshots (defined 2026-11-17, before the code)
+
+A party that publishes again makes a new graph snapshot, and until now an agent had to read both snapshots and compare them itself. `GET /api/graphs/:id/diff?from=:otherId` and the MCP tool `graph_diff` (`graphId`, `fromGraphId`) say what changed from the older snapshot to the newer one:
+
+- **Nodes:** added, removed and changed. A node is changed when it keeps its ID but its label, kind, status, addressee or cited lines differ; the diff names each changed field with its old and new value.
+- **Decisions newly superseded:** decisions that a `supersedes` edge in the newer graph replaces and that were current in the older one.
+- **Questions newly answered or opened**, and **ready actions** gained and lost, from the stored derived lists.
+- **Edges and links:** added and removed.
+
+Both graphs must be version 2 graphs of the same party. Diffing a graph with itself is allowed and reports no change. The diff is JSON, in the canonical order of each graph. The MCP tool renders it as escaped JSON and pages it like `graph_read`.
+
+The room view uses it: a room is tied to two snapshots, so when a newer graph of either party exists, the room says so and shows what changed. A person then opens a new room on the newer graphs, as before.
+
+### What is tested (synthetic transcripts only)
+
+- Two snapshots of one party that add, remove and change nodes (a relabelled decision, an action moved from pending to completed, a node citing new lines), supersede a decision, answer a question and add a link: each change appears once, in the right list, with old and new values. Unchanged nodes do not appear.
+- Swapping `from` and the graph gives the mirror image (added and removed swap).
+- Diffing a graph with itself gives empty lists.
+- Different parties, a version 1 graph, an unknown graph, a malformed ID, a missing `from` and a repeated parameter are refused with fixed messages. A refused `graph_diff` reaches no ledger.
+- Labels in the diff are data: `graph_diff` output escapes control and bidi characters, and the browser sets them with `textContent`.
+- Room: with a newer graph for one party, `GET /api/rooms/:id` names it (`newerGraphs`), and the room view shows the change count and the changed labels. Playwright covers it.
+
 ### Acceptance
 
 - The four suites pass, with no new runtime dependency.
@@ -2088,3 +2110,20 @@ If the server step fails for a reason other than a missing CLI, the instruction 
   - No sixth round was run; the findings had narrowed to edge races each round.
 - **Suites (Windows):** `npm run -s test:graph` 9/9; node 219/221 (two skipped: the existing one and the symbolic-link test, which this Windows account cannot run), was 191/192 on `main`; Playwright 13/13; Python runtime 192 run, 50 skipped, OK.
 - **Still owed before Done:** a person runs `install` against their real Claude Code and Codex, then `uninstall` and the two printed remove commands, on Windows and on macOS or Linux.
+
+### G11 results (2026-11-17)
+
+- **Built:** `src/diff.mjs` (the diff and its counts); `GET /api/graphs/:id/diff?from=:otherId` and the store's `diffGraphs`; the MCP tool `graph_diff`, paged by item; `newerGraphs` in rooms; and the room view's notice, which lists changed labels and has a button that fills the form.
+- **Tests:** `tests/diff.test.mjs` (11), the pinned tool list and required arguments, and two Playwright tests in `tests/e2e/room.spec.mjs` (a newer graph, and a diff that answers after another room was opened).
+- **Codex review, round 1** (of the first G11 commit), eight findings, fixed in 39556a9:
+  - (medium) A graph from another transcript under the same party name was offered as the room's update. It is now marked `sameSession: false`, shown as unverified, and has no form button.
+  - (medium) A reused node ID could fake a supersession or an answer. Both now need the real edge and kind.
+  - (medium) A removed ready action was missing from `readyActionsLost`.
+  - (low) The room summary left out answered questions and ready changes.
+  - (low) `graph_diff` was outside the tool-list bound. It now has a bound of its own.
+  - (low) Unknown parameters were accepted. The route now takes only `from`.
+  - (low) Weak assertions were tightened.
+  - (low) No paging or race test existed for the new room data. Both are added in round 2.
+- **Round 2** (of 39556a9): most fixes hold. One medium finding: a later graph from another session hid the room's own same-session update. Same session and other sessions are now looked up separately, and both can show. Two low findings: a lost ready action took the name of a node that reused its ID, and readiness rows were hidden behind "Changed". Both are fixed, with the paging-across-sections and browser race tests asked for.
+- **Suites (Windows):** `npm run -s test:graph` 9/9; node 202/203 (one skipped), was 191/192 on `main`; Playwright 15/15 (two new); Python runtime 192 run, 50 skipped, OK.
+- **Known limit:** party names are self-asserted. A graph from another transcript is shown, marked unverified, but not offered.

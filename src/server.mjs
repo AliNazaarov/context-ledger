@@ -210,6 +210,16 @@ const routes = [
     const graph = store.getGraph(id);
     return graph ? { graph } : undefined;
   } },
+  { method: 'GET', pattern: idPattern('/api/graphs', '/diff'), handler: ({ params: [id], url }) => {
+    // One from parameter and nothing else, so a typo is not silently ignored.
+    if ([...url.searchParams.keys()].some(key => key !== 'from') || url.searchParams.getAll('from').length > 1) {
+      throw new InputError('The diff takes one from parameter and no other.');
+    }
+    const from = url.searchParams.get('from') ?? '';
+    if (!/^[a-f0-9]{64}$/u.test(from)) throw new InputError('from must be a graph ID.');
+    const diff = store.diffGraphs(id, from);
+    return diff ? { diff } : undefined;
+  } },
   { method: 'GET', pattern: idPattern('/api/graphs', '/context'), handler: ({ params: [id], url }) => {
     const context = store.getGraphContext(id, scopeParameters(url));
     return context ? { context } : undefined;

@@ -396,3 +396,16 @@ Next steps:
 
 1. A person runs `install` once against their real agents, on Windows and on macOS or Linux, and checks that `claude mcp list` and `codex mcp list` show the server. Then `uninstall`, and the two printed remove commands. The tests only use stubs.
 2. U3 (the demo video) was waiting for G8 and can start once this is merged.
+
+## Current checkpoint — G11 graph diff between snapshots (2026-11-17)
+
+Branch `ruslan/g11-graph-diff`. `GET /api/graphs/:id/diff?from=:otherId` and the MCP tool `graph_diff` say what changed from an older snapshot of one party's graph to a newer one. The eval and results are in the G11 section of [the eval log](evals.md).
+
+- `src/diff.mjs` compares the canonical packets. It reports nodes added, removed and changed (each changed field with its old and new value), decisions newly superseded, questions answered or opened, ready actions gained or lost, and edges and links added or removed. Both graphs must be version 2 graphs of the same party.
+- `graph_diff` pages a long diff by item, like `graph_read`.
+- A room now carries `newerGraphs`: for each party whose newest graph is not the room's, the newer graph's ID and change counts. The room view says so, lists up to 12 changed labels, and offers a button that fills the form with the newer graph. The person still opens the new room, as before.
+
+Next steps:
+
+1. Party names are self-asserted. A newer graph from another transcript under the same party name is shown, marked unverified and without the form button. Lineage across transcripts needs P1's projects.
+2. The console (U1, #22) could flash only the changed nodes, using the diff instead of its own comparison.

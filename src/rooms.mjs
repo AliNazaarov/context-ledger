@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { diffCounts, diffGraphs } from './diff.mjs';
 import { InputError } from './errors.mjs';
 import { nodeGrounding } from './grounding.mjs';
 
@@ -40,6 +41,32 @@ export function mountRooms(database, readGraph) {
   `);
   let selectCursor;
   let selectRooms;
+  // Prepared on first use: the party column comes from a migration that runs after mounting.
+  let selectSameSession;
+  let selectOtherSession;
+
+  /**
+   * Card G11: the newest graph of the same party, when it is not this one, and what
+   * changed. Party names are self-asserted, so a graph from another transcript under the
+   * same name is marked sameSession: false; only the room's person can tell if it is theirs.
+   */
+  // The same session and other sessions are looked up apart, so a graph from another
+  // transcript cannot hide the room's own party's newer graph (G11 review round 2).
+  function newerGraphs(graph) {
+    selectSameSession ??= database.prepare('SELECT id FROM graphs WHERE party = ? AND session_id = ? ORDER BY rowid DESC LIMIT 1');
+    selectOtherSession ??= database.prepare(`SELECT id FROM graphs WHERE party = ? AND session_id <> ?
+      AND rowid > (SELECT rowid FROM graphs WHERE id = ?) ORDER BY rowid DESC LIMIT 1`);
+    const { party, sessionId } = graph.packet;
+    const candidates = [selectSameSession.get(party, sessionId)?.id, selectOtherSession.get(party, sessionId, graph.id)?.id];
+    return candidates.flatMap(newest => {
+      if (!newest || newest === graph.id) return [];
+      const newer = readGraph(newest);
+      if (newer?.packet.version !== 2) return [];
+      // Both snapshots are loaded here, so the diff reads nothing again.
+      const { any, ...counts } = diffCounts(diffGraphs(graph, newer));
+      return [{ party, graphId: newest, fromGraphId: graph.id, sameSession: newer.packet.sessionId === sessionId, changed: any, counts }];
+    });
+  }
 
   function endpoint(graph, nodeId) {
     const node = graph.packet.nodes.find(candidate => candidate.id === nodeId);
@@ -92,6 +119,7 @@ export function mountRooms(database, readGraph) {
         openQuestionIds: graph.openQuestionIds,
       })),
       proposals,
+      newerGraphs: graphs.flatMap(newerGraphs),
       agreedProposalIds: proposals.filter(proposal => proposal.state === 'agreed').map(proposal => proposal.id),
     };
   }
