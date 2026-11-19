@@ -85,7 +85,7 @@ test('I2: importing the same file again gives the same session and the same skip
 test('I2: a clean file returns the same summary as before, with no skip report', () => {
   const store = openStore(':memory:');
   const summary = store.importTranscript({ provider: 'claude', source: 'clean.jsonl', transcript: [claudeLine('user', 'Clean Atlas file'), ''].join('\n') });
-  assert.deepEqual(Object.keys(summary).sort(), ['id', 'messageCount', 'provider', 'source', 'title']);
+  assert.deepEqual(Object.keys(summary).sort(), ['id', 'messageCount', 'project', 'provider', 'source', 'title']);
   assert.equal(Object.hasOwn(summary, 'skipped'), false);
 });
 

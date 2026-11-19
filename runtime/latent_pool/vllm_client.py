@@ -6,7 +6,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import ApiError
+from . import ApiError, ModelTimeout
 
 NOT_READY = "Model server is not ready."
 
@@ -75,7 +75,7 @@ class VllmClient:
         # covers both attempts, so a slow refusal cannot hold a slot past the deadline.
         left = budget - (time.perf_counter() - started)
         if left <= 0:
-            raise ApiError(502, "Model server timed out.")
+            raise ModelTimeout()
         try:
             result = self._chat(system, user, max_tokens, schema, schema_name, left)
         except _SystemRoleRefused:
@@ -121,7 +121,7 @@ class VllmClient:
                 raise _SystemRoleRefused() from None
             raise ApiError(502, f"Model server returned HTTP {error.code}.") from None
         except (socket.timeout, TimeoutError):
-            raise ApiError(502, "Model server timed out.") from None
+            raise ModelTimeout() from None
         except (urllib.error.URLError, ConnectionError, OSError):
             raise ApiError(503, NOT_READY) from None
         ms = round((time.perf_counter() - started) * 1000)

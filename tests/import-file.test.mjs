@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { maxMessageBytes, openStore } from '../src/store.mjs';
 import { terminalLine } from '../src/text.mjs';
+import { bearer, ledgerToken } from './ledger-auth.mjs';
 
 // Card I1: import a transcript file by path, read as a stream. Synthetic transcripts only.
 const claudeLine = (role, text) => JSON.stringify({ type: role, message: { role, content: text } });
@@ -261,8 +262,10 @@ test('I1 review: the CLI and a running server import the same file at once into 
     origin = output.match(/listening at (http:\/\/127\.0\.0\.1:\d+)/u)?.[1];
     if (origin) break;
   }
+  // P1e: the server's API needs the token it wrote next to its database.
+  const auth = bearer(await ledgerToken(database, Number(new URL(origin).port)));
   const viaServer = () => fetch(`${origin}/api/import`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin },
+    method: 'POST', headers: { ...auth, 'Content-Type': 'application/json', Origin: origin },
     body: JSON.stringify({ provider: 'claude', source: 'lyra.jsonl', transcript }),
   }).then(response => response.json());
   const [a, b, c] = await Promise.all([viaServer(), cli(['import', '--provider', 'claude', path], { CONTEXT_LEDGER_DB: database }), viaServer()]);
@@ -270,7 +273,7 @@ test('I1 review: the CLI and a running server import the same file at once into 
   const fromCli = JSON.parse(b.stdout).session;
   assert.equal(a.session.id, fromCli.id);
   assert.equal(c.session.id, fromCli.id);
-  const sessions = await (await fetch(`${origin}/api/sessions`)).json();
+  const sessions = await (await fetch(`${origin}/api/sessions`, { headers: auth })).json();
   assert.equal(sessions.sessions.filter(session => session.id === fromCli.id).length, 1);
   assert.equal(sessions.sessions.length, 1);
 });
