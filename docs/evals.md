@@ -1569,3 +1569,18 @@ Codex multi-agent runs write messages between agents in two forms: `response_ite
   - (low) A `null` record made a Codex import fail. It is skipped again.
   - (low) The browser showed raw control and format characters in agent paths. They are shown as escapes.
 - **Note:** the refresh can change a graph context's savings estimate for an old session, because the hand-off it measures now includes the agent turns.
+
+## U4 — Console polish (defined 2026-11-18, before implementation)
+
+Source: issue #48 and Ali's choices (2026-11-18): the vendor pixel sprites instead of Pip, stacked on U1 (#22), G7 (#23), U2 (#30) and I3 (#34). The console stays read-only and CSP-safe. Synthetic data only: the demo recording from the Orbit transcripts.
+
+| Eval | Expected |
+| --- | --- |
+| Brand tokens | The console loads `docs/brand/tokens.css` (one source, served at `/console/tokens.css`), and `console.css` and `office.css` take their colours and type from `--ctm-*` variables: no hex colour outside a `var()` fallback-free list of room accents. A node test checks that every `var(--ctm-…)` the console uses is defined in `tokens.css`. |
+| Vendor sprites | Each agent in the office is a pixel sprite on a 16 × 20 grid of SVG `rect`s: Clawd for Claude Code, the purple pet for Codex, and a neutral bot for any other provider. The sprite is chosen by the party's provider. No image file and no style attribute. |
+| Poses | Working: the sprite sits at a laptop. Waiting: a "?" bubble over it. Idle: dimmed. The state is also text under the name and in the `aria-label`, so it never relies on colour or shape alone. |
+| Quoted and inferred | A node is quoted when its graph's `quotedNodeIds` names it and inferred when `inferredNodeIds` does; the console reads the lists from `GET /api/graphs/:id`. A graph without the lists leaves its nodes unmarked (neutral), never inferred. The word "quoted" or "inferred" shows beside the kind, so the mark is text as well as colour. In the demo, the rebuilt recording carries the lists and the e2e test checks at least one node of each mark against the recording. |
+| Codex agent turns | In the evidence pane, an I3 agent turn is labelled "Agent /root/worker to /root", with control and format characters in the paths shown as escapes, the same rule as the library view. |
+| Unchanged | Read-only (every request a GET), the U1 screenshots, the 375 px phone layout with no sideways scroll, and the 300 KB page budget all still hold. |
+| Screenshots | The console spec saves the finished demo and the evidence pane with the new look into `docs/console/`. |
+| Trademark note | The sprites are vendor trademarks drawn for a local build; the PR says so and says to swap them for the neutral bot before anything public. |
