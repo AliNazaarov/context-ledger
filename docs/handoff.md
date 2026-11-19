@@ -351,3 +351,18 @@ Next steps:
 2. For a newer T3 release: read its migrations from 097 on for changes to the six tables, then add its manifest and head as a second pinned layout with its own test database. Do not accept a range of heads.
 3. When PR #28 (D1 guide) merges, change its "Not built yet: an importer" bullet in `docs/integrations/t3code.md` to link to the import guide. The board row for D3 is on both branches; keep this branch's.
 4. A third provider (for Cursor and other T3 agents) needs P1's schema change; until then they are refused.
+
+## Current checkpoint — G7 quoted or inferred nodes (2026-11-17)
+
+Branch `ruslan/g7-quoted-nodes`. When a graph is published, each node is marked quoted or inferred from the transcript lines it cites, with the floor the latent findings already use (`isGrounded` in `src/latent.mjs`). The eval and results are in the G7 section of [the eval log](evals.md).
+
+- **Stored:** the graph payload gains `quotedNodeIds` and `inferredNodeIds` beside the other derived lists (`src/grounding.mjs`, `src/store.mjs`). The packet and its ID do not change, and there is no schema version change.
+- **Graphs from before G7** have no marks, and every reader shows them as unmarked rather than inferred. Publishing the same packet again adds the marks to the existing row; its ID, row and creation time stay.
+- **`context_for`:** an inferred node's citation ends `, inferred`, and the briefing says once what that means. A graph with only quoted nodes reads exactly as before, so its cached prefix does not change.
+- **Browser:** the room view shows "quoted" or "inferred" beside each node's kind (`public/app.js`); the room API puts `grounding` on each node.
+- **MCP paging:** the two lists are paged sections of `graph_read` and `graph_publish`, after the other derived lists, so a large graph's pages stay under the bound.
+
+Next steps:
+
+1. The console (U1, PR #22) reads a `grounding` field on nodes. Once both are merged, point its `nodeMark` at the graph's `quotedNodeIds` and `inferredNodeIds`.
+2. The mark is a floor, like the latent check: a label that only shares one content word with its line is quoted. A stricter check (all content words, or an exact quote field on the node) would be a new card with its own eval.

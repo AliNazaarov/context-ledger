@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { graphContext } from './context.mjs';
 import { ConflictError, InputError } from './errors.mjs';
 import { canonicalPacket, validateGraph } from './graph.mjs';
+import { groundNodes } from './grounding.mjs';
 import { defaultProject, migrate, refuseNewerSchema } from './migrate.mjs';
 import { mountRooms, roomsSchema } from './rooms.mjs';
 
@@ -340,10 +341,13 @@ export function openStore(path) {
     throw error;
   }
 
+  // A graph stored before G7 has no quoted or inferred marks; publishing the same
+  // packet again adds them. The ID, row and created_at stay as they were.
   const insertGraph = database.prepare(`
     INSERT INTO graphs (id, session_id, payload)
     VALUES (?, ?, ?)
-    ON CONFLICT (id) DO NOTHING
+    ON CONFLICT (id) DO UPDATE SET payload = excluded.payload
+      WHERE json_valid(graphs.payload) AND json_type(graphs.payload, '$.quotedNodeIds') IS NULL
   `);
   const getGraph = database.prepare('SELECT payload FROM graphs WHERE id = ?');
   const countCitingGraphs = database.prepare('SELECT count(*) AS graphs FROM graphs WHERE session_id = ?');
@@ -369,7 +373,6 @@ export function openStore(path) {
   `);
   const getSummary = database.prepare(`SELECT ${summaryColumns} FROM ${sessionRows} WHERE s.id = ?`);
   const selectMessages = database.prepare('SELECT role, text_json, line, key FROM messages WHERE session_id = ? ORDER BY seq');
-  const selectLines = database.prepare('SELECT line FROM messages WHERE session_id = ? ORDER BY seq');
   // Plain objects, as the JSON column gave. The text is a JSON string literal, because
   // node:sqlite cuts a string at a NUL when reading and replaces lone surrogates when
   // binding; the JSON form keeps every turn exactly as imported.
@@ -559,7 +562,9 @@ export function openStore(path) {
       }
       if (!getSummary.get(sessionId)) throw new InputError('Graph transcript session not found.');
 
-      const sourceLines = selectLines.all(sessionId).map(row => row.line);
+      // P1c: the messages come from their rows; G7 grounds each node in them.
+      const messages = readMessages(sessionId);
+      const sourceLines = messages.map(message => message.line);
       const options = { lookupGraph: id => readGraph(id) };
       validateGraph(packet, sourceLines, options);
       // Derive from the canonical form so derived ID lists follow its order.
@@ -567,7 +572,7 @@ export function openStore(path) {
       const derived = validateGraph(ordered, sourceLines, options);
       const canonical = serializeGraphPacket(ordered);
       const id = createHash('sha256').update(canonical).digest('hex');
-      const payload = { packet: JSON.parse(canonical), ...derived };
+      const payload = { packet: JSON.parse(canonical), ...derived, ...groundNodes(ordered, messages) };
       try {
         insertGraph.run(id, sessionId, JSON.stringify(payload));
       } catch (error) {
