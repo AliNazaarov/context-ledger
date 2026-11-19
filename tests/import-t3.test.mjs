@@ -11,6 +11,8 @@ import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { openStore } from '../src/store.mjs';
 import { openT3Copy, T3ImportError } from '../src/t3code.mjs';
+import { tokenFileFor } from '../src/token.mjs';
+import { bearer, ledgerToken, restrictToOwner } from './ledger-auth.mjs';
 
 // D3: a T3 Code v0.1.10 database (schema head 96) built at test time from the table
 // definitions in the pinned source (pingdotgg/t3code 7d32075, migrations 055,
@@ -173,7 +175,9 @@ function requestsFor(path, threadId) {
 }
 
 function importInto(store, request) {
-  return store.get(store.importTranscript(request).id);
+  // P1c: stored messages carry their stable keys; these tests compare the rest.
+  const session = store.get(store.importTranscript(request).id);
+  return { ...session, messages: session.messages.map(({ key, ...message }) => message) };
 }
 
 test('a Claude Code thread imports as claude with each message on the line of its position', t => {
@@ -352,6 +356,11 @@ test('a thread ID of another form is refused without being shown', t => {
   assert.deepEqual(requestsFor(path), [{ id: null, refusal: 'This T3 thread ID has an unsupported form.' }]);
 });
 
+// P1e: the database behind each test ledger, by port. The CLI finds the token from PORT
+// and CONTEXT_LEDGER_DB, as it does for a real ledger.
+const ledgerDatabases = new Map();
+const ledgerHeaders = async port => bearer(await ledgerToken(ledgerDatabases.get(port), port));
+
 async function startLedger(t) {
   const directory = mkdtempSync(join(tmpdir(), 'ledger-t3-server-'));
   const child = spawn(process.execPath, ['src/server.mjs'], {
@@ -370,7 +379,11 @@ async function startLedger(t) {
   for await (const chunk of child.stdout) {
     output += chunk;
     const match = output.match(/listening at http:\/\/127\.0\.0\.1:(\d+)/u);
-    if (match) return Number(match[1]);
+    if (match) {
+      const port = Number(match[1]);
+      ledgerDatabases.set(port, join(directory, 'ledger.sqlite'));
+      return port;
+    }
   }
   throw new Error('Server exited before listening.');
 }
@@ -380,8 +393,9 @@ const withoutWarning = text => text
   .split('\n')
   .filter(line => !/^\(node:\d+\) ExperimentalWarning: SQLite/u.test(line) && !line.startsWith('(Use `node --trace-warnings'))
   .join('\n');
+const noLedger = join(tmpdir(), 'context-ledger-no-ledger', 'none.sqlite');
 const cli = (port, ...args) => execute(process.execPath, ['src/cli.mjs', 'import-t3', ...args], {
-  env: { ...process.env, PORT: String(port) },
+  env: { ...process.env, PORT: String(port), CONTEXT_LEDGER_DB: ledgerDatabases.get(port) ?? noLedger },
 }).then(result => ({ ...result, stderr: withoutWarning(result.stderr) }), error => {
   error.stderr = withoutWarning(error.stderr);
   throw error;
@@ -418,8 +432,11 @@ test('the CLI imports a copy through the running ledger and prints escaped JSON'
     ['thread-two', 'codex', 'codex', 't3-thread-two.jsonl', 4],
   ]);
 
-  const stored = await fetch(`http://127.0.0.1:${port}/api/sessions/${output.imported[0].session.id}`).then(response => response.json());
-  assert.deepEqual(stored.session.messages, messages.map((message, index) => ({ ...message, line: index + 1 })));
+  const stored = await fetch(`http://127.0.0.1:${port}/api/sessions/${output.imported[0].session.id}`, { headers: await ledgerHeaders(port) })
+    .then(response => response.json());
+  // P1c: each stored message also has its stable key.
+  assert.deepEqual(stored.session.messages.map(({ key, ...message }) => message), messages.map((message, index) => ({ ...message, line: index + 1 })));
+  assert.ok(stored.session.messages.every(message => /^h:[0-9a-f]{32}$/u.test(message.key)));
 
   const one = await cli(port, path, '--thread', 'thread-two');
   assert.deepEqual(JSON.parse(one.stdout).imported.map(item => item.session.id), [output.imported[1].session.id]);
@@ -453,8 +470,9 @@ test('CLI refusals are fixed sentences on stderr with exit code 1', async t => {
   }
 
   const good = buildCopy(join(directory, 'good.sqlite'), [thread('thread-1', { messages: conversation })]);
+  // P1e: with no token for the port, the transcript is not sent anywhere.
   const unreachable = await failure(good);
-  assert.equal(unreachable.stderr.trim(), 'Cannot reach Context Ledger on port 1. Start it with npm start.');
+  assert.equal(unreachable.stderr.trim(), 'Cannot read the Context Ledger access token. Start the ledger with npm start, and run this with the same PORT and CONTEXT_LEDGER_DB as the ledger.');
 });
 
 // Review round 1 (Codex, of 6384054): one regression test or more per finding.
@@ -590,6 +608,8 @@ async function fakeLedger(t, replies) {
     for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     seen.push(body);
+    // P1e: every import carries the ledger's token.
+    assert.equal(request.headers.authorization, `Bearer ${'T'.repeat(43)}`);
     const reply = replies[seen.length - 1];
     if (reply === 'drop') return request.socket.destroy();
     if (reply === 'drop-body') {
@@ -606,7 +626,14 @@ async function fakeLedger(t, replies) {
     server.listen(0, '127.0.0.1', resolve);
   });
   t.after(() => new Promise(resolve => server.close(resolve)));
-  return { port: server.address().port, seen };
+  const port = server.address().port;
+  const directory = workspace(t);
+  const database = join(directory, 'ledger.sqlite');
+  const tokenFile = tokenFileFor(database, port);
+  writeFileSync(tokenFile, JSON.stringify({ port, token: 'T'.repeat(43) }) + '\n', { mode: 0o600 });
+  restrictToOwner(tokenFile);
+  ledgerDatabases.set(port, database);
+  return { port, seen };
 }
 
 // What the store answers: the session ID is the hash of provider and transcript (src/store.mjs).
