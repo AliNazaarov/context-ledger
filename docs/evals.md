@@ -1453,3 +1453,86 @@ The card asked Codex for a read-only review of the product and evals at cycle 4.
 - **Recommended next cycle:** run G10 live on Claude Code and Codex with human-checked labels and a pass rule written first (at least 10 paired runs, 90% of facts carried, 30% fewer median input tokens). Hold the "3× faster, 5× fewer tokens" claim until then.
 - **Board actions taken from it the same day:** I1, I2 and I3 went ahead without P1 (PRs #35, #33, #34). P1's design landed on `main`, and its implementation was split into P1a–P1e (the P1 PR).
 - **Outcome:** done. No code changed.
+
+## P1b — Projects (defined 2026-11-17, before implementation)
+
+Card P1b on `ruslan/p1b-projects`, from `main` 3a17536. The design is `docs/architecture.md` sections 4 and 11 on PR #37 (`ruslan/p1-design`), which is not on `main` yet: section 4 gives `projects (id, slug unique, name, ..., created_at)` and a `project_id` on every session, and section 11 says the migration sequence restarts at version 2 on top of today's version 1, with projects first. This card adds only that. Message rows, stable keys, deletion, retention, `client`, the API token and the browser stay out. Synthetic data only. Baseline on `main` 3a17536 (Windows): run before the first code change and recorded in the results.
+
+**Rules decided here, before the code:**
+
+- **Slugs.** A project slug matches `^[a-z0-9]+(?:-[a-z0-9]+)*$` (the party pattern) and has at most 64 characters. Anything else is refused with fixed text that never echoes the value.
+- **Default project.** The migration creates one project with slug `default` and name `Default`. Every session that exists when a file is migrated joins it. An import without `project` (or with `project: null`) goes to `default`.
+- **New projects.** An import that names a slug no project has yet creates that project (name = slug) in the same transaction as the session.
+- **Same bytes in a second project.** A session ID is `sha256(provider \0 bytes)`, so it does not depend on the project. Importing bytes that are already stored returns the stored session unchanged, with the project it already has. It is not moved, not copied, and no project is created for that request. The `project` field of the response is how the caller sees this. Moving a session between projects is not part of this card.
+- **Project IDs.** 32 random lowercase hex characters. They stay inside the database; the API names projects by slug.
+- **Older builds.** `project_id` is added with `ALTER TABLE`, so it cannot be `NOT NULL` with a foreign key in SQLite. A trigger puts any session inserted without a project, including by a build from before version 1, into `default`, the same way version 1's triggers stamp graphs and rooms.
+
+| Eval | Expected |
+| --- | --- |
+| Schema version 2 | A new file and an opened version 1 file both end at `PRAGMA user_version = 2` with a `projects` table (`id` primary key, `slug` unique and not null, `name`, `created_at`), `sessions.project_id` referencing `projects(id)`, an index on it and the `sessions_project` trigger. `schemaVersion` exports 2. |
+| Version 1 file | A version 1 file built in the test (version 1 DDL and rows, no projects) upgrades in place: every session, graph, room and choice row keeps its values, every session is in `default`, and graphs and rooms read back as before. Reopening changes neither schema nor rows. |
+| Unversioned file | A version 0 file (the 19f6522 DDL) goes straight to version 2 with both versions' changes, and `tests/migrate.test.mjs` still passes with its version assertions moved to 2. |
+| Safe to repeat | A version 1 file that already has a `projects` table and a `default` project (a step run before) migrates without error or a second `default`. |
+| Atomic | A failure inside the version 2 step (the index name already taken by a table) rolls back to version 1 with the schema unchanged. |
+| Newer files | A file at version 3 is refused with the existing message and left byte for byte as it was. |
+| Older build writes | A session inserted with the 19f6522 statement, which has no `project_id`, lands in `default`. |
+| Import names its project | `importTranscript({ ..., project: 'acme' })` returns a summary with `project: 'acme'` and creates the project once; a second session into `acme` reuses it. Without `project` the summary says `default`. Invalid slugs (upper case, spaces, double or edge hyphens, 65 characters, a number, an object) are refused before anything is written. |
+| Same bytes, second project | Importing the bytes of an `acme` session with `project: 'beta'` returns the `acme` summary with the same ID; `beta` is not created and `acme` still lists one session. |
+| Search filters by project | `list(query, provider, project)` and `listSessionsPage({ ..., project })` return only that project's sessions, combined with the query and provider filters and with paging (cursors stay valid inside a project). An unknown but valid slug returns an empty list. Summaries from import, list, page and `get` carry `project`. |
+| HTTP | `POST /api/import` accepts `project`. `GET /api/sessions?project=acme` filters, with and without `limit`; a bad or repeated `project` gets 400 with fixed text. The Host and Origin checks are unchanged: a cross-origin import with a project is still 403 and creates nothing. |
+| CLI | `npm run ledger -- search --project acme <query>` sends `project` and prints only that project's sessions; an invalid slug is refused before any request. |
+| Nothing else changes | No new dependency. No raw control or format characters in `src/` or `tests/`. All four suites pass. |
+
+**Results — P1b (2026-11-17):** every row passes on Windows. The tests are in `tests/projects.test.mjs` (13 tests); `tests/migrate.test.mjs` and `tests/list-api.test.mjs` were adjusted as described below.
+
+- **Schema version 2 — passed.** `src/migrate.mjs` adds `projects (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, created_at TEXT NOT NULL) STRICT`, the `default` project (name `Default`, a random 32-hex ID), `sessions.project_id REFERENCES projects(id)`, the index `sessions_project_id` and the trigger `sessions_project`. `schemaVersion` is 2. In a STRICT table SQLite also marks the primary key `NOT NULL`, which the test records.
+- **Version 1 file — passed.** The test writes the version 1 DDL and rows itself (no projects), copying created_at and party before the version 1 triggers exist. After opening, every session, graph, room and choice row is unchanged, every session is in `default`, graphs and rooms read back as published, and a second open changes neither schema nor rows.
+- **Unversioned file — passed.** A 19f6522 file goes straight to version 2. `tests/migrate.test.mjs` now asserts `schemaVersion` instead of 1, compares the version 0 session columns (the table now also has `project_id`), and bumps its "newer" file to `schemaVersion + 1`.
+- **Safe to repeat — passed.** A version 1 file with a `projects` table and a `default` row already in place migrates without a second `default`, and its sessions join the existing row.
+- **Atomic — passed.** A table named `sessions_project_id` makes the step fail; the file stays at version 1 with its schema and session columns unchanged.
+- **Newer files — passed.** Version 3 is refused with the existing message and its bytes are unchanged. Three cases came from the review (below): a newer file without the version 0 tables, a file that a newer build upgrades between this build's first version read and its next step, and a current file that opens while another connection holds the write lock.
+- **Older build writes — passed.** The 19f6522 insert, which names no project, lands in `default` through the trigger.
+- **Import names its project — passed.** `acme` is created once and reused, no `project` or `project: null` gives `default`, a 64-character slug is accepted, and 13 invalid values (upper case, a space, `a--b`, edge hyphens, `_`, empty, 65 characters, a zero-width space, a number, an object, an array, `true`) are refused with fixed text and nothing written. The project and the session commit in one `BEGIN IMMEDIATE` transaction.
+- **Same bytes, second project — passed.** The response is the stored `acme` summary with the same ID, and there is no `beta` row. The same text from Codex is a different session (the provider is part of the ID) and goes to `beta`.
+- **Search filters by project — passed.** `list` and `listSessionsPage` filter by project alone and combined with the query and the provider; paging inside `acme` returns its sessions newest first, and an unknown valid slug returns nothing. Summaries from import, list, page and `get` carry `project`.
+- **HTTP — passed.** `POST /api/import` takes `project`; `GET /api/sessions?project=` filters with and without `limit`. A bad, empty or repeated `project` is 400 with fixed text. A cross-origin import is 403 and writes no session or project; a wrong Host is 403.
+- **CLI — passed.** `ledger search --project acme vega` prints only `acme` sessions. Invalid or repeated `--project` is refused before any request: the test points the CLI at port 1, where nothing listens, and gets the slug message, not "Cannot reach".
+- **Nothing else changes — passed.** No new dependency, and no raw control or format characters in `src/` or `tests/`. One existing test changed: `tests/list-api.test.mjs` checked that 120 short sessions fit one 40,000-character MCP result. With `"project": "default"` on every row, 120 no longer fit, so it now uses 110, which is still more than one 100-row ledger page.
+- **Not done here:** the browser always imports into `default` and shows no project; MCP `session_search` returns the project but cannot filter by it; sessions cannot be moved between projects; there is no project listing route.
+
+**Codex review (read-only), five rounds.**
+
+Round 1, on 21b0811:
+
+- **Medium — fixed (1c7b988).** `GET /api/sessions?project=` with an empty value listed every project. It is now a 400 like any invalid slug, with and without `limit`.
+- **Medium — fixed (1c7b988, completed in de69cec).** `openStore` ran its DDL before `migrate()` checked the version, so a newer file without the old tables changed before it was refused. This predates P1b. A newer file with only a `messages` table now keeps its bytes.
+- **Low — fixed (1c7b988).** No test showed that a failed session insert leaves no project behind. A test trigger now aborts the insert after the project is created; neither row persists and the next import commits.
+- **Low — fixed (1c7b988, made deterministic in de69cec).** The second lookup under the lock was untested. Two processes now race the same bytes into `left` and `right`; both get the winner's summary and only the winner's project exists.
+
+Round 2, on 1c7b988:
+
+- **Medium — fixed (de69cec).** The version check still ran outside the write lock, so a newer build could upgrade the file between the check and the DDL. The version 0 DDL, including the room tables (now `roomsSchema` in `src/rooms.mjs`), runs inside `migrate()`'s `BEGIN IMMEDIATE`, after the version is read again. This first took the lock on every open, which round 3 corrected.
+- **Medium — fixed (de69cec).** `parseArgs` kept only the last `--project`, so `--project BadSlug --project good` sent a request. A repeated `--project` is now refused.
+- **Low — fixed (de69cec).** The race test signalled readiness before the first lookup and relied on a 750 ms sleep. Each child now stops at its import's `BEGIN IMMEDIATE` until both are there.
+- **Low — fixed (de69cec).** The duplicate test checked that `beta` had no sessions, not that it did not exist. It now reads `projects`.
+
+Round 3, on de69cec:
+
+- **Medium — fixed (44df0b1).** Taking `BEGIN IMMEDIATE` on every open meant a writer holding the lock could stall a store opening a current file for the 5-second busy timeout, then fail it. A version 2 file now opens with no lock and no DDL. The lock, the second version read and the version 0 DDL happen only when a migration may run, so DDL still never runs without a version check under the lock. A new test opens a current file while another connection holds the lock.
+- **Low — fixed (44df0b1).** The upgrade-race test relied on a 750 ms sleep, so a slow child could read version 3 first and pass even against 1c7b988. The child now stops right after its first version read, for a version 1 and a version 2 file. The holder drops `room_choices` and moves the file to version 3, and only then is the child let go. At version 1 the child is refused under the lock; at version 2 it runs no DDL and fails on the missing table. In both cases `room_choices` is not recreated.
+
+Round 4, on 44df0b1:
+
+- **Medium — fixed (7349ba6).** With no lock on a current file, a newer build could upgrade it between the first version read and the end of `openStore`. If the upgrade kept the tables, the store opened on a newer schema. The version is now read again after the statements are prepared, and a newer file is refused. The upgrade-race test has a third case: a version bump that keeps every table, which is refused with the newer-schema message.
+- **Low:** none.
+- **Known limit, not fixed:** an upgrade by a newer build while this store stays open is not detected. Catching it would mean holding a lock for the store's whole life, which would block every other writer.
+
+Round 5, on 7349ba6:
+
+- **High and medium:** none. Codex found that the round 4 recheck catches an upgrade that keeps the tables, takes no write lock, keeps the existing message and closes the connection on refusal.
+- **Low — fixed (this commit).** The round 4 test case paused the child at its first version read, so it would still pass if the recheck moved ahead of statement preparation. A new test pauses the child right after `openStore` prepares its last statement (the graph list). It fails if any other statement is prepared after that point. The parent then commits version 3 with every table kept and releases the child. The child is refused with the newer-schema message and the store never opens. With the recheck moved ahead of preparation, this test fails.
+
+Each regression test was checked by removing its fix (twelve mutations across the five rounds); each mutation fails at least its own test.
+
+**Suites (Windows, after the round 5 fix):** `npm run -s test:graph` 9/9; node 204/205 (one skipped; the `main` baseline was 191/192); Playwright 13/13; Python runtime 192 run, OK (50 skipped).
+- **Codex, round 6** (of c442c22, the round 5 test): no high or medium findings. Two low, fixed in the next commit: the test now waits for close rather than exit, so the child's output has drained before it is checked; and its cleanup waits for the child to end before the folder is removed.

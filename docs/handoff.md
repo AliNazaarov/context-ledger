@@ -263,3 +263,17 @@ Branch `ruslan/p1-design`. `docs/architecture.md` comes from `product/v1` unchan
 ## Current checkpoint — P1a storage engine decision (2026-11-17)
 
 Branch `ruslan/p1a-storage-decision`, stacked on P1's design PR (#37). It proposes revising ADR-003: stay on `node:sqlite`, use FTS5 when the running Node has it (Node 22.23.4 in CI does; 22.14 locally does not), and fall back to `instr` search with a named warning otherwise. No dependency is added. P1c builds message rows on `node:sqlite` either way; the FTS5 index is a follow-up once this is accepted.
+
+## Current checkpoint — P1b projects (2026-11-17)
+
+Card P1b on `ruslan/p1b-projects`, from `main` 3a17536. The P1 split (PR #37) is not on `main` yet, so this branch adds its own P1b board row. The eval, its results and five rounds of Codex review are in the P1b section of [the eval log](evals.md).
+
+- **Schema version 2** (`src/migrate.mjs`): a `projects` table (`id`, unique `slug`, `name`, `created_at`), `sessions.project_id` and a `default` project that existing sessions join. The `sessions_project` trigger puts a session inserted without a project, including by an older build, in `default`. The steps follow the version 1 style: each checks the schema, is safe to repeat, and runs in one transaction.
+- **Opening a file:** a current file opens with no lock and no DDL, and the version is read again before the store is returned. Otherwise the store takes `BEGIN IMMEDIATE`, reads the version again, refuses a newer one, creates the version 0 tables (`bootstrap`, which now includes `roomsSchema` from `src/rooms.mjs`), then migrates.
+- **Store, API and CLI:** `importTranscript({ ..., project })` takes a slug (`^[a-z0-9]+(?:-[a-z0-9]+)*$`, at most 64 characters, default `default`) and creates the project on first use. Stored bytes keep their project and nothing is created. Summaries carry `project`. `list`, `listSessionsPage`, `GET /api/sessions?project=` and `ledger search --project` filter by it.
+
+Next steps:
+
+1. A human reviews the migration to version 2 (AGENTS.md section 4, step 4); the review of PR #8's migration to version 1 is also still owed.
+2. When PR #37 lands, keep one P1b row on the board (this branch's or #37's) and set it from the PR state.
+3. Not in this card: a project picker in the browser (it imports into `default`), a `project` filter on MCP `session_search`, a project list route, and moving sessions between projects. P1c (message rows) and P1d (delete and retention) build on `projects` and `sessions.project_id`.

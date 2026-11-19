@@ -12,8 +12,8 @@ const digest = (...parts) => createHash('sha256').update(parts.join('\0')).diges
  * reject; a proposal is agreed only when both confirm. Agents can open and read a
  * room, but choices are recorded by people (see the decisions route in server.mjs).
  */
-export function mountRooms(database, readGraph) {
-  database.exec(`
+/** The version 0 room tables; openStore creates them under the migration lock. */
+export const roomsSchema = `
     CREATE TABLE IF NOT EXISTS rooms (
       id TEXT PRIMARY KEY,
       graph_a TEXT NOT NULL REFERENCES graphs(id),
@@ -27,7 +27,9 @@ export function mountRooms(database, readGraph) {
       choice TEXT NOT NULL CHECK (choice IN ('confirm', 'reject')),
       PRIMARY KEY (room_id, proposal_id, party)
     ) STRICT;
-  `);
+  `;
+
+export function mountRooms(database, readGraph) {
   const insertRoom = database.prepare('INSERT INTO rooms (id, graph_a, graph_b) VALUES (?, ?, ?) ON CONFLICT (id) DO NOTHING');
   const selectRoom = database.prepare('SELECT graph_a AS a, graph_b AS b FROM rooms WHERE id = ?');
   const selectChoices = database.prepare('SELECT proposal_id AS proposalId, party, choice FROM room_choices WHERE room_id = ?');
@@ -128,8 +130,7 @@ export function mountRooms(database, readGraph) {
 
     /**
      * Rooms, newest first, for one graph (either side) and/or one party (either party).
-     * Rows name the two parties only: no proposals or choices. Prepared on first use,
-     * because created_at comes from the schema migration that runs after mountRooms.
+     * Rows name the two parties only: no proposals or choices. Prepared on first use.
      */
     listRooms({ graphId = null, party = null, limit, after }) {
       selectCursor ??= database.prepare('SELECT rowid FROM rooms WHERE id = ?');

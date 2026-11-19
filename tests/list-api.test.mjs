@@ -303,9 +303,10 @@ test('the browser and CLI search still get every matching session', async t => {
   const state = await ledger(t);
   const keyword = 'quasar' + Date.now().toString(36);
   const imported = [];
-  // The 120 oldest also carry "nova": more than 100 rows that still fit one result.
+  // The 110 oldest also carry "nova": more than 100 rows that still fit one result (120 did
+  // until P1b added the project to every row).
   for (let index = 0; index < 150; index += 1) {
-    imported.push((await state.import(`s${index}.jsonl`, `Synthetic ${keyword} session ${index}${index < 120 ? ' nova' : ''}`)).id);
+    imported.push((await state.import(`s${index}.jsonl`, `Synthetic ${keyword} session ${index}${index < 110 ? ' nova' : ''}`)).id);
   }
 
   const response = await fetch(`${state.server.origin}/api/sessions?q=${keyword}`);
@@ -324,10 +325,10 @@ test('the browser and CLI search still get every matching session', async t => {
   assert.deepEqual(JSON.parse(output).map(session => session.id), [...imported].reverse());
 
   // Without a limit, session_search returns every match that fits, byte for byte as on
-  // 19f6522: 120 short rows fit one result, so there is no cut at 100 and no more.
+  // 19f6522: 110 short rows fit one result, so there is no cut at 100 and no more.
   const nova = await state.client.call(5000, 'session_search', { query: `${keyword} nova` });
   assert.deepEqual(nova.content, [{ type: 'text', text: terminalJson({ sessions: (await state.get(`/api/sessions?q=${keyword}+nova`)).body.sessions }) }]);
-  assert.equal(JSON.parse(nova.content[0].text).sessions.length, 120);
+  assert.equal(JSON.parse(nova.content[0].text).sessions.length, 110);
   // All 150 do not fit: the first page holds as many as fit, more than 100, then the rest.
   const all = await walk(state, 'session_search', 'sessions', { query: keyword });
   assert.deepEqual(all.map(session => session.id), [...imported].reverse());
