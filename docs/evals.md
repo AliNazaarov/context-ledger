@@ -1482,3 +1482,15 @@ Source: issue #48 ("a project picker and filter in the library, after #42"). P1b
 | See the project | Each result row names its project beside the agent and message count. The reader shows it under the source. Project slugs are set with `textContent`. |
 | Unchanged | Every response pinned by `tests/routes.test.mjs` is unchanged apart from the new route. The library's existing Playwright journeys pass. |
 | Tests | Node tests for `GET /api/projects` (empty ledger, counts, ordering, a project with no sessions, the origin check). A Playwright journey imports into two projects, filters by each, combines with the agent filter, and checks a bad slug is refused before any POST. |
+
+### U5 results (2026-11-18, macOS)
+
+- **List projects: pass.** `tests/projects-api.test.mjs` covers an empty ledger, counts and ordering, and repeated bytes that keep their first project without creating a new one. For a foreign Host, a foreign Origin, POST and DELETE, the route answers with the same status, body and security headers as `/api/sessions`.
+- **Import into a project, Filter, See the project: pass.** `tests/e2e/projects.spec.mjs` imports into two projects and filters by each. It combines the project filter with the agent filter, refuses `Not A Slug` before any POST, checks that an empty field imports into `default` with the old message, and checks the datalist. Screenshot: [docs/library/project-picker.png](library/project-picker.png).
+- **Unchanged: pass.** `tests/routes.test.mjs` and the library and demo journeys pass, and the import message for `default` is unchanged.
+- **Independent review** (Claude Sonnet as `ecc:code-reviewer`, read-only): no high or medium findings. Three low findings were fixed:
+  - The first search waited for `/api/projects`, so a hung request left the page blank. Both now start at once.
+  - The route test only checked "not 200". It now compares each case with `/api/sessions`.
+  - The datalist check covered one project. It now covers all three.
+  - Not tested here: a ledger from before schema version 2. That is #42's migration, which opens it before any route runs.
+- **Suites (macOS, Node 26):** node 207/208. The one failure is the `tests/mcp.test.mjs` transport test, which also fails on #42's branch. Playwright 14/14. `npm run -s test:graph` passes.

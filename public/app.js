@@ -188,7 +188,9 @@ async function loadProjects() {
   }
 }
 
-void loadProjects().then(search);
+// The first search does not wait for the project list: the filter starts at All projects.
+void loadProjects();
+void search();
 
 const roomForm = document.querySelector('#room-form');
 const roomGraphA = document.querySelector('#room-graph-a');

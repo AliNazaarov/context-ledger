@@ -60,7 +60,9 @@ test('import into projects, filter by project and agent, and refuse a bad slug b
   await upload(page, { name: `${tag}-e.jsonl`, transcript: turn(`${tag} loose`) });
   await expect(page.locator('#import-status')).toHaveText(`Imported ${tag}-e.jsonl.`);
   expect(posts.at(-1).project).toBeUndefined();
-  await expect(page.locator('#project-names option[value="' + `${tag}-atlas` + '"]')).toHaveCount(1);
+  for (const slug of [`${tag}-orbit`, `${tag}-atlas`, 'default']) {
+    await expect(page.locator(`#project-names option[value="${slug}"]`)).toHaveCount(1);
+  }
 
   await filter.selectOption(`${tag}-orbit`);
   await expect(results).toHaveCount(2);
