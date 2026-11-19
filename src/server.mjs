@@ -15,7 +15,7 @@ const staticFiles = new Map([
   ...['console.css', 'office.css'].map(name => [`/console/${name}`, [`console/${name}`, 'text/css']]),
   // Card U4: the brand tokens have one source, docs/brand/tokens.css (card U2).
   ['/console/tokens.css', ['../docs/brand/tokens.css', 'text/css']],
-  ...['console.mjs', 'office.mjs', 'sprites.mjs', 'model.mjs', 'source.mjs', 'brain.mjs', 'evidence.mjs']
+  ...['console.mjs', 'office.mjs', 'sprites.mjs', 'review.mjs', 'model.mjs', 'source.mjs', 'brain.mjs', 'evidence.mjs']
     .map(name => [`/console/${name}`, [`console/${name}`, 'text/javascript']]),
   ['/console/demo-recording.json', ['console/demo-recording.json', 'application/json']],
 ]);
