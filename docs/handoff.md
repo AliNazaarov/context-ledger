@@ -296,3 +296,18 @@ Next steps:
 Branch `ruslan/i3-codex-agent-messages`. Codex messages between agents are now imported as turns with role `agent`, `author` and `recipient`, from both the `response_item` `agent_message` form and the rollout's `inter_agent_communication` form. Encrypted content is never stored. The browser, the CLI hand-off and `session_read` show "agent <author> to <recipient>", with the paths escaped. A Codex file imported before I3 gains its agent turns when it is imported again.
 
 Next owner: this branch and I2 (#33) both change `importTranscript` in `src/store.mjs`; whichever merges second must keep I2's skip report and I3's refresh.
+
+## Current checkpoint — U4 console polish (2026-11-18)
+
+Branch `ali/u4-console-polish`, stacked on U1 (#22), G7 (#23), U2 (#30) and I3 (#34); the PR's base is `ruslan/console-v0`.
+
+- **Brand:** the console loads `docs/brand/tokens.css`, served at `/console/tokens.css` from its one source, and `console.css` and `office.css` use only `--ctm-*` variables (a node test checks each is defined).
+- **Office:** agents are 16 × 20 pixel sprites (`public/console/sprites.mjs`): Clawd for Claude Code, the purple Codex pet, and a neutral bot for anything else. They are vendor trademarks, drawn for the local console only: swap them for the bot before a public video or deploy.
+- **Marks:** `nodeMark(graph, id)` reads the graph's `quotedNodeIds` and `inferredNodeIds` (G7 next step 1, done). The word shows beside each node's kind. The rebuilt demo recording has 11 quoted nodes; the live e2e test covers inferred.
+- **Agent turns:** the evidence pane labels I3 turns "Agent /root/worker to /root" (`turnSpeaker`).
+
+Next steps:
+
+1. Merge order: U1, G7, U2 and I3 first; then rebase this branch on `main` and rebuild the recording (`node demo/console-recording.mjs`).
+2. `malformed transport input is answered without stopping the server` in `tests/mcp.test.mjs` fails on macOS with Node 26, on this branch and on `ruslan/console-v0` alike. Not checked on Node 22.
+3. P3 (reviewer prototype) is next, stacked on this branch: approve, edit or reject beside the evidence, with the decisions kept in the browser only.
