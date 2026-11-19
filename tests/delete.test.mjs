@@ -10,6 +10,7 @@ import { DatabaseSync, StatementSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { schemaVersion } from '../src/migrate.mjs';
 import { ConflictError, InputError, openStore } from '../src/store.mjs';
 
 // P1d, first part: delete one imported session. Synthetic transcripts only, and only
@@ -68,7 +69,7 @@ test('deleteSession removes one session and nothing else, and leaves the schema 
   assert.equal(importOne(store, 'gone.jsonl', 'Bram drafts the synthetic Quill budget.', 'The Quill budget is 40 units.').id, gone.id);
   store.close();
   assert.deepEqual(schemaOf(path), before);
-  assert.equal(before.version, 1);
+  assert.equal(before.version, schemaVersion);
 });
 
 test('deleteSession is refused while any graph cites the session, and says how many', () => {
