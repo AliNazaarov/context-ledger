@@ -14,6 +14,7 @@ const readerHeading = document.querySelector('#reader-heading');
 const readerSource = document.querySelector('#reader-source');
 const readerStatus = document.querySelector('#reader-status');
 const readerMessages = document.querySelector('#reader-messages');
+const readerDelete = document.querySelector('#reader-delete');
 
 let searchRequest;
 let readerRequest;
@@ -102,6 +103,7 @@ async function openTranscript(id, focusHeading = false) {
   const { signal } = readerRequest;
   selectedId = id;
   renderSelection();
+  readerDelete.hidden = true;
   readerHeading.textContent = 'Opening transcript';
   readerSource.textContent = '';
   readerMessages.replaceChildren();
@@ -114,6 +116,7 @@ async function openTranscript(id, focusHeading = false) {
     readerSource.textContent = `${agentNames[session.provider]} · ${session.source}`;
     renderRows(readerMessages, session.messages, messageRow);
     readerStatus.textContent = '';
+    readerDelete.hidden = false;
     if (focusHeading) readerHeading.focus();
   } catch (error) {
     if (signal.aborted) return;
@@ -132,6 +135,33 @@ function importNote(session, skipped) {
   return `Partially imported ${session.source}: kept ${plural(session.messageCount, 'message')}, `
     + `skipped ${plural(skipped.count, 'unreadable line')}${which}. Messages on those lines are missing.`;
 }
+
+// Deleting asks first, with fixed text: transcript text never goes into the dialog.
+readerDelete.addEventListener('click', async () => {
+  const id = selectedId;
+  if (!id || readerDelete.disabled) return;
+  if (!window.confirm('Delete this transcript from the ledger? This cannot be undone.')) return;
+  readerDelete.disabled = true;
+  readerStatus.textContent = 'Deleting transcript…';
+  try {
+    await request(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    // The person may have opened another transcript while the delete was in flight.
+    if (selectedId === id) {
+      readerRequest?.abort();
+      selectedId = undefined;
+      readerDelete.hidden = true;
+      readerHeading.textContent = 'No transcript selected';
+      readerSource.textContent = '';
+      readerMessages.replaceChildren();
+      readerStatus.textContent = 'Transcript deleted.';
+    }
+    await search();
+  } catch (error) {
+    if (selectedId === id) readerStatus.textContent = `Delete failed. ${error.message}`;
+  } finally {
+    readerDelete.disabled = false;
+  }
+});
 
 importForm.addEventListener('submit', async (event) => {
   event.preventDefault();

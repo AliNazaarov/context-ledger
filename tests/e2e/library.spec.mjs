@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures.mjs';
 
 const asJsonl = (...records) => records.map(record => JSON.stringify(record)).join('\n');
 const claude = asJsonl(
