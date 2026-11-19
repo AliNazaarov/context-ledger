@@ -1409,3 +1409,36 @@ Exact McNemar tests on the same 200 questions (questions only the first system g
   - without `--targets`, training still uses the gold solutions as in cycle 13;
   - a file with no kept answer stops the run.
 - No new runtime dependency.
+
+## P1a — Storage engine decision (evidence collected 2026-11-17)
+
+ADR-003 picked better-sqlite3 because `node:sqlite` had no FTS5. P1a checks whether that is still true, before any dependency is added.
+
+- **What is tested:** `tests/sqlite-fts5-probe.test.mjs` creates an FTS5 table in memory, runs one `MATCH` query, and reports the Node version, platform, SQLite version and whether FTS5 works. It never fails when FTS5 is missing.
+- **Expected result:** a probe line on every system that runs the Node suites.
+- **Results:** Node 22.14.0 on Windows (local) has SQLite 3.47.2 and no FTS5. Node 22.23.4 on Linux (CI) has SQLite 3.53.4 with FTS5. Public reports agree: 22.19.0 has none and 22.22.2 has it.
+- **Outcome:** a proposed revision of ADR-003 in `docs/architecture.md` §5.1: stay on `node:sqlite`, probe FTS5 at open, fall back to `instr` search with a named warning. It is accepted when the user approves the PR.
+- **Codex, round 1:** one high, three medium and three low findings, all fixed in the document:
+  - (high) The design created the FTS5 table and its triggers unconditionally, so a database made on a build with FTS5 could break writes on one without it. FTS5 is now an optional index the store creates and maintains itself, with a watermark, a rebuild path, and a refusal for deletes it cannot carry into an index it cannot open.
+  - (medium) The fallback contract was not written down. It is today's session-level match, newest first, with the same pagination.
+  - (medium) Older sections still named better-sqlite3. The landing note now marks them as the original plan while P1a is pending.
+  - (medium) The AGENTS.md reason was overstated. It now says a second dependency needs an approved ADR, and that a missing prebuilt binary means a source build.
+  - (low) The evidence table now links the CI run and marks the public reports as unchecked. `doctor` tells users to rerun its check rather than naming a version.
+  - (low) The two approval moments are now one: ADR-003's revision is accepted only with the P1a PR.
+  - (low) §4's legacy-ID formula did not match the store. It now keeps `sessions.id` as it is.
+- **Codex, round 2** (of 92fda47): one high, two medium and two low findings, all fixed in the document:
+  - (high) §6's purge still cascaded into FTS rows, which no longer happens without triggers. The store now removes each message from the index with FTS5's `delete` command and the original text, in the same transaction as the canonical delete, and runs `optimize` only when an index exists.
+  - (medium) A watermark over `messages.id` could miss rows after a delete, a downgrade and a reused ID. It is replaced by an `fts_pending` table written with each insert while the index cannot be updated, and drained in one transaction with the index changes.
+  - (medium) A forced-fallback switch cannot prove downgrade compatibility. The implementing card must also reopen the same database on a genuinely module-free build (Node 22.14.0), then on an FTS5 build.
+  - (low) The fallback contract now includes the session title and the descending session `rowid` order.
+  - (low) The landing note now says what happens to the better-sqlite3 passages when P1a is accepted or rejected.
+- **Codex, round 3** (of 8351c3a): no high findings. Three medium and two low, all fixed in the document:
+  - (medium) §4 still created the FTS5 index in the first migration and lacked `fts_pending`. The migration now has `fts_pending`, and the index is shown as a separate block the store creates where FTS5 exists.
+  - (medium) Draining only at open missed a module-free process appending while an FTS5 process had the file open. A process with FTS5 now drains before each indexed search and inside each delete or purge, before its FTS5 `delete` commands.
+  - (medium) §6's scheduled retention and evidence-only cleanup could be blocked without saying so. A blocked run records why and what it would have removed, and an evidence-only export reports that its cleanup did not run.
+  - (low) The fallback contract now includes the provider filter and empty queries.
+  - (low) Rejection now restores the original ADR-003 entry and the lifecycle text, not only removes §5.1.
+- **Codex, round 4** (of 7533cc7, the round 3 fixes): no high findings. Two medium and one low, fixed in the document:
+  - (medium) A drain followed by a separate search could miss a message appended in between. Each indexed search now drains and queries inside one transaction.
+  - (medium) A blocked evidence-only cleanup was promised to a later run, but nothing remembered it. The pending cleanup is now recorded in `settings` and carried out by the next retention run that can update the index.
+  - (low) The rejection instructions now also cover the paragraph that points to §5.1.
