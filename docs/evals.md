@@ -1598,3 +1598,21 @@ Source: issue #48 and Ali's choices (2026-11-18): the vendor pixel sprites inste
   - (low) The laptop hid the sprite's face. It sits lower now.
   - (low) A JSDoc comment was in the wrong place after the move. It is fixed.
 - **Suites (macOS, Node 26):** node 248/249. The one failure is `malformed transport input…` in `tests/mcp.test.mjs`, which fails the same way on `ruslan/console-v0`. Playwright 21/21. `npm run -s test:graph` passes.
+
+## U4b — Furnished pixel office (defined 2026-11-19, before implementation)
+
+Source: Ali's lookbook pick "pixel sprites at desks" (`refs/virtual-office.png`) and his preview choices of 2026-11-19: a top-down office with the mood of his isometric reference (navy walls, windows with daylight, lamps, a whiteboard), his blue cloud Codex character, and a hat or prop per agent role. Stacked on U4 (#51). Synthetic data only: the demo recording and the live e2e graphs.
+
+| Eval | Expected |
+| --- | --- |
+| Furnished rooms | Each room (Claude Code: wood floor; Codex: tiled floor) has 6 desks with a monitor and chair, bookshelves, plants, windows with daylight on the floor, ceiling lamps, a whiteboard, a kitchen with a water cooler, and a lounge with a sofa and rug. |
+| Seated when working | A working agent sits at its desk: its feet are at `seatAt(desk)`, it is drawn behind the desk, and that desk's monitor is lit. A unit test checks the position for each desk. |
+| Beside when waiting | A waiting agent stands at `besideDesk(desk)` with a "?" bubble, and its monitor is off. A unit test checks the position stays inside the work area and clear of the next desk. |
+| Lounge when idle | An idle agent stands at `loungeSpot(n)` in the lounge, in the order the idle agents arrive. A unit test checks every lounge spot is inside the lounge. |
+| Same API and limits | `createOffice(svg)` still returns `{update, anchor, pulse}`; at most 6 agents per room, picked by the same `RANK` order, with a "+n" chip for the rest. The state word and the `aria-label` stay on each agent. |
+| Roles | An agent label with a role word (plan, build, test, review, doc, scout and close words) gets that role's accessory: notebook, hard hat, flask, glasses (a magnifier on Codex), pencil or safari hat. No match, no accessory. Unit tests cover the words and that `constructor` or `__proto__` match nothing harmful. |
+| CSP-safe and read-only | Built with `createElementNS`, positions through CSSOM `style.setProperty`, text through `textContent`, no style attribute in the office, every request a GET. |
+| Colours | `office.css` takes every colour from `--ctm-*` tokens; the office materials are new tokens in `docs/brand/tokens.css`. The only literals in `office.css` stay the Claude room's two colours. Every `var()` is defined. |
+| Logo and favicon | The header shows the CTM logo instead of the "CTM" text, and the page has a favicon. Until Ali sends the logo file, both are the Pip SVG, marked as a placeholder. The new static path is on the server's fixed list. |
+| Budget and phone | Added assets stay under 300 KB; at 375 px there is no sideways scroll. |
+| Screenshots | `docs/console/` gets the empty, mid-run, finished (`/console/?demo`) and phone views. |
