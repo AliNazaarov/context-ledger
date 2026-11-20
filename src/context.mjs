@@ -1,6 +1,7 @@
 import { canonicalPacket, compareBy, kindOrder } from './graph.mjs';
 import { nodeGrounding } from './grounding.mjs';
 import { handoffMarkdown } from './handoff.mjs';
+import { scopedText } from './scope.mjs';
 import { inlineText } from './text.mjs';
 
 // A rough, tokenizer-free estimate, labelled as such wherever it is shown. Vendors
@@ -37,7 +38,7 @@ function linkTargets(links, lookupGraph) {
  * the longest possible prefix. Identifiers that change with any edit (this graph,
  * the transcript snapshot, linked graphs) are in the final section.
  */
-export function contextText(graph, session, { lookupGraph } = {}) {
+export function contextText(graph, session, { lookupGraph, scope } = {}) {
   const packet = canonicalPacket(graph.packet);
   const lines = [
     `# Context Ledger graph v${packet.version}`,
@@ -77,13 +78,29 @@ export function contextText(graph, session, { lookupGraph } = {}) {
       : []),
     `session: ${packet.sessionId}`,
     `graph: ${graph.id}`,
+    // Card G9: a scoped briefing says what it left out, as its last line.
+    ...(scope ? [scope] : []),
   ]);
   return lines.join('\n') + '\n';
 }
 
-/** The context text plus a savings estimate against the full Markdown handoff. */
-export function graphContext(graph, session, options) {
-  const text = contextText(graph, session, options);
+/**
+ * The context text plus a savings estimate against the full Markdown handoff. With a
+ * question (and optionally a budget) the text is scoped to it (card G9, src/scope.mjs).
+ */
+export function graphContext(graph, session, { question, budget, ...options } = {}) {
+  let text;
+  if (question === undefined) {
+    text = contextText(graph, session, options);
+  } else {
+    // A budget renders the briefing several times; each linked graph is read once.
+    const seen = new Map();
+    const lookupGraph = options.lookupGraph && (id => {
+      if (!seen.has(id)) seen.set(id, options.lookupGraph(id));
+      return seen.get(id);
+    });
+    text = scopedText(graph, { question, budget }, (scoped, scope) => contextText(scoped, session, { ...options, lookupGraph, scope }));
+  }
   const handoff = handoffMarkdown(session);
   const handoffTokens = estimateTokens(handoff);
   const graphTokens = estimateTokens(text);
