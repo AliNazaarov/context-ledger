@@ -3802,3 +3802,17 @@ Source: Ali's lookbook pick "pixel sprites at desks" (`refs/virtual-office.png`)
   - node: 252/253. The one failure is `malformed transport input…` in `tests/mcp.test.mjs`, the known failure on every branch.
   - Playwright: 22/22.
   - `npm run -s test:graph` passes.
+
+## U6 — Pixel console and agent crew (defined 2026-11-20, before implementation)
+
+Card U6 on `ali/u6-pixel-console`, stacked on U4b (#55). Ali approved the light pixel lookbook (option 1, fonts pick A) and the Mark bot crew (each agent's official logo on a robot's screen face) on 2026-11-20. Synthetic demo data only.
+
+| Eval | Expected |
+| --- | --- |
+| Local fonts | `/console/fonts/{jersey-15,inter-tight,silkscreen}.woff2` are on the server's fixed list, served as `font/woff2` from `docs/brand/fonts` with their OFL licences beside them. The CSP adds only `font-src 'self'`. The page uses them (`document.fonts.check` is true once loaded) and no request leaves the loopback host. |
+| Light pixel look | No `ctm-dark` class. Headings and buttons use Jersey 15, reading text uses Inter Tight, one-word tags use Silkscreen. Frames and buttons have stepped corners. |
+| Activity replaces the tiles | The three number tiles are gone. Hand-offs, tokens saved and superseded decisions are counters on the activity heading, with the same values and IDs as before; the activity list keeps its items. |
+| Mark bots | `sprites.mjs` has a sprite for 14 more agents (Cursor, OpenCode, Gemini CLI, GitHub Copilot, Windsurf, Kimi Code, DeepSeek, Qwen Code, Mistral Vibe, Cline, Warp, Zed, MiniMax, Ollama): one robot body in the vendor's brand colour, with the vendor's official mark (Simple Icons path, brand hex) on its screen. Every pixel stays on the 16 x 20 grid, role props still fit, and the office draws the mark for any agent whose provider has one. Claude Code and Codex are unchanged. |
+| CTM band | A short strip at the bottom: the letters C, T and M as 5 x 7 pixel blocks, the Claude and Codex crew with their role props, and the Mark bots on the ground. It is built with `createElementNS` and CSSOM only. Clicking or pressing Enter on a crew member shows a speech bubble with its name. The letters stamp in once when the band scrolls into view, and nothing moves under `prefers-reduced-motion`. |
+| Nothing else changes | The office API, the evidence panel and the demo behave as before. No raw control or format characters, no `innerHTML` in console modules, no sideways scroll at 375 px, and every suite passes. |
+
