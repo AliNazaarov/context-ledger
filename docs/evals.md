@@ -1616,3 +1616,21 @@ Source: Ali's lookbook pick "pixel sprites at desks" (`refs/virtual-office.png`)
 | Logo and favicon | The header shows the CTM logo instead of the "CTM" text, and the page has a favicon. Until Ali sends the logo file, both are the Pip SVG, marked as a placeholder. The new static path is on the server's fixed list. |
 | Budget and phone | Added assets stay under 300 KB; at 375 px there is no sideways scroll. |
 | Screenshots | `docs/console/` gets the empty, mid-run, finished (`/console/?demo`) and phone views. |
+
+### U4b results (2026-11-19, macOS)
+
+- **Preview approved** by Ali on 2026-11-19 after three rounds: his Codex character, role props, and the mood of his isometric reference on the top-down layout (`docs/console/preview/approved-*.png`).
+- **Furnished rooms, seated, beside and lounge: pass.** Unit tests check every seat, beside-desk spot and lounge spot against the work area and lounge bounds. An e2e test drives every state and role in both rooms, and checks the spots, layers, lit monitors, state words and `aria-label`s. Screenshot `07-office-states.png`.
+- **Same API and limits: pass.** The e2e test checks that desks stay put when others leave, that a seventh and eighth Codex agent show "+2", that removed agents leave no label behind, and that the existing demo, live and pulse tests still pass.
+- **Roles: pass.** Unit tests cover the role words, whole words only, and `constructor` and `__proto__`.
+- **CSP-safe and read-only, colours, budget and phone: pass.** No style attribute inside an agent. Every request is a GET. `office.css` keeps only the two Claude colours. The added assets are about 36 KB. At 375 px there is no sideways scroll.
+- **Logo and favicon: pass, with a placeholder.** `/console/logo.svg` serves Pip byte for byte. The CSP gained `img-src 'self'`, and the pinned header test is updated. A human should check this change.
+- **Independent review** (Claude Sonnet as `code-reviewer`, read-only). It found no high-severity issues, two medium and three low. The fixes:
+  - (medium) An agent jumped instead of walking when it changed layer between desk and lounge. It now moves to the new layer first, then animates. The e2e test checks for a running transform transition and fails on the old code.
+  - (medium) Role words matched inside other words, so "codex" and "claude-code" got a hard hat. Roles now match whole words only, with regression cases in the unit table.
+  - (low) A second `createOffice` on the same SVG left the old `ResizeObserver` running. It is now disconnected.
+  - (low) No test covered `update()` over time. The e2e test above now does.
+- **Suites (macOS, Node 26):**
+  - node: 252/253. The one failure is `malformed transport input…` in `tests/mcp.test.mjs`, the known failure on every branch.
+  - Playwright: 22/22.
+  - `npm run -s test:graph` passes.

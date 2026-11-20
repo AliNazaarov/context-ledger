@@ -182,7 +182,9 @@ test('card U4b: idle agents stand in the lounge, each on their own spot', () => 
 });
 
 test('card U4b: role words pick an accessory, and an unknown label gets none', () => {
-  const cases = { 'planner': 'planner', 'code-review': 'reviewer', 'qa-tests': 'tester', 'refactor': 'builder', 'docs': 'writer', 'triage': 'scout', 'Leo': '', '': '', 'constructor': '', '__proto__': '' };
+  const cases = { 'planner': 'planner', 'code-review': 'reviewer', 'qa-tests': 'tester', 'refactor': 'builder', 'docs': 'writer', 'triage': 'scout', 'Leo': '', '': '', 'constructor': '', '__proto__': '',
+    // Whole words only (review of U4b): provider names and words that merely contain a role word.
+    'codex': '', 'claude-code': '', 'inspector': '', 'docker': '', 'prefix': '', 'device': '', 'Codex reviewer': 'reviewer' };
   for (const [label, role] of Object.entries(cases)) assert.equal(roleOf(label), role, label);
   assert.equal(roleOf(undefined), '');
   for (const provider of ['claude', 'codex', 'bot']) {
