@@ -366,6 +366,10 @@ test('card U6: the pixel console loads its local fonts, shows counters instead o
   await page.locator('.band-char[data-provider="codex"][data-role="planner"]').focus();
   await page.keyboard.press('Enter');
   await expect(page.locator('.band-bubble text')).toHaveText('CODEX · PLANNER');
+  await expect(page.locator('#band-said')).toHaveText('Codex · planner');
+  await page.locator('.band-char[data-provider="kimi"]').focus();
+  await page.keyboard.press(' ');
+  await expect(page.locator('#band-said')).toHaveText('Kimi Code');
   await band.screenshot({ path: `${shotsDir}/08-ctm-band.png` });
 
   expect([...hosts]).toEqual([new URL(page.url()).host]);
@@ -402,4 +406,25 @@ test('card U6: activity sits under the evidence, and both panels switch off and 
   await expect(evidenceButton).toHaveAttribute('aria-pressed', 'true');
   await activityButton.click();
   await expect(feed).toBeVisible();
+});
+
+test('card U6: bad or blocked panel storage keeps both panels on, and a phone crops the band', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('ctm-console-panels', '"x"'));
+  await page.goto('/console/?demo&autoplay=0');
+  await expect(page.locator('#evidence')).toBeVisible();
+  await expect(page.locator('#feed')).toBeVisible();
+  for (const name of ['evidence', 'feed']) await expect(page.locator(`button[data-panel="${name}"]`)).toHaveAttribute('aria-controls', name);
+
+  const blocked = await page.context().newPage();
+  await blocked.addInitScript(() => {
+    Object.defineProperty(window, 'localStorage', { get() { throw new Error('blocked'); } });
+  });
+  await blocked.setViewportSize({ width: 390, height: 844 });
+  await blocked.goto('/console/?demo&autoplay=0');
+  await expect(blocked.locator('#feed')).toBeVisible();
+  await blocked.getByRole('button', { name: 'Activity', exact: true }).click();
+  await expect(blocked.locator('#feed')).toBeHidden();
+  const width = Number((await blocked.locator('svg#band').getAttribute('viewBox')).split(' ')[2]);
+  expect(width, 'the narrow band crops to the word and its nearest crew').toBeLessThan(1100);
+  expect(await blocked.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
