@@ -13,6 +13,7 @@ import { ROLES, accessoryPixels, roleOf, spriteKey, spritePixels } from '../publ
 import { DESKS, LOUNGE, WORK_AREA, besideDesk, loungeSpot, seatAt } from '../public/console/office-furniture.mjs';
 import { spotFor } from '../public/console/office.mjs';
 import { visibleText as serverVisibleText } from '../src/text.mjs';
+import { bearer, ledgerToken } from './ledger-auth.mjs';
 
 // Card U1: the console's demo recording, its state model and how the server serves it.
 // Synthetic data only: the recording is built from the committed Orbit demo transcripts.
@@ -259,9 +260,9 @@ test('console files stay light and never parse transcript text as HTML', async (
   assert.ok(total < 300 * 1024, `console files are ${total} bytes`);
 });
 
-function raw(port, { method = 'GET', path }) {
+function raw(port, { method = 'GET', path, headers = {} }) {
   return new Promise((resolve, reject) => {
-    const request = httpRequest({ host: '127.0.0.1', port, method, path, headers: { Host: `127.0.0.1:${port}` }, agent: false }, response => {
+    const request = httpRequest({ host: '127.0.0.1', port, method, path, headers: { Host: `127.0.0.1:${port}`, ...headers }, agent: false }, response => {
       const chunks = [];
       response.on('data', chunk => chunks.push(chunk));
       response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks).toString('utf8') }));
@@ -298,16 +299,12 @@ test('the server serves exactly the console files, read-only, with the usual hea
   assert.equal(logo.headers['content-type'], 'image/svg+xml; charset=utf-8');
   assert.equal(logo.body, await readFile(new URL('../docs/brand/ctm-logo.svg', import.meta.url), 'utf8'));
   assert.match(logo.headers['content-security-policy'], /img-src 'self'/u);
-  assert.equal((await raw(port, { path: '/console/pip.svg' })).status, 404);
 
   // Card U4: the brand tokens are served from their one source, docs/brand/tokens.css.
   const tokens = await raw(port, { path: '/console/tokens.css' });
   assert.equal(tokens.status, 200);
   assert.equal(tokens.headers['content-type'], 'text/css; charset=utf-8');
   assert.equal(tokens.body, await readFile(new URL('../docs/brand/tokens.css', import.meta.url), 'utf8'));
-  for (const path of ['/console/brand.md', '/console/../docs/brand/tokens.css', '/docs/brand/tokens.css']) {
-    assert.equal((await raw(port, { path })).status, 404, path);
-  }
 
   const files = await readdir(consoleDir);
   const types = { '.html': 'text/html', '.css': 'text/css', '.mjs': 'text/javascript', '.json': 'application/json' };
@@ -323,7 +320,10 @@ test('the server serves exactly the console files, read-only, with the usual hea
     assert.equal((await raw(port, { method: 'POST', path })).status, 404, `POST ${path}`);
   }
   assert.equal((await raw(port, { path: '/console' })).status, 200);
-  for (const path of ['/console/index.html', '/console/nope.mjs', '/console/console.mjs/', '/console/%2e%2e/src/server.mjs', '/public/console/console.mjs']) {
-    assert.equal((await raw(port, { path })).status, 404, path);
+  // P1e: only the listed files are open; any other path needs the token, and then is 404.
+  const auth = bearer(await ledgerToken(join(directory, 'ledger.sqlite'), port));
+  for (const path of ['/console/pip.svg', '/console/brand.md', '/console/../docs/brand/tokens.css', '/docs/brand/tokens.css', '/console/index.html', '/console/nope.mjs', '/console/console.mjs/', '/console/%2e%2e/src/server.mjs', '/public/console/console.mjs']) {
+    assert.equal((await raw(port, { path })).status, 401, path);
+    assert.equal((await raw(port, { path, headers: auth })).status, 404, path);
   }
 });

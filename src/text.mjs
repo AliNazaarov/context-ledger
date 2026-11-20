@@ -17,10 +17,10 @@ export function visibleText(text) {
 }
 
 // A single-line variant for labels: line breaks and tabs are escaped too.
-// A strict one-line variant for short labels such as agent paths (card I3): every
-// control, format and line-separator character is escaped, ZWNJ and ZWJ included.
-export function labelText(text) {
-  return text.replace(/\r\n/g, '\n').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, escapeCodeUnits);
+// A strict one-line variant for error lines: every control, format and line-separator
+// character is escaped, ZWNJ and ZWJ included (card I1).
+export function terminalLine(text) {
+  return text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, escapeCodeUnits);
 }
 
 export function inlineText(text) {
