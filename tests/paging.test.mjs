@@ -566,6 +566,8 @@ test('review round 3: required arguments are those of 19f6522, and every new pag
     session_search: [], session_read: ['sessionId'], graph_schema: [], graph_publish: ['packet'], graph_read: ['graphId'],
     context_for: ['graphId'], room_open: ['graphIds'], room_read: ['roomId'], latent_read: ['paths', 'question'],
     latent_transfer: ['sender', 'receiver', 'question'], latent_team: ['question'], graph_list: [], room_list: [],
+    // Card G11: a new tool, so its required arguments are new too.
+    graph_diff: ['graphId', 'fromGraphId'],
   });
 });
 
