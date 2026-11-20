@@ -329,3 +329,77 @@ test('card U4b: working agents sit at a lit desk, waiting ones stand beside it, 
   });
   expect(writes()).toEqual([]);
 });
+
+test('card U6: the pixel console loads its local fonts, shows counters instead of tiles, and the CTM band crew talks', async ({ page }) => {
+  await mkdir(shotsDir, { recursive: true });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const writes = watchRequests(page);
+  const hosts = new Set();
+  page.on('request', request => hosts.add(new URL(request.url()).host));
+  await page.goto('/console/?demo&speed=8');
+  await expect(page.locator('body')).toHaveAttribute('data-demo', 'finished', { timeout: 15_000 });
+  await page.evaluate(() => document.fonts.ready);
+  for (const face of ['16px "Jersey 15"', '16px "Inter Tight"', '10px "Silkscreen"']) {
+    expect(await page.evaluate(font => document.fonts.check(font), face), face).toBe(true);
+  }
+  expect(await page.locator('h1').evaluate(h => getComputedStyle(h).fontFamily)).toContain('Jersey 15');
+  expect(await page.locator('.activity li').first().evaluate(li => getComputedStyle(li).fontFamily)).toContain('Inter Tight');
+  await expect(page.locator('html')).not.toHaveClass(/ctm-dark/u);
+
+  await expect(page.locator('.numbers, .tile')).toHaveCount(0);
+  await expect(page.locator('.counters #n-handoffs')).toHaveText('6');
+  await expect(page.locator('.activity li').first()).toBeVisible();
+
+  const band = page.locator('section.band');
+  await band.scrollIntoViewIfNeeded();
+  await expect(band).toHaveClass(/play/u);
+  await page.waitForFunction(() => document.getAnimations().every(a => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity));
+  const ask = await page.locator('.band-ask').boundingBox();
+  const strip = await page.locator('svg#band').boundingBox();
+  expect(ask.y, 'the reviewer question box stays inside the band').toBeGreaterThanOrEqual(strip.y);
+  await expect(page.locator('.band-letter')).toHaveCount(3);
+  await expect(page.locator('.band-char')).toHaveCount(20);
+  await expect(page.locator('.band-char[data-provider="claude"][data-role="builder"]')).toHaveCount(1);
+  await expect(page.locator('.band-char[data-provider="kimi"] path')).not.toHaveCount(0);
+  await page.locator('.band-char[data-provider="cursor"]').click();
+  await expect(page.locator('.band-bubble text')).toHaveText('CURSOR');
+  await page.locator('.band-char[data-provider="codex"][data-role="planner"]').focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.band-bubble text')).toHaveText('CODEX · PLANNER');
+  await band.screenshot({ path: `${shotsDir}/08-ctm-band.png` });
+
+  expect([...hosts]).toEqual([new URL(page.url()).host]);
+  expect(writes()).toEqual([]);
+});
+
+test('card U6: activity sits under the evidence, and both panels switch off and on', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/console/?demo&speed=8');
+  await expect(page.locator('body')).toHaveAttribute('data-demo', 'finished', { timeout: 15_000 });
+  const evidence = page.locator('#evidence');
+  const feed = page.locator('#feed');
+  const below = (await feed.boundingBox()).y - (await evidence.boundingBox()).y;
+  expect(below, 'activity is below the evidence').toBeGreaterThan(0);
+  expect(Math.abs((await feed.boundingBox()).x - (await evidence.boundingBox()).x)).toBeLessThan(2);
+
+  const evidenceButton = page.getByRole('button', { name: 'Evidence', exact: true });
+  const activityButton = page.getByRole('button', { name: 'Activity', exact: true });
+  await activityButton.click();
+  await expect(activityButton).toHaveAttribute('aria-pressed', 'false');
+  await expect(feed).toBeHidden();
+  await evidenceButton.click();
+  await expect(evidence).toBeHidden();
+  const wide = await page.locator('#brain').boundingBox();
+  expect(wide.width, 'the graph takes the full width with both panels off').toBeGreaterThan(1200);
+  await page.waitForFunction(() => document.querySelector('#flash-layer').childElementCount === 0);
+  await page.screenshot({ path: `${shotsDir}/09-panels-off.png` });
+
+  await page.reload();
+  await expect(page.locator('body')).toHaveAttribute('data-demo', 'finished', { timeout: 15_000 });
+  await expect(feed).toBeHidden();
+  await page.locator('#brain .node').first().click();
+  await expect(evidence).toBeVisible();
+  await expect(evidenceButton).toHaveAttribute('aria-pressed', 'true');
+  await activityButton.click();
+  await expect(feed).toBeVisible();
+});
