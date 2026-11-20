@@ -9,7 +9,9 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { buildRecording, recordingText } from '../demo/console-recording.mjs';
 import { createModel, evidenceTurns, nodeMark, partyKey, turnSpeaker, visibleText } from '../public/console/model.mjs';
-import { spriteKey, spritePixels } from '../public/console/sprites.mjs';
+import { ROLES, accessoryPixels, roleOf, spriteKey, spritePixels } from '../public/console/sprites.mjs';
+import { DESKS, LOUNGE, WORK_AREA, besideDesk, loungeSpot, seatAt } from '../public/console/office-furniture.mjs';
+import { spotFor } from '../public/console/office.mjs';
 import { visibleText as serverVisibleText } from '../src/text.mjs';
 
 // Card U1: the console's demo recording, its state model and how the server serves it.
@@ -149,6 +151,55 @@ test('card U4: each source has its pixel sprite on the 16 x 20 grid, and others 
   assert.notDeepEqual(spritePixels('claude'), spritePixels('codex'));
 });
 
+const inside = ([x, y], [left, top, right, bottom], half = 16) => x - half >= left && x + half <= right && y <= bottom && y - 40 >= top;
+
+test('card U4b: a working agent sits behind its own desk, one desk per seat', () => {
+  const seats = Array.from({ length: DESKS }, (_, i) => seatAt(i));
+  assert.equal(new Set(seats.map(String)).size, DESKS);
+  assert.deepEqual(seats, [[52, 114], [140, 114], [228, 114], [52, 220], [140, 220], [228, 220]]);
+  // The desk top starts 14 units above the feet, so the desk hides the legs and the face shows.
+  for (const seat of seats) assert.ok(inside(seat, WORK_AREA), String(seat));
+  assert.deepEqual(spotFor('working', 4, 0), seatAt(4));
+});
+
+test('card U4b: a waiting agent stands beside its desk, clear of the next desk and inside the work area', () => {
+  for (let i = 0; i < DESKS; i += 1) {
+    const [x, y] = besideDesk(i);
+    const [seatX, seatY] = seatAt(i);
+    assert.equal(y, seatY + 11);
+    // Desks are 56 wide on an 88-unit pitch: a 32-wide sprite at +46 clears this desk and the next.
+    assert.ok(x - 16 >= seatX + 28 - 2 && x + 16 <= seatX + 88 - 28 + 2, `desk ${i}`);
+    assert.ok(inside([x, y], WORK_AREA), `desk ${i}`);
+  }
+  assert.deepEqual(spotFor('waiting', 2, 0), besideDesk(2));
+});
+
+test('card U4b: idle agents stand in the lounge, each on their own spot', () => {
+  const spots = Array.from({ length: DESKS }, (_, j) => loungeSpot(j));
+  assert.equal(new Set(spots.map(String)).size, DESKS);
+  for (const spot of spots) assert.ok(inside(spot, LOUNGE), String(spot));
+  assert.deepEqual(spotFor('idle', 5, 1), loungeSpot(1));
+});
+
+test('card U4b: role words pick an accessory, and an unknown label gets none', () => {
+  const cases = { 'planner': 'planner', 'code-review': 'reviewer', 'qa-tests': 'tester', 'refactor': 'builder', 'docs': 'writer', 'triage': 'scout', 'Leo': '', '': '', 'constructor': '', '__proto__': '' };
+  for (const [label, role] of Object.entries(cases)) assert.equal(roleOf(label), role, label);
+  assert.equal(roleOf(undefined), '');
+  for (const provider of ['claude', 'codex', 'bot']) {
+    assert.deepEqual(accessoryPixels(provider, ''), []);
+    assert.deepEqual(accessoryPixels(provider, 'constructor'), []);
+    for (const role of ROLES) {
+      const pixels = accessoryPixels(provider, role);
+      assert.ok(pixels.length > 0, `${provider} ${role}`);
+      // A hat may rise above the 16 x 20 grid; nothing reaches further than the room allows.
+      for (const [x, y, width, height, fill] of pixels) {
+        assert.ok(x >= -2 && y >= -4 && x + width <= 18 && y + height <= 20 && width > 0 && height > 0, `${provider} ${role} ${x},${y}`);
+        assert.match(fill, /^#[0-9a-f]{6}$/iu);
+      }
+    }
+  }
+});
+
 test('card U4: every brand variable the console uses is defined in docs/brand/tokens.css', async () => {
   const tokens = await readFile(new URL('../docs/brand/tokens.css', import.meta.url), 'utf8');
   const defined = new Set([...tokens.matchAll(/(--ctm-[\w-]+)\s*:/gu)].map(match => match[1]));
@@ -238,6 +289,14 @@ test('the server serves exactly the console files, read-only, with the usual hea
     port = Number(output.match(/listening at http:\/\/127\.0\.0\.1:(\d+)/)?.[1]);
     if (port) break;
   }
+
+  // Card U4b: the logo (Pip as a placeholder) is served from docs/brand, and the page may load it.
+  const logo = await raw(port, { path: '/console/logo.svg' });
+  assert.equal(logo.status, 200);
+  assert.equal(logo.headers['content-type'], 'image/svg+xml; charset=utf-8');
+  assert.equal(logo.body, await readFile(new URL('../docs/brand/pip.svg', import.meta.url), 'utf8'));
+  assert.match(logo.headers['content-security-policy'], /img-src 'self'/u);
+  assert.equal((await raw(port, { path: '/console/pip.svg' })).status, 404);
 
   // Card U4: the brand tokens are served from their one source, docs/brand/tokens.css.
   const tokens = await raw(port, { path: '/console/tokens.css' });

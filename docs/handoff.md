@@ -311,3 +311,15 @@ Next steps:
 1. Merge order: U1, G7, U2 and I3 first; then rebase this branch on `main` and rebuild the recording (`node demo/console-recording.mjs`).
 2. `malformed transport input is answered without stopping the server` in `tests/mcp.test.mjs` fails on macOS with Node 26, on this branch and on `ruslan/console-v0` alike. Not checked on Node 22.
 3. P3 (reviewer prototype) is next, stacked on this branch: approve, edit or reject beside the evidence, with the decisions kept in the browser only.
+
+## Current checkpoint — U4b furnished pixel office (2026-11-19)
+
+Branch `ali/u4b-pixel-office`, stacked on U4 (#51). Ali approved the preview on 2026-11-19 (`docs/console/preview/approved-*.png`).
+
+- `public/console/office-furniture.mjs` draws one top-down room (desks, shelves, plants, windows and daylight, lamps, whiteboard, kitchen, lounge) and exports the agent spots: `seatAt`, `besideDesk`, `loungeSpot`.
+- `public/console/office.mjs` keeps `createOffice(svg)` → `{update, anchor, pulse}`, 6 per room and the `RANK` order. Each agent keeps its desk while shown; working agents sit behind it (monitor lit), waiting ones stand beside it, idle ones go to the lounge.
+- `public/console/sprites.mjs`: Ali's blue cloud Codex character, and `roleOf` plus `accessoryPixels` for six role props.
+- Office colours are `--ctm-office-*` tokens in `docs/brand/tokens.css`.
+- Logo: `/console/logo.svg` serves `docs/brand/pip.svg` as a placeholder, also used as the favicon. The CSP gained `img-src 'self'` for it; a human should check that change.
+
+Next: swap `logo.svg` for the real CTM logo when Ali sends it (one line in `src/server.mjs`), and swap the vendor sprites for the neutral bot before anything public.
