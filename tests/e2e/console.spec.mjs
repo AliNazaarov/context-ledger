@@ -440,3 +440,27 @@ test('office agents appear at their spot instead of sliding in from the room cor
   expect(start, 'a new agent is already at its spot on its first frame').toBe(soon);
   expect(start).not.toBe('none');
 });
+
+test('card U6: live activity shows today\'s earlier hand-offs as soon as the page opens', async ({ page, request, baseURL }) => {
+  const marker = `console-u6-${Date.now()}`;
+  const transcript = JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `For ${marker}, ship the band.` }] } });
+  const imported = await request.post('/api/import', { headers: { origin: baseURL }, data: { provider: 'codex', source: `${marker}.jsonl`, transcript } });
+  expect(imported.ok(), await imported.text()).toBe(true);
+  const { session } = await imported.json();
+  const party = `u6-${Date.now().toString(36)}`;
+  const published = await request.post('/api/graphs', {
+    headers: { origin: baseURL },
+    data: { version: 2, sessionId: session.id, party, edges: [], nodes: [{ id: 'band', kind: 'goal', label: 'Ship the band', evidenceLines: [1] }] },
+  });
+  expect(published.ok(), await published.text()).toBe(true);
+  const { graph } = await published.json();
+
+  await page.goto('/console/');
+  await expect(page.locator('#status')).toContainText('Live: watching the ledger');
+  const entry = page.locator('#activity li', { hasText: `${party} (Codex) published: 1 new` });
+  await expect(entry).toHaveCount(1);
+  const shown = Date.parse(await entry.locator('time').getAttribute('datetime'));
+  expect(Math.abs(shown - Date.parse(graph.createdAt ?? new Date().toISOString())), 'the entry carries the publish time, not the page load time').toBeLessThan(5_000);
+  const times = await page.locator('#activity li').evaluateAll(items => items.map(item => Number(item.dataset.at)));
+  expect(times, 'newest first').toEqual([...times].sort((a, b) => b - a));
+});
