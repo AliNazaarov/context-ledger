@@ -428,3 +428,15 @@ test('card U6: bad or blocked panel storage keeps both panels on, and a phone cr
   expect(width, 'the narrow band crops to the word and its nearest crew').toBeLessThan(1100);
   expect(await blocked.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
+
+test('office agents appear at their spot instead of sliding in from the room corner', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto('/console/?demo&speed=8');
+  const agent = page.locator('#office .office-agent').first();
+  await agent.waitFor();
+  const start = await agent.evaluate(g => getComputedStyle(g).transform);
+  await page.waitForTimeout(80);
+  const soon = await agent.evaluate(g => getComputedStyle(g).transform);
+  expect(start, 'a new agent is already at its spot on its first frame').toBe(soon);
+  expect(start).not.toBe('none');
+});
