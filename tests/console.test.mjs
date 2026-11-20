@@ -292,11 +292,11 @@ test('the server serves exactly the console files, read-only, with the usual hea
     if (port) break;
   }
 
-  // Card U4b: the logo (Pip as a placeholder) is served from docs/brand, and the page may load it.
+  // Card U4b: the CTM logo is served from docs/brand, and the page may load it.
   const logo = await raw(port, { path: '/console/logo.svg' });
   assert.equal(logo.status, 200);
   assert.equal(logo.headers['content-type'], 'image/svg+xml; charset=utf-8');
-  assert.equal(logo.body, await readFile(new URL('../docs/brand/pip.svg', import.meta.url), 'utf8'));
+  assert.equal(logo.body, await readFile(new URL('../docs/brand/ctm-logo.svg', import.meta.url), 'utf8'));
   assert.match(logo.headers['content-security-policy'], /img-src 'self'/u);
   assert.equal((await raw(port, { path: '/console/pip.svg' })).status, 404);
 
