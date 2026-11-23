@@ -3766,3 +3766,33 @@ Source: issue #48 and Ali's choices (2026-11-18): the vendor pixel sprites inste
   - (low) The laptop hid the sprite's face. It sits lower now.
   - (low) A JSDoc comment was in the wrong place after the move. It is fixed.
 - **Suites (macOS, Node 26):** node 248/249. The one failure is `malformed transport input…` in `tests/mcp.test.mjs`, which fails the same way on `ruslan/console-v0`. Playwright 21/21. `npm run -s test:graph` passes.
+
+## P3 — Reviewer UI prototype (defined 2026-11-18, before implementation)
+
+Source: issue #48. A person can approve, edit or reject a node beside its evidence. It is a prototype: Ruslan decides what each action means (who may approve, whether an edit makes a new version, what a reject keeps), so nothing here writes to the ledger. It is shown only in the console's demo mode (`/console/?demo`), on the synthetic recording.
+
+Terms: a **review** is one person's decision on one node of one graph snapshot, keyed by graph ID and node ID. A new publish of the party is a new graph ID and so starts unreviewed. That is the simplest reading, and it is Ruslan's to change.
+
+| Eval | Expected |
+| --- | --- |
+| Demo only | In demo mode the evidence panel shows a Review block once a node is open: **Approve**, **Edit**, **Reject**, and a line saying the decision stays in this browser and is a prototype. In live mode there is no Review block and no review code runs. |
+| Approve and reject | Approve or Reject marks the node: the word "approved" or "rejected" in the node's meta and its `aria-label`, plus a class for the colour. The panel says what was decided, with an **Undo** button that clears it. A rejected node keeps its label, struck through. |
+| Edit | Edit opens a text box holding the current label. Save keeps the new text (trimmed, 1 to 300 characters, no control or format characters) as the node's shown label, with "edited" in its meta. The evidence panel shows the original label too. Cancel or an empty save changes nothing. The new label is set with `textContent`. |
+| Browser only | Reviews are kept in `localStorage` under one key, and the page still sends only GET requests. A stored value that is not valid JSON, has the wrong shape, or names an unknown decision is ignored, not thrown. If `localStorage` throws (private mode), reviewing still works for the session. |
+| Survives a replay and a reload | Reviews stay after **Replay demo** and after a page reload, because the recording's graph IDs do not change. |
+| Keyboard | Every review control is a button reachable by Tab. After a decision, focus stays in the Review block. |
+| Tests | Node tests for the store (save, undo, edit rules, bad stored data, a throwing storage). A Playwright test approves, edits and rejects three demo nodes, reloads, sees all three, undoes one, checks that live mode has no Review block, and saves a screenshot. |
+
+### P3 results (2026-11-18, macOS)
+
+- **Demo only: pass.** In demo mode the Review block appears once a node is open. Live mode has no Review block and never fetches `review.mjs`, because the demo loads it with a dynamic import.
+- **Approve and reject: pass.** The decision shows in the node's meta, its `aria-label` and its class. A rejected label is struck through. Undo clears the decision.
+- **Edit: pass.** An empty save is refused with a message. `Pair with Ali <b>tonight</b>` is kept and shown as text, with no `b` element created. The evidence heading keeps the original label.
+- **Browser only: pass.** Every request is a GET. Bad stored data, a throwing storage and `null` storage are covered by the node tests, and the e2e test covers invalid JSON in `localStorage`.
+- **Survives a replay and a reload: pass.** **Keyboard: pass.** Approve, Reject and Save move focus to Undo; Undo and Cancel move it to Edit.
+- Screenshot: [docs/console/07-review.png](console/07-review.png).
+- **Independent review** (Claude Sonnet as `ecc:code-reviewer`, read-only). One medium and two low findings, all fixed with tests:
+  - (medium) After a republish under a new graph ID with the node unchanged, the panel kept the old graph ID. It still said "approved", and a new decision was saved to the old snapshot. The panel now follows every republish. A Playwright test approves Leo's goal mid-demo and sees the review start fresh after his next publish; the test fails on the old code.
+  - (low) An open edit form lost its text when the same node was picked again. Showing the same snapshot again is now a no-op, and there is a test for it.
+  - (low) Live mode loaded `review.mjs` although none of it ran. It is now imported only in demo mode, and the live test checks that no request for it is made.
+- **Suites (macOS, Node 26):** node 253/254 (the one failure is the same `tests/mcp.test.mjs` test that fails on `ruslan/console-v0`); Playwright 26/26; `npm run -s test:graph` passes.
