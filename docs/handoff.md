@@ -453,6 +453,22 @@ Branch `ali/u4b-pixel-office`, stacked on U4 (#51). Ali approved the preview on 
 
 Next: swap the vendor sprites for the neutral bot before anything public.
 
+## Current checkpoint — P3 reviewer prototype (2026-11-18)
+
+Branch `ali/p3-reviewer`, stacked on U4 (`ali/u4-console-polish`, #51).
+
+- **What:** in `/console/?demo`, the evidence panel has a Review block: Approve, Edit (a new label, 1 to 300 visible characters) or Reject, with Undo. The node shows the decision in its meta and `aria-label`; an edit shows the new label, and the proof keeps the original as its heading.
+- **Where it lives:** `public/console/review.mjs` (the store, `withReviews`, and the panel). Reviews are in `localStorage` under `ctm-console-reviews-v0`, keyed by graph ID and node ID. Nothing is sent to the ledger, and live mode has no Review block.
+
+Decisions left to Ruslan (the prototype makes no claim on them):
+
+1. Who may approve. Today, anyone with the browser can.
+2. Whether an edit makes a new graph version, a reviewer note, or a correction the next `context_for` reads.
+3. What a reject keeps: hide the node from hand-offs, keep it with a flag, or ask the agent to republish.
+4. Whether a review carries over to the party's next publish. Today it does not, because a new publish has a new graph ID.
+
+Once those are decided and P1c lands, reviews need a server route and a table, and this store becomes a cache or goes away.
+
 ## Current checkpoint — G9 scoped context with a budget (2026-11-17)
 
 Branch `ruslan/g9-scoped-context`. `context_for` takes an optional `question` (up to 500 characters) and `budget` (50 to 100,000 estimated tokens, only with a question), and `GET /api/graphs/:id/context` takes the same two query parameters. The eval and results are in the G9 section of [the eval log](evals.md).
